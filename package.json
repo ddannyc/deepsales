@@ -8,17 +8,19 @@
     "db:migrate": "pnpm --filter @deepsales/db db:migrate",
     "deploy": "pnpm build && pnpm --filter @deepsales/worker deploy",
     "dev": "pnpm --filter @deepsales/web build && pnpm --filter @deepsales/worker dev",
-    "format": "biome format --write apps/worker/src apps/web/src packages/db/src packages/db/test e2e playwright.config.ts",
-    "format:check": "biome format apps/worker/src apps/web/src packages/db/src packages/db/test e2e playwright.config.ts",
-    "lint": "biome lint apps/worker/src apps/web/src packages/db/src packages/db/test e2e playwright.config.ts",
+    "format": "biome format --write apps/worker/src apps/web/src packages/db/src packages/db/test e2e scripts/run-e2e.ts playwright.config.ts",
+    "format:check": "biome format apps/worker/src apps/web/src packages/db/src packages/db/test e2e scripts/run-e2e.ts playwright.config.ts",
+    "lint": "biome lint apps/worker/src apps/web/src packages/db/src packages/db/test e2e scripts/run-e2e.ts playwright.config.ts",
     "test": "pnpm -r --if-present test:unit",
-    "test:e2e": "playwright test",
+    "test:e2e": "tsx scripts/run-e2e.ts",
     "test:integration": "pnpm --filter @deepsales/db test:integration",
     "typecheck": "pnpm -r --if-present typecheck"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.13",
     "@playwright/test": "^1.63.0",
+    "pg": "8.23.0",
+    "tsx": "4.23.13",
     "wrangler": "^4.131.1"
   }
 }

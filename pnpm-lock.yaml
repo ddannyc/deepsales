@@ -14,6 +14,12 @@ importers:
       '@playwright/test':
         specifier: ^1.63.0
         version: 1.63.0
+      pg:
+        specifier: 8.23.0
+        version: 8.23.0
+      tsx:
+        specifier: 4.23.13
+        version: 4.23.13
       wrangler:
         specifier: ^4.131.1
         version: 4.131.1(@cloudflare/workers-types@5.20260911.1)(@types/node@22.20.2)

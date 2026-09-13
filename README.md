@@ -27,9 +27,13 @@ pnpm lint
 pnpm format:check
 pnpm test
 pnpm test:integration # requires DATABASE_URL; skips when absent
-$env:E2E_BASE_URL = 'http://127.0.0.1:8787'
-pnpm test:e2e          # requires a migrated running app; skips when E2E_BASE_URL is absent
+$env:E2E_DATABASE_URL = 'postgresql://user:password@localhost:5432/deepsales_e2e'
+pnpm test:e2e          # resets/migrates the E2E database and owns the Worker lifecycle
 ```
+
+`pnpm test:e2e` only needs `E2E_DATABASE_URL`; its database name must end in
+`_e2e` or `-e2e`. The runner injects test-only Worker settings and never uses
+the application `DATABASE_URL`.
 
 ## Deploy
 
