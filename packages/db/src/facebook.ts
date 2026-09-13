@@ -1,4 +1,4 @@
-import { and, asc, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, gt, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import { channel, facebookChannelConfig, facebookOauthState, workspaceUserAccess } from './schema'
 
@@ -302,6 +302,81 @@ export async function connectFacebookPages(
   })
 }
 
+export async function assertFacebookPagesAvailable(
+  db: Database,
+  input: { workspaceId: string; actingUserId: string; pageIds: string[] },
+) {
+  const pageIds = [...new Set(input.pageIds)].sort()
+  if (!pageIds.length) throw new FacebookError('INVALID_REQUEST', 'Select at least one Page')
+
+  await db.transaction(async (tx) => {
+    await assertFacebookManager(tx, input.workspaceId, input.actingUserId)
+    for (const pageId of pageIds) {
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${pageId}, 0))`)
+      const [existing] = await tx
+        .select({ workspaceId: channel.workspaceId })
+        .from(facebookChannelConfig)
+        .innerJoin(channel, eq(channel.id, facebookChannelConfig.channelId))
+        .where(eq(facebookChannelConfig.pageId, pageId))
+        .limit(1)
+      if (existing && existing.workspaceId !== input.workspaceId) {
+        throw new FacebookError(
+          'FACEBOOK_PAGE_ALREADY_CONNECTED',
+          'This Facebook Page is already connected',
+        )
+      }
+    }
+  })
+}
+
+export type FacebookChannelCursor = { displayName: string; id: string }
+
+export async function listFacebookChannelsPage(
+  db: Database,
+  workspaceId: string,
+  userId: string,
+  input: { after?: FacebookChannelCursor; limit?: number } = {},
+) {
+  await assertFacebookManagerOrMember(db, workspaceId, userId)
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 100)
+  const rows = await db
+    .select({
+      id: channel.id,
+      pageId: facebookChannelConfig.pageId,
+      displayName: channel.displayName,
+      provider: channel.provider,
+      status: channel.status,
+      connectionStatus: facebookChannelConfig.connectionStatus,
+      subscribedAt: facebookChannelConfig.subscribedAt,
+      lastCheckedAt: facebookChannelConfig.lastCheckedAt,
+      lastErrorCode: facebookChannelConfig.lastErrorCode,
+      lastErrorSubcode: facebookChannelConfig.lastErrorSubcode,
+      lastErrorMessage: facebookChannelConfig.lastErrorMessage,
+    })
+    .from(channel)
+    .innerJoin(facebookChannelConfig, eq(facebookChannelConfig.channelId, channel.id))
+    .where(
+      input.after
+        ? and(
+            eq(channel.workspaceId, workspaceId),
+            or(
+              gt(channel.displayName, input.after.displayName),
+              and(eq(channel.displayName, input.after.displayName), gt(channel.id, input.after.id)),
+            ),
+          )
+        : eq(channel.workspaceId, workspaceId),
+    )
+    .orderBy(asc(channel.displayName), asc(channel.id))
+    .limit(limit + 1)
+  const hasNext = rows.length > limit
+  const channels = rows.slice(0, limit)
+  const last = channels.at(-1)
+  return {
+    channels,
+    nextCursor: hasNext && last ? { displayName: last.displayName, id: last.id } : null,
+  }
+}
+
 export async function listFacebookChannels(db: Database, workspaceId: string, userId: string) {
   await assertFacebookManagerOrMember(db, workspaceId, userId)
   return db
@@ -357,30 +432,32 @@ export async function markFacebookChannelHealth(
     error?: { code: string; subcode?: number | null; message: string }
   },
 ) {
-  await assertFacebookManagerOrMember(db, input.workspaceId, input.userId, true)
-  const [channelInWorkspace] = await db
-    .select({ id: channel.id })
-    .from(channel)
-    .where(and(eq(channel.id, input.channelId), eq(channel.workspaceId, input.workspaceId)))
-    .limit(1)
-  if (!channelInWorkspace) throw new FacebookError('NOT_FOUND', 'Facebook channel not found')
+  return db.transaction(async (tx) => {
+    await assertFacebookManager(tx, input.workspaceId, input.userId)
+    const [channelInWorkspace] = await tx
+      .select({ id: channel.id })
+      .from(channel)
+      .where(and(eq(channel.id, input.channelId), eq(channel.workspaceId, input.workspaceId)))
+      .limit(1)
+    if (!channelInWorkspace) throw new FacebookError('NOT_FOUND', 'Facebook channel not found')
 
-  const [updated] = await db
-    .update(facebookChannelConfig)
-    .set({
-      connectionStatus: input.active ? 'ACTIVE' : 'ACTION_REQUIRED',
-      lastCheckedAt: new Date(),
-      lastErrorCode: input.active ? null : (input.error?.code ?? 'FACEBOOK_CHECK_FAILED'),
-      lastErrorSubcode: input.active ? null : (input.error?.subcode ?? null),
-      lastErrorMessage: input.active
-        ? null
-        : (input.error?.message ?? 'Facebook connection needs attention'),
-      updatedAt: new Date(),
-    })
-    .where(eq(facebookChannelConfig.channelId, channelInWorkspace.id))
-    .returning({ channelId: facebookChannelConfig.channelId })
-  if (!updated) throw new FacebookError('NOT_FOUND', 'Facebook channel not found')
-  return updated
+    const [updated] = await tx
+      .update(facebookChannelConfig)
+      .set({
+        connectionStatus: input.active ? 'ACTIVE' : 'ACTION_REQUIRED',
+        lastCheckedAt: new Date(),
+        lastErrorCode: input.active ? null : (input.error?.code ?? 'FACEBOOK_CHECK_FAILED'),
+        lastErrorSubcode: input.active ? null : (input.error?.subcode ?? null),
+        lastErrorMessage: input.active
+          ? null
+          : (input.error?.message ?? 'Facebook connection needs attention'),
+        updatedAt: new Date(),
+      })
+      .where(eq(facebookChannelConfig.channelId, channelInWorkspace.id))
+      .returning({ channelId: facebookChannelConfig.channelId })
+    if (!updated) throw new FacebookError('NOT_FOUND', 'Facebook channel not found')
+    return updated
+  })
 }
 
 export async function disableFacebookChannel(

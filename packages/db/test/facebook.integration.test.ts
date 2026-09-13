@@ -31,6 +31,7 @@ describe.skipIf(!connectionString)('Facebook channel persistence', () => {
   it('allows one workspace to own a Page under concurrent connection attempts', async () => {
     const firstUserId = randomUUID()
     const secondUserId = randomUUID()
+    const sharedPageId = randomUUID()
     await db.insert(user).values([
       { id: firstUserId, name: 'First owner', email: `${firstUserId}@example.com` },
       { id: secondUserId, name: 'Second owner', email: `${secondUserId}@example.com` },
@@ -44,12 +45,12 @@ describe.skipIf(!connectionString)('Facebook channel persistence', () => {
       connectFacebookPages(db, {
         workspaceId: firstWorkspace.id,
         actingUserId: firstUserId,
-        pages: [page('Shared Page')],
+        pages: [page('Shared Page', sharedPageId)],
       }),
       connectFacebookPages(db, {
         workspaceId: secondWorkspace.id,
         actingUserId: secondUserId,
-        pages: [page('Shared Page')],
+        pages: [page('Shared Page', sharedPageId)],
       }),
     ])
 
@@ -59,12 +60,13 @@ describe.skipIf(!connectionString)('Facebook channel persistence', () => {
       .select({ pageId: facebookChannelConfig.pageId, workspaceId: channel.workspaceId })
       .from(facebookChannelConfig)
       .innerJoin(channel, eq(channel.id, facebookChannelConfig.channelId))
-      .where(eq(facebookChannelConfig.pageId, 'page-shared'))
+      .where(eq(facebookChannelConfig.pageId, sharedPageId))
     expect(configs).toHaveLength(1)
   })
 
   it('reconnects a Page in place and consumes OAuth state once', async () => {
     const ownerId = randomUUID()
+    const pageId = randomUUID()
     await db.insert(user).values({ id: ownerId, name: 'Owner', email: `${ownerId}@example.com` })
     const workspace = await bootstrapWorkspace(db, {
       userId: ownerId,
@@ -74,9 +76,9 @@ describe.skipIf(!connectionString)('Facebook channel persistence', () => {
     const first = await connectFacebookPages(db, {
       workspaceId: workspace.id,
       actingUserId: ownerId,
-      pages: [page('Before')],
+      pages: [page('Before', pageId)],
     })
-    await expect(findActiveFacebookPage(db, 'page-shared')).resolves.toEqual(
+    await expect(findActiveFacebookPage(db, pageId)).resolves.toEqual(
       expect.objectContaining({ channelId: first[0]?.id }),
     )
     await disableFacebookChannel(db, {
@@ -88,7 +90,7 @@ describe.skipIf(!connectionString)('Facebook channel persistence', () => {
     const second = await connectFacebookPages(db, {
       workspaceId: workspace.id,
       actingUserId: ownerId,
-      pages: [{ ...page('After'), encryptedPageAccessToken: 'cipher-2' }],
+      pages: [{ ...page('After', pageId), encryptedPageAccessToken: 'cipher-2' }],
     })
     expect(second[0]?.id).toBe(first[0]?.id)
     expect(
@@ -110,9 +112,9 @@ describe.skipIf(!connectionString)('Facebook channel persistence', () => {
   })
 })
 
-function page(displayName: string) {
+function page(displayName: string, pageId = 'page-shared') {
   return {
-    pageId: 'page-shared',
+    pageId,
     displayName,
     encryptedPageAccessToken: 'cipher-1',
     tokenIv: 'iv-1',

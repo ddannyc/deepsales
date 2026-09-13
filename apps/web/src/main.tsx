@@ -61,6 +61,8 @@ type FacebookChannel = {
   lastErrorMessage: string | null
 }
 
+type FacebookPageOption = { id: string; name: string; tasks: string[] }
+
 type Invitation = {
   url: string
   email: string
@@ -452,6 +454,11 @@ const facebookStatusLabels: Record<FacebookChannel['connectionStatus'], string> 
 
 function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
   const [channels, setChannels] = useState<FacebookChannel[]>()
+  const [pendingStateId, setPendingStateId] = useState<string | null>(() =>
+    new URLSearchParams(window.location.search).get('oauthStateId'),
+  )
+  const [pages, setPages] = useState<FacebookPageOption[]>()
+  const [selectedPageIds, setSelectedPageIds] = useState<string[]>([])
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const canManage = workspace.role !== 'AGENT'
@@ -465,6 +472,16 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
   useEffect(() => {
     void refresh().catch((cause) => setError(facebookErrorMessage(cause)))
   }, [refresh])
+
+  useEffect(() => {
+    if (!canManage || !pendingStateId) return
+    void fetch(`/api/workspaces/${workspace.id}/facebook/oauth/${pendingStateId}/pages`)
+      .then(async (response) => {
+        if (!response.ok) throw await responseError(response)
+        setPages(((await response.json()) as { pages: FacebookPageOption[] }).pages)
+      })
+      .catch((cause) => setError(facebookErrorMessage(cause)))
+  }, [canManage, pendingStateId, workspace.id])
 
   async function connect() {
     setBusy('connect')
@@ -488,6 +505,27 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
     try {
       await request(`/api/workspaces/${workspace.id}/channels/${channel.id}/recheck`, {})
       await refresh()
+    } catch (cause) {
+      setError(facebookErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function selectPages(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!pendingStateId || !selectedPageIds.length) return
+    setBusy('select')
+    setError('')
+    try {
+      await request(`/api/workspaces/${workspace.id}/facebook/oauth/${pendingStateId}/pages`, {
+        pageIds: selectedPageIds,
+      })
+      await refresh()
+      setPages(undefined)
+      setSelectedPageIds([])
+      setPendingStateId(null)
+      history.replaceState(null, '', '/settings/facebook')
     } catch (cause) {
       setError(facebookErrorMessage(cause))
     } finally {
@@ -534,6 +572,41 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
           {error}
         </p>
       )}
+      {pendingStateId && canManage && (
+        <section className="facebook-picker">
+          <p className="card-label">授权完成</p>
+          <h2>选择要连接的 Page</h2>
+          {!pages ? (
+            <p>正在加载可用 Page…</p>
+          ) : pages.length ? (
+            <form onSubmit={selectPages}>
+              <div className="facebook-page-options">
+                {pages.map((page) => (
+                  <label key={page.id}>
+                    <input
+                      type="checkbox"
+                      checked={selectedPageIds.includes(page.id)}
+                      onChange={(event) =>
+                        setSelectedPageIds((current) =>
+                          event.target.checked
+                            ? [...current, page.id]
+                            : current.filter((id) => id !== page.id),
+                        )
+                      }
+                    />
+                    {page.name}
+                  </label>
+                ))}
+              </div>
+              <button className="primary" disabled={busy === 'select'} type="submit">
+                {busy === 'select' ? '正在连接…' : '连接所选 Page'}
+              </button>
+            </form>
+          ) : (
+            <p>没有可连接的 Facebook Page。</p>
+          )}
+        </section>
+      )}
       {!channels ? (
         <p>正在加载 Facebook 连接…</p>
       ) : channels.length ? (
@@ -549,7 +622,7 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
                 </p>
                 {channel.lastErrorMessage && (
                   <p className="form-error">
-                    {channel.lastErrorCode ?? 'FACEBOOK_CHECK_FAILED'} · {channel.lastErrorMessage}
+                    连接需要处理 · {channel.lastErrorCode ?? 'FACEBOOK_CHECK_FAILED'}
                   </p>
                 )}
               </div>
@@ -1064,9 +1137,11 @@ function facebookErrorMessage(cause: unknown): string {
     {
       FORBIDDEN: '你没有管理 Facebook Page 的权限。',
       FACEBOOK_PAGE_ALREADY_CONNECTED: '此 Facebook Page 已连接到其他工作区。',
+      FACEBOOK_OAUTH_STATE_INVALID: '授权状态无效，请重新连接。',
       FACEBOOK_OAUTH_STATE_EXPIRED: '授权已过期，请重新连接。',
       FACEBOOK_OAUTH_STATE_USED: '授权已使用，请重新连接。',
       FACEBOOK_SUBSCRIPTION_FAILED: 'Messenger 订阅失败，请检查 Page 权限。',
+      FACEBOOK_PROVIDER_ERROR: 'Facebook 服务暂时不可用，请稍后重试。',
     }[cause.code] ?? 'Facebook 连接失败，请稍后重试。'
   )
 }

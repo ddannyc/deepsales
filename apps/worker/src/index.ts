@@ -4,19 +4,10 @@ import {
   createDatabase,
   createAiMember,
   createInvitation,
-  completeFacebookOAuthSelection,
-  connectFacebookPages,
-  consumeFacebookOAuthState,
   disableFacebookChannel,
   FacebookError,
-  findActiveFacebookPage,
-  getFacebookChannelForManager,
-  getFacebookOAuthToken,
   listFacebookChannels,
-  markFacebookChannelHealth,
-  recordFacebookConnectionFailure,
-  startFacebookOAuth,
-  storeFacebookOAuthToken,
+  listFacebookChannelsPage,
   deleteMember,
   listTeam,
   MemberError,
@@ -26,6 +17,7 @@ import {
   workspace,
   workspaceUserAccess,
   type Database,
+  type FacebookChannelCursor,
 } from '@deepsales/db'
 import { and, eq, sql } from 'drizzle-orm'
 import { Hono, type Context } from 'hono'
@@ -33,15 +25,15 @@ import { Pool } from 'pg'
 import { z } from 'zod'
 import { createAuth } from './auth'
 import type { Bindings } from './bindings'
+import { FacebookProviderError } from './facebook'
 import {
-  buildFacebookOAuthUrl,
-  createFacebookAdapter,
-  decryptFacebookToken,
-  encryptFacebookToken,
-  redactedFacebookFailure,
-  type FacebookPageSummary,
-  FacebookProviderError,
-} from './facebook'
+  beginFacebookOAuth,
+  completeFacebookOAuth,
+  facebookServiceConfig,
+  listFacebookOAuthPages,
+  recheckFacebookPage,
+  selectFacebookPages,
+} from './facebook-service'
 
 type WebhookPayload = {
   object?: unknown
@@ -101,6 +93,7 @@ const facebookOAuthCallbackInput = z.object({
 const facebookPageSelectionInput = z.object({
   pageIds: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
 })
+const facebookCursorInput = z.object({ displayName: z.string().max(200), id: z.string().uuid() })
 
 app.onError((_error, c) => {
   if (c.req.path.startsWith('/api/')) {
@@ -175,12 +168,13 @@ app.get('/api/workspaces/:workspaceId/channels', async (c) => {
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
-    const limited = await rateLimit(c, `facebook-oauth-start:${session.user.id}`)
-    if (limited) return limited
-    c.header('Cache-Control', 'no-store')
     try {
+      const page = await listFacebookChannelsPage(db, c.req.param('workspaceId'), session.user.id, {
+        after: decodeFacebookCursor(c.req.query('cursor')),
+      })
       return c.json({
-        channels: await listFacebookChannels(db, c.req.param('workspaceId'), session.user.id),
+        channels: page.channels,
+        nextCursor: page.nextCursor ? encodeFacebookCursor(page.nextCursor) : null,
       })
     } catch (error) {
       return facebookErrorResponse(c, error)
@@ -193,21 +187,16 @@ app.post('/api/workspaces/:workspaceId/facebook/oauth/start', async (c) => {
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `facebook-oauth-start:${session.user.id}`)
+    if (limited) return limited
+    c.header('Cache-Control', 'no-store')
     try {
-      const created = await startFacebookOAuth(db, {
-        workspaceId: c.req.param('workspaceId'),
-        initiatedByUserId: session.user.id,
-      })
-      return c.json({
-        stateId: created.id,
-        expiresAt: created.expiresAt,
-        authorizationUrl: buildFacebookOAuthUrl({
-          appId: c.env.META_APP_ID,
-          graphApiVersion: c.env.META_GRAPH_API_VERSION,
-          redirectUri: facebookRedirectUri(c.env),
-          state: created.state,
+      return c.json(
+        await beginFacebookOAuth(db, facebookServiceConfig(c.env), {
+          workspaceId: c.req.param('workspaceId'),
+          userId: session.user.id,
         }),
-      })
+      )
     } catch (error) {
       return facebookErrorResponse(c, error)
     }
@@ -240,39 +229,43 @@ app.get('/api/facebook/oauth/callback', async (c) => {
     if (limited) return limited
     c.header('Cache-Control', 'no-store')
 
-    let consumed: Awaited<ReturnType<typeof consumeFacebookOAuthState>>
     try {
-      consumed = await consumeFacebookOAuthState(db, { state, userId: session.user.id })
-    } catch (error) {
-      return facebookErrorResponse(c, error)
-    }
-
-    try {
-      const adapter = createFacebookAdapter({
-        appId: c.env.META_APP_ID,
-        appSecret: c.env.META_APP_SECRET,
-        graphApiVersion: c.env.META_GRAPH_API_VERSION,
-      })
-      const userAccessToken = await adapter.exchangeCode(code, facebookRedirectUri(c.env))
-      const pages = await adapter.listPages(userAccessToken)
-      const encrypted = await encryptFacebookToken(userAccessToken, c.env.TOKEN_ENCRYPTION_KEY)
-      await storeFacebookOAuthToken(db, {
-        stateId: consumed.id,
+      const result = await completeFacebookOAuth(db, facebookServiceConfig(c.env), {
+        state,
+        code,
         userId: session.user.id,
-        encryptedUserAccessToken: encrypted.ciphertext,
-        userTokenIv: encrypted.iv,
-        userTokenKeyVersion: encrypted.keyVersion,
       })
-      const summaries: FacebookPageSummary[] = pages.map(({ id, name, tasks }) => ({
-        id,
-        name,
-        tasks,
-      }))
       return c.req.header('accept')?.includes('text/html')
-        ? c.html(renderFacebookPagePicker(consumed.workspaceId, consumed.id, summaries))
-        : c.json({ stateId: consumed.id, workspaceId: consumed.workspaceId, pages: summaries })
+        ? c.redirect(`/settings/facebook?oauthStateId=${result.stateId}`, 303)
+        : c.json(result)
     } catch (error) {
-      return facebookProviderResponse(c, error, 'FACEBOOK_PROVIDER_ERROR')
+      return error instanceof FacebookError
+        ? facebookErrorResponse(c, error)
+        : facebookProviderResponse(c, error, 'FACEBOOK_PROVIDER_ERROR')
+    }
+  })
+})
+
+app.get('/api/workspaces/:workspaceId/facebook/oauth/:stateId/pages', async (c) => {
+  if (!hasFacebookBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `facebook-oauth-pages:${session.user.id}`)
+    if (limited) return limited
+    c.header('Cache-Control', 'no-store')
+    try {
+      return c.json({
+        pages: await listFacebookOAuthPages(db, facebookServiceConfig(c.env), {
+          stateId: c.req.param('stateId'),
+          workspaceId: c.req.param('workspaceId'),
+          userId: session.user.id,
+        }),
+      })
+    } catch (error) {
+      return error instanceof FacebookProviderError
+        ? facebookProviderResponse(c, error, 'FACEBOOK_PROVIDER_ERROR')
+        : facebookErrorResponse(c, error)
     }
   })
 })
@@ -293,66 +286,19 @@ app.post('/api/workspaces/:workspaceId/facebook/oauth/:stateId/pages', async (c)
     }
 
     try {
-      const stored = await getFacebookOAuthToken(db, {
+      await selectFacebookPages(db, facebookServiceConfig(c.env), {
         stateId: c.req.param('stateId'),
         workspaceId: c.req.param('workspaceId'),
         userId: session.user.id,
+        pageIds: input.data.pageIds,
       })
-      const userAccessToken = await decryptFacebookToken(
-        {
-          ciphertext: stored.encryptedUserAccessToken as string,
-          iv: stored.userTokenIv as string,
-          keyVersion: stored.userTokenKeyVersion ?? '',
-        },
-        c.env.TOKEN_ENCRYPTION_KEY,
-      )
-      const adapter = createFacebookAdapter({
-        appId: c.env.META_APP_ID,
-        appSecret: c.env.META_APP_SECRET,
-        graphApiVersion: c.env.META_GRAPH_API_VERSION,
-      })
-      const availablePages = await adapter.listPages(userAccessToken)
-      const selectedIds = new Set(input.data.pageIds)
-      const selectedPages = availablePages.filter((page) => selectedIds.has(page.id))
-      if (selectedPages.length !== selectedIds.size) {
-        throw new FacebookError('INVALID_REQUEST', 'Selected Facebook Page is unavailable')
-      }
-
-      const pages = []
-      for (const page of selectedPages) {
-        try {
-          await adapter.subscribePage(page.id, page.accessToken)
-        } catch (error) {
-          const failure = redactedFacebookFailure(error, [c.env.META_APP_SECRET, page.accessToken])
-          await recordFacebookConnectionFailure(db, {
-            workspaceId: c.req.param('workspaceId'),
-            pageId: page.id,
-            userId: session.user.id,
-            error: failure,
-          })
-          return facebookProviderResponse(c, error, 'FACEBOOK_SUBSCRIPTION_FAILED')
-        }
-        const encrypted = await encryptFacebookToken(page.accessToken, c.env.TOKEN_ENCRYPTION_KEY)
-        pages.push({
-          pageId: page.id,
-          displayName: page.name,
-          encryptedPageAccessToken: encrypted.ciphertext,
-          tokenIv: encrypted.iv,
-          tokenKeyVersion: encrypted.keyVersion,
-        })
-      }
-
-      await connectFacebookPages(db, {
-        workspaceId: c.req.param('workspaceId'),
-        actingUserId: session.user.id,
-        pages,
-      })
-      await completeFacebookOAuthSelection(db, stored.id)
       return c.json({
         channels: await listFacebookChannels(db, c.req.param('workspaceId'), session.user.id),
       })
     } catch (error) {
-      return facebookErrorResponse(c, error)
+      return error instanceof FacebookProviderError
+        ? facebookProviderResponse(c, error, 'FACEBOOK_SUBSCRIPTION_FAILED')
+        : facebookErrorResponse(c, error)
     }
   })
 })
@@ -364,55 +310,14 @@ app.post('/api/workspaces/:workspaceId/channels/:channelId/recheck', async (c) =
     if (!session) return unauthorized(c)
     const limited = await rateLimit(c, `facebook-recheck:${session.user.id}`)
     if (limited) return limited
-    let pageAccessToken = ''
     try {
-      const channel = await getFacebookChannelForManager(db, {
+      await recheckFacebookPage(db, facebookServiceConfig(c.env), {
         workspaceId: c.req.param('workspaceId'),
         channelId: c.req.param('channelId'),
         userId: session.user.id,
       })
-      if (channel.channelStatus === 'DISABLED') {
-        return c.json({
-          channel: (
-            await listFacebookChannels(db, c.req.param('workspaceId'), session.user.id)
-          ).find(({ id }) => id === channel.id),
-        })
-      }
-      const token = await decryptFacebookToken(
-        {
-          ciphertext: channel.encryptedPageAccessToken,
-          iv: channel.tokenIv,
-          keyVersion: channel.tokenKeyVersion,
-        },
-        c.env.TOKEN_ENCRYPTION_KEY,
-      )
-      pageAccessToken = token
-      const adapter = createFacebookAdapter({
-        appId: c.env.META_APP_ID,
-        appSecret: c.env.META_APP_SECRET,
-        graphApiVersion: c.env.META_GRAPH_API_VERSION,
-      })
-      await adapter.checkPage(channel.pageId, token)
-      await markFacebookChannelHealth(db, {
-        workspaceId: c.req.param('workspaceId'),
-        channelId: channel.id,
-        userId: session.user.id,
-        active: true,
-      })
     } catch (error) {
-      const failure = redactedFacebookFailure(error, [c.env.META_APP_SECRET, pageAccessToken])
-      try {
-        await markFacebookChannelHealth(db, {
-          workspaceId: c.req.param('workspaceId'),
-          channelId: c.req.param('channelId'),
-          userId: session.user.id,
-          active: false,
-          error: failure,
-        })
-      } catch (healthError) {
-        if (healthError instanceof FacebookError) return facebookErrorResponse(c, healthError)
-        throw healthError
-      }
+      return facebookErrorResponse(c, error)
     }
     return c.json({
       channel: (await listFacebookChannels(db, c.req.param('workspaceId'), session.user.id)).find(
@@ -748,6 +653,27 @@ function invitationUrl(appUrl: string, token: string) {
   return `${appUrl.replace(/\/$/, '')}/invite?token=${encodeURIComponent(token)}`
 }
 
+function encodeFacebookCursor(cursor: FacebookChannelCursor) {
+  const bytes = new TextEncoder().encode(JSON.stringify(cursor))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+}
+
+function decodeFacebookCursor(value: string | undefined): FacebookChannelCursor | undefined {
+  if (!value) return undefined
+  try {
+    const normalized = value.replaceAll('-', '+').replaceAll('_', '/')
+    const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='))
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+    const cursor = facebookCursorInput.safeParse(JSON.parse(new TextDecoder().decode(bytes)))
+    if (!cursor.success) throw new Error('invalid cursor')
+    return cursor.data
+  } catch {
+    throw new FacebookError('INVALID_REQUEST', 'Invalid channel cursor')
+  }
+}
+
 function memberErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
   if (!(error instanceof MemberError)) throw error
   const status =
@@ -789,68 +715,6 @@ function facebookProviderResponse(
     )
   }
   throw error
-}
-
-function facebookRedirectUri(env: Bindings) {
-  return `${env.APP_URL.replace(/\/$/, '')}/api/facebook/oauth/callback`
-}
-
-function renderFacebookPagePicker(
-  workspaceId: string,
-  stateId: string,
-  pages: FacebookPageSummary[],
-) {
-  const pageInputs = pages.length
-    ? pages
-        .map(
-          (page) =>
-            `<label><input type="checkbox" name="pageId" value="${escapeHtml(page.id)}"> ${escapeHtml(page.name)}</label>`,
-        )
-        .join('')
-    : '<p>没有可连接的 Facebook Page。</p>'
-  const data = JSON.stringify({ workspaceId, stateId }).replace(
-    /[<>&\u2028\u2029]/g,
-    (character) => {
-      const escapes: Record<string, string> = {
-        '<': '\\u003c',
-        '>': '\\u003e',
-        '&': '\\u0026',
-        '\u2028': '\\u2028',
-        '\u2029': '\\u2029',
-      }
-      return escapes[character] ?? character
-    },
-  )
-  return `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>选择 Facebook Page</title></head>
-<body><main><h1>选择 Facebook Page</h1><p>选择要连接到此工作区的 Page。</p>
-<form id="pages">${pageInputs}<button type="submit">连接所选 Page</button></form>
-<p id="error" role="alert"></p></main>
-<script>
-const context = ${data};
-document.getElementById('pages').addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const pageIds = [...new FormData(event.currentTarget).getAll('pageId')];
-  const response = await fetch('/api/workspaces/' + context.workspaceId + '/facebook/oauth/' + context.stateId + '/pages', {
-    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({pageIds})
-  });
-  if (response.ok) location.assign('/settings/facebook');
-  else document.getElementById('error').textContent = '连接失败，请重新开始授权。';
-});
-</script></body></html>`
-}
-
-function escapeHtml(value: string) {
-  return value.replace(/[&<>"']/g, (character) => {
-    const escapes: Record<string, string> = {
-      '&': '&amp;',
-      '<': '&lt;',
-      '>': '&gt;',
-      '"': '&quot;',
-      "'": '&#39;',
-    }
-    return escapes[character] ?? character
-  })
 }
 
 function notReady(c: Context<{ Bindings: Bindings }>) {
@@ -903,25 +767,7 @@ app.post('/webhooks/facebook', async (c) => {
     return c.text('Bad Request', 400)
   }
 
-  let messages = inboundTexts(
-    payload,
-    c.env.HYPERDRIVE?.connectionString ? undefined : c.env.META_PAGE_ID,
-  )
-  if (c.env.HYPERDRIVE?.connectionString) {
-    try {
-      const activePageIds = await withDatabase(c.env, async (db) => {
-        const active = await Promise.all(
-          messages.map(async (message) =>
-            (await findActiveFacebookPage(db, message.pageId)) ? message.pageId : null,
-          ),
-        )
-        return new Set(active.filter((pageId): pageId is string => Boolean(pageId)))
-      })
-      messages = messages.filter((message) => activePageIds.has(message.pageId))
-    } catch {
-      return c.text('Service Unavailable', 503)
-    }
-  }
+  let messages = inboundTexts(payload, c.env.META_PAGE_ID)
   messages = messages.filter(
     (message) => message.pageId === c.env.META_PAGE_ID && Boolean(c.env.META_PAGE_ACCESS_TOKEN),
   )

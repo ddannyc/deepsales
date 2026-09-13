@@ -48,6 +48,7 @@ describe('Facebook adapter', () => {
       )
       .mockResolvedValueOnce(Response.json({ success: true }))
       .mockResolvedValueOnce(Response.json({ id: 'page-1', name: 'Support' }))
+      .mockResolvedValueOnce(Response.json({ data: [{ id: 'app-1' }] }))
     const adapter = createFacebookAdapter(
       { appId: 'app-1', appSecret: 'app-secret', graphApiVersion: 'v26.0' },
       fetcher,
@@ -65,6 +66,7 @@ describe('Facebook adapter', () => {
       id: 'page-1',
       name: 'Support',
     })
+    await expect(adapter.checkPageSubscription('page-1', 'page-token')).resolves.toBeUndefined()
 
     expect(fetcher.mock.calls[1]?.[1]).toEqual(
       expect.objectContaining({ headers: { Authorization: 'Bearer user-token' } }),
@@ -86,6 +88,18 @@ describe('Facebook adapter', () => {
       subcode: 463,
       message: 'access_token=[redacted]',
     })
+    expect(
+      redactedFacebookFailure(
+        new FacebookProviderError(
+          400,
+          190,
+          null,
+          'OAuthException',
+          '{"access_token":"page-secret","authorization":"Bearer page-secret"}',
+        ),
+        ['page-secret'],
+      ).message,
+    ).toBe('{"access_token":"[redacted]","authorization":"Bearer [redacted]"}')
   })
 
   it('turns subscription failures into a classified provider error', async () => {

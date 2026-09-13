@@ -31,8 +31,6 @@ export class FacebookProviderError extends Error {
   }
 }
 
-export type FacebookAdapter = ReturnType<typeof createFacebookAdapter>
-
 export function createFacebookAdapter(
   config: {
     appId: string
@@ -115,6 +113,23 @@ export function createFacebookAdapter(
       if (!page.success) throw invalidProviderResponse()
       return page.data
     },
+
+    async checkPageSubscription(pageId: string, pageAccessToken: string) {
+      const url = new URL(`${graphBase}/${encodeURIComponent(pageId)}/subscribed_apps`)
+      const result = await graphRequest(fetcher, url, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${pageAccessToken}` },
+      })
+      const subscriptions = z
+        .object({ data: z.array(z.object({ id: z.string().min(1) })) })
+        .safeParse(result)
+      if (
+        !subscriptions.success ||
+        !subscriptions.data.data.some(({ id }) => id === config.appId)
+      ) {
+        throw invalidProviderResponse()
+      }
+    },
   }
 }
 
@@ -187,18 +202,6 @@ export function redactedFacebookFailure(
   }
 }
 
-export function isFacebookActionRequired(error: unknown) {
-  return (
-    error instanceof FacebookProviderError &&
-    (error.status === 401 ||
-      error.status === 403 ||
-      error.providerCode === 10 ||
-      error.providerCode === 100 ||
-      error.providerCode === 190 ||
-      error.providerCode === 200)
-  )
-}
-
 async function graphRequest(fetcher: Fetcher, url: URL, init: RequestInit): Promise<unknown> {
   let response: Response
   try {
@@ -238,6 +241,11 @@ function redactFacebookMessage(message: string, secrets: string[]) {
   let redacted = message
   for (const secret of secrets.filter(Boolean)) redacted = redacted.replaceAll(secret, '[redacted]')
   return redacted
+    .replace(
+      /(["']?(?:access_token|client_secret|code|state)["']?\s*[:=]\s*["']?)[^"'&,\s}]+/gi,
+      '$1[redacted]',
+    )
+    .replace(/Bearer\s+[^"'\s,}]+/gi, 'Bearer [redacted]')
     .replace(/(access_token|client_secret|code|state)=[^&\s]+/gi, '$1=[redacted]')
     .slice(0, 500)
 }
