@@ -83,6 +83,11 @@ export const memberType = pgEnum('member_type', ['HUMAN', 'AI'])
 export const memberStatus = pgEnum('member_status', ['ACTIVE', 'DISABLED'])
 export const channelProvider = pgEnum('channel_provider', ['FACEBOOK_MESSENGER'])
 export const channelStatus = pgEnum('channel_status', ['ACTIVE', 'DISABLED'])
+export const facebookConnectionStatus = pgEnum('facebook_connection_status', [
+  'ACTIVE',
+  'ACTION_REQUIRED',
+  'DISABLED',
+])
 
 export const workspace = pgTable('workspace', {
   id: uuid().defaultRandom().primaryKey(),
@@ -203,4 +208,44 @@ export const memberChannelAccess = pgTable(
       .references(() => channel.id, { onDelete: 'cascade' }),
   },
   (table) => [primaryKey({ columns: [table.memberId, table.channelId] })],
+)
+
+export const facebookChannelConfig = pgTable('facebook_channel_config', {
+  channelId: uuid('channel_id')
+    .primaryKey()
+    .references(() => channel.id, { onDelete: 'cascade' }),
+  pageId: text('page_id').notNull().unique(),
+  encryptedPageAccessToken: text('encrypted_page_access_token').notNull(),
+  tokenIv: text('token_iv').notNull(),
+  tokenKeyVersion: text('token_key_version').default('v1').notNull(),
+  connectionStatus: facebookConnectionStatus('connection_status').default('ACTIVE').notNull(),
+  subscribedAt: timestamp('subscribed_at', { withTimezone: true }),
+  lastCheckedAt: timestamp('last_checked_at', { withTimezone: true }),
+  lastErrorCode: text('last_error_code'),
+  lastErrorSubcode: integer('last_error_subcode'),
+  lastErrorMessage: text('last_error_message'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+})
+
+export const facebookOauthState = pgTable(
+  'facebook_oauth_state',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    initiatedByUserId: uuid('initiated_by_user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    stateHash: text('state_hash').notNull().unique(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    encryptedUserAccessToken: text('encrypted_user_access_token'),
+    userTokenIv: text('user_token_iv'),
+    userTokenKeyVersion: text('user_token_key_version'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('facebook_oauth_state_workspace_id_idx').on(table.workspaceId)],
 )

@@ -2,10 +2,13 @@
 APP_URL=http://127.0.0.1:8787
 BETTER_AUTH_SECRET=replace-with-at-least-32-random-characters
 
-# Facebook M0 settings retained until T04 replaces the fixed reply.
-# Setup reference only; the Worker does not read META_APP_ID.
+# Facebook connection settings.
 META_APP_ID=your-meta-app-id
 META_APP_SECRET=your-meta-app-secret
 META_VERIFY_TOKEN=choose-a-long-random-value
+# Generate a base64-encoded 32-byte AES key for Page-token encryption.
+TOKEN_ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+# M0 fixed-reply compatibility; T04 replaces this path with durable intake.
 META_PAGE_ID=your-facebook-page-id
 META_PAGE_ACCESS_TOKEN=your-page-access-token

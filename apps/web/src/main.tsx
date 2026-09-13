@@ -47,6 +47,20 @@ type TeamMember = {
 
 type Team = { members: TeamMember[]; channels: TeamChannel[] }
 
+type FacebookChannel = {
+  id: string
+  pageId: string
+  displayName: string
+  provider: 'FACEBOOK_MESSENGER'
+  status: 'ACTIVE' | 'DISABLED'
+  connectionStatus: 'ACTIVE' | 'ACTION_REQUIRED' | 'DISABLED'
+  subscribedAt: string | null
+  lastCheckedAt: string | null
+  lastErrorCode: string | null
+  lastErrorSubcode: number | null
+  lastErrorMessage: string | null
+}
+
 type Invitation = {
   url: string
   email: string
@@ -351,6 +365,7 @@ function Shell({
   onWorkspaceChange: (workspaceId: string) => Promise<void>
 }) {
   const teamPage = window.location.pathname === '/team'
+  const facebookPage = window.location.pathname === '/settings/facebook'
 
   async function signOut() {
     await request('/api/auth/sign-out', {})
@@ -384,14 +399,16 @@ function Shell({
           )}
         </div>
         <nav aria-label="主要导航">
-          <a aria-current={teamPage ? undefined : 'page'} href="/inbox">
+          <a aria-current={!teamPage && !facebookPage ? 'page' : undefined} href="/inbox">
             收件箱
           </a>
           <a aria-current={teamPage ? 'page' : undefined} href="/team">
             团队
           </a>
           <a href="/knowledge">知识库</a>
-          <a href="/settings/facebook">Facebook 设置</a>
+          <a aria-current={facebookPage ? 'page' : undefined} href="/settings/facebook">
+            Facebook 设置
+          </a>
         </nav>
         <button className="text-button" type="button" onClick={signOut}>
           退出登录
@@ -399,6 +416,8 @@ function Shell({
       </header>
       {teamPage ? (
         <TeamPage workspace={me.workspace} />
+      ) : facebookPage ? (
+        <FacebookSettingsPage workspace={me.workspace} />
       ) : (
         <main className="inbox-empty">
           <div className="pulse" aria-hidden="true">
@@ -422,6 +441,156 @@ function Shell({
         </main>
       )}
     </div>
+  )
+}
+
+const facebookStatusLabels: Record<FacebookChannel['connectionStatus'], string> = {
+  ACTIVE: '正常',
+  ACTION_REQUIRED: '需要处理',
+  DISABLED: '已停用',
+}
+
+function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
+  const [channels, setChannels] = useState<FacebookChannel[]>()
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+  const canManage = workspace.role !== 'AGENT'
+
+  const refresh = useCallback(async () => {
+    const response = await fetch(`/api/workspaces/${workspace.id}/channels`)
+    if (!response.ok) throw await responseError(response)
+    setChannels(((await response.json()) as { channels: FacebookChannel[] }).channels)
+  }, [workspace.id])
+
+  useEffect(() => {
+    void refresh().catch((cause) => setError(facebookErrorMessage(cause)))
+  }, [refresh])
+
+  async function connect() {
+    setBusy('connect')
+    setError('')
+    try {
+      const result = (await request(
+        `/api/workspaces/${workspace.id}/facebook/oauth/start`,
+        {},
+      )) as { authorizationUrl: string }
+      window.location.assign(result.authorizationUrl)
+    } catch (cause) {
+      setError(facebookErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function recheck(channel: FacebookChannel) {
+    setBusy(channel.id)
+    setError('')
+    try {
+      await request(`/api/workspaces/${workspace.id}/channels/${channel.id}/recheck`, {})
+      await refresh()
+    } catch (cause) {
+      setError(facebookErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function disable(channel: FacebookChannel) {
+    if (!window.confirm(`确定要停用“${channel.displayName}”吗？`)) return
+    setBusy(channel.id)
+    setError('')
+    try {
+      await request(`/api/workspaces/${workspace.id}/channels/${channel.id}/disable`, {})
+      await refresh()
+    } catch (cause) {
+      setError(facebookErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <main className="facebook-page">
+      <div className="team-heading">
+        <div>
+          <p className="eyebrow">工作区 / Facebook</p>
+          <h1>Facebook Page</h1>
+          <p>连接 Page，检查 Messenger 订阅和访问权限。</p>
+        </div>
+        {canManage && (
+          <button
+            className="primary"
+            disabled={busy === 'connect'}
+            type="button"
+            onClick={() => void connect()}
+          >
+            {busy === 'connect' ? '正在打开…' : '连接 Facebook Page'}
+          </button>
+        )}
+      </div>
+
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      {!channels ? (
+        <p>正在加载 Facebook 连接…</p>
+      ) : channels.length ? (
+        <div className="facebook-list">
+          {channels.map((channel) => (
+            <section className="facebook-card" key={channel.id}>
+              <div>
+                <p className="card-label">Facebook Page</p>
+                <h2>{channel.displayName}</h2>
+                <p className="facebook-meta">
+                  {facebookStatusLabels[channel.connectionStatus]}
+                  {channel.lastCheckedAt && ` · 最近检查 ${formatDate(channel.lastCheckedAt)}`}
+                </p>
+                {channel.lastErrorMessage && (
+                  <p className="form-error">
+                    {channel.lastErrorCode ?? 'FACEBOOK_CHECK_FAILED'} · {channel.lastErrorMessage}
+                  </p>
+                )}
+              </div>
+              {canManage && (
+                <div className="member-actions">
+                  <button
+                    className="secondary"
+                    disabled={Boolean(busy)}
+                    type="button"
+                    onClick={() => void connect()}
+                  >
+                    重新连接
+                  </button>
+                  <button
+                    className="secondary"
+                    disabled={Boolean(busy)}
+                    type="button"
+                    onClick={() => void recheck(channel)}
+                  >
+                    重新检查
+                  </button>
+                  <button
+                    className="danger-button"
+                    disabled={Boolean(busy) || channel.connectionStatus === 'DISABLED'}
+                    type="button"
+                    onClick={() => void disable(channel)}
+                  >
+                    停用
+                  </button>
+                </div>
+              )}
+            </section>
+          ))}
+        </div>
+      ) : (
+        <section className="facebook-empty">
+          <p className="card-label">尚未连接</p>
+          <p>连接第一个 Facebook Page，开始接收 Messenger 对话。</p>
+        </section>
+      )}
+    </main>
   )
 }
 
@@ -887,6 +1056,23 @@ function teamErrorMessage(cause: unknown): string {
       NOT_FOUND: '该成员已不存在。',
     }[cause.code] ?? '团队信息更新失败。'
   )
+}
+
+function facebookErrorMessage(cause: unknown): string {
+  if (!(cause instanceof ApiError)) return 'Facebook 连接失败，请稍后重试。'
+  return (
+    {
+      FORBIDDEN: '你没有管理 Facebook Page 的权限。',
+      FACEBOOK_PAGE_ALREADY_CONNECTED: '此 Facebook Page 已连接到其他工作区。',
+      FACEBOOK_OAUTH_STATE_EXPIRED: '授权已过期，请重新连接。',
+      FACEBOOK_OAUTH_STATE_USED: '授权已使用，请重新连接。',
+      FACEBOOK_SUBSCRIPTION_FAILED: 'Messenger 订阅失败，请检查 Page 权限。',
+    }[cause.code] ?? 'Facebook 连接失败，请稍后重试。'
+  )
+}
+
+function formatDate(value: string) {
+  return new Date(value).toLocaleString('zh-CN')
 }
 
 function inviteToken() {

@@ -1,8 +1,8 @@
 # DeepSales
 
-Lean V1 is a React SPA and Hono Cloudflare Worker backed by PostgreSQL. T01 adds
-email/password authentication, atomic workspace bootstrap, the protected app shell,
-Hyperdrive readiness, and keeps the M0 Facebook webhook available.
+Lean V1 is a React SPA and Hono Cloudflare Worker backed by PostgreSQL. T03 adds
+workspace-scoped Facebook OAuth, Page selection, encrypted Page tokens, and
+connection health on top of the authenticated workspace shell.
 
 ## Local setup
 
@@ -41,7 +41,9 @@ pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DATABASE
 ```
 
 Replace the placeholder Hyperdrive ID in `apps/worker/wrangler.jsonc`, set
-`APP_URL`, `BETTER_AUTH_SECRET`, and the retained M0 Meta secrets with Wrangler, then:
+`APP_URL`, `BETTER_AUTH_SECRET`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, and
+`TOKEN_ENCRYPTION_KEY` with Wrangler. Set `META_APP_ID` and `META_GRAPH_API_VERSION`
+as Worker variables, then:
 
 ```powershell
 pnpm db:migrate

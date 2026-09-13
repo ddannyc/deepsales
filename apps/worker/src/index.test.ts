@@ -2,11 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { app, hasValidSignature } from './index'
 
 const bindings = {
+  META_APP_ID: 'test-app-id',
   META_APP_SECRET: 'test-app-secret',
   META_VERIFY_TOKEN: 'test-verify-token',
   META_PAGE_ID: 'page-1',
   META_PAGE_ACCESS_TOKEN: 'test-page-token',
   META_GRAPH_API_VERSION: 'v26.0',
+  TOKEN_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
   M0_FIXED_REPLY: 'fixed reply',
 }
 

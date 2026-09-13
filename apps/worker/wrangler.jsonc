@@ -26,6 +26,7 @@
     "enabled": true
   },
   "vars": {
+    "META_APP_ID": "your-meta-app-id",
     "META_GRAPH_API_VERSION": "v26.0",
     "M0_FIXED_REPLY": "M0 received your message."
   }

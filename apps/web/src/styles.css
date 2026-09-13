@@ -388,6 +388,44 @@ form {
   margin: 0 auto;
   padding: 64px 0 96px;
 }
+.facebook-page {
+  width: min(1120px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 64px 0 96px;
+}
+.facebook-list {
+  display: grid;
+  gap: 14px;
+}
+.facebook-card,
+.facebook-empty {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border: 1px solid #c8d7e0;
+  padding: 24px;
+  background: white;
+}
+.facebook-card h2 {
+  margin: 8px 0 0;
+  font-size: 22px;
+}
+.facebook-meta {
+  margin: 6px 0 0;
+  color: #63788a;
+  font-size: 13px;
+}
+.facebook-card .form-error {
+  margin-top: 12px;
+}
+.facebook-empty {
+  display: block;
+  color: #63788a;
+}
+.facebook-empty p:last-child {
+  margin-bottom: 0;
+}
 .team-heading,
 .section-heading,
 .member-summary,
@@ -689,6 +727,14 @@ form {
   .team-page {
     width: min(100% - 36px, 720px);
     padding-top: 44px;
+  }
+  .facebook-page {
+    width: min(100% - 36px, 720px);
+    padding-top: 44px;
+  }
+  .facebook-card {
+    align-items: stretch;
+    flex-direction: column;
   }
   .team-actions,
   .member-fields {

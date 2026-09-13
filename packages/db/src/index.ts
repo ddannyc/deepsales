@@ -1,4 +1,5 @@
 export * from './database'
+export * from './facebook'
 export * from './members'
 export * from './schema'
 export * from './workspace'
