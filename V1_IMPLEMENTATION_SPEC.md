@@ -654,6 +654,13 @@ All protected application routes are under `/api`. JSON uses camelCase. List end
 
 ## 12. UI contract
 
+The default interface language is Simplified Chinese. All user-facing copy must
+be in Chinese, including navigation, headings, buttons, form labels, statuses,
+loading and empty states, errors, confirmation prompts, page titles, and
+accessible labels. Product and platform names such as DeepSales, Facebook,
+Messenger, and AI retain their official spelling; API paths, field names, enum
+values, and code identifiers remain unchanged.
+
 ### `/login`
 
 Sign in, sign up, invitation acceptance, and workspace creation. No social login or password-reset UI in V1.

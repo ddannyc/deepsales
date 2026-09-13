@@ -60,6 +60,27 @@ class ApiError extends Error {
   }
 }
 
+const roleLabels: Record<Workspace['role'], string> = {
+  OWNER: '所有者',
+  ADMIN: '管理员',
+  AGENT: '客服',
+}
+const memberTypeLabels: Record<TeamMember['type'], string> = {
+  HUMAN: '人工',
+  AI: 'AI',
+}
+const lifecycleLabels: Record<TeamMember['status'], string> = {
+  ACTIVE: '启用',
+  DISABLED: '停用',
+}
+const configurationStatusLabels: Record<NonNullable<TeamMember['configurationStatus']>, string> = {
+  UNPUBLISHED: '未发布',
+}
+
+function roleLabel(role: Workspace['role'] | null) {
+  return role ? roleLabels[role] : ''
+}
+
 function App() {
   const [me, setMe] = useState<Me | null>()
   const [loadError, setLoadError] = useState('')
@@ -84,8 +105,8 @@ function App() {
     } catch (cause) {
       setLoadError(
         cause instanceof ApiError && cause.code === 'NOT_READY'
-          ? 'DeepSales is not ready. Check the database connection.'
-          : 'The inbox could not be loaded. Try again.',
+          ? 'DeepSales 尚未就绪，请检查数据库连接。'
+          : '收件箱加载失败，请重试。',
       )
     }
   }, [refresh])
@@ -158,23 +179,23 @@ function Auth({
     <main className="auth-layout">
       <SignalRail />
       <section className="auth-intro" aria-labelledby="welcome-title">
-        <p className="eyebrow">Facebook shared inbox</p>
-        <h1 id="welcome-title">Keep every customer conversation in view.</h1>
+        <p className="eyebrow">Facebook 共享收件箱</p>
+        <h1 id="welcome-title">让每一段客户对话都尽在掌握。</h1>
         <p className="intro-copy">
-          DeepSales gives your human and AI team one calm place to pick up Messenger work.
+          DeepSales 为人工与 AI 团队提供一个清晰的空间，集中处理 Messenger 消息。
         </p>
         <ol className="flow">
           <li>
-            <span>Message arrives</span>
+            <span>消息到达</span>
             <small>Facebook Messenger</small>
           </li>
           <li>
-            <span>Best member responds</span>
-            <small>Human or AI</small>
+            <span>最合适的成员回复</span>
+            <small>人工或 AI</small>
           </li>
           <li>
-            <span>Team stays in control</span>
-            <small>One shared record</small>
+            <span>团队始终掌控全局</span>
+            <small>统一记录</small>
           </li>
         </ol>
       </section>
@@ -185,34 +206,34 @@ function Auth({
         <div className="mode-switch">
           <button
             type="button"
-            aria-label="Sign in view"
+            aria-label="登录视图"
             aria-pressed={!signingUp}
             onClick={() => setMode('sign-in')}
           >
-            Sign in
+            登录
           </button>
           <button
             type="button"
-            aria-label="Create account view"
+            aria-label="创建账户视图"
             aria-pressed={signingUp}
             onClick={() => setMode('sign-up')}
           >
-            Create account
+            创建账户
           </button>
         </div>
-        <h2 id="auth-title">{signingUp ? 'Create account' : 'Sign in'}</h2>
+        <h2 id="auth-title">{signingUp ? '创建账户' : '登录'}</h2>
         <p className="form-lede">
           {invited
-            ? 'Sign in with the invited work email to join the team.'
+            ? '请使用受邀工作邮箱登录以加入团队。'
             : signingUp
-              ? 'Start your team workspace.'
-              : 'Return to your team inbox.'}
+              ? '开始创建团队工作区。'
+              : '返回团队收件箱。'}
         </p>
         <form onSubmit={submit}>
-          {signingUp && <Field label="Full name" name="name" autoComplete="name" />}
-          <Field label="Work email" name="email" type="email" autoComplete="email" />
+          {signingUp && <Field label="姓名" name="name" autoComplete="name" />}
+          <Field label="工作邮箱" name="email" type="email" autoComplete="email" />
           <Field
-            label="Password"
+            label="密码"
             name="password"
             type="password"
             autoComplete={signingUp ? 'new-password' : 'current-password'}
@@ -224,7 +245,7 @@ function Auth({
             </p>
           )}
           <button className="primary" disabled={busy} type="submit">
-            {busy ? 'Working…' : signingUp ? 'Create account' : 'Sign in'}
+            {busy ? '正在处理…' : signingUp ? '创建账户' : '登录'}
           </button>
         </form>
       </section>
@@ -253,7 +274,7 @@ function InviteAcceptance({
   return (
     <main className="loading" role={error ? 'alert' : undefined}>
       <span>DS</span>
-      {error || 'Joining your team…'}
+      {error || '正在加入团队…'}
     </main>
   )
 }
@@ -301,18 +322,18 @@ function WorkspaceSetup({
     <main className="setup-layout">
       <SignalRail />
       <section className="setup-card">
-        <p className="eyebrow">Welcome, {userName}</p>
-        <h1>Name your workspace</h1>
-        <p>This is the shared home for your team and connected Facebook Pages.</p>
+        <p className="eyebrow">欢迎，{userName}</p>
+        <h1>为工作区命名</h1>
+        <p>这里是团队与已连接 Facebook 公共主页的共享工作区。</p>
         <form onSubmit={submit}>
-          <Field label="Workspace name" name="name" maxLength={100} autoFocus />
+          <Field label="工作区名称" name="name" maxLength={100} autoFocus />
           {error && (
             <p className="form-error" role="alert">
               {error}
             </p>
           )}
           <button className="primary" disabled={busy} type="submit">
-            {busy ? 'Creating…' : 'Create workspace'}
+            {busy ? '创建中…' : '创建工作区'}
           </button>
         </form>
       </section>
@@ -341,14 +362,14 @@ function Shell({
   return (
     <div className="shell">
       <header className="shell-header">
-        <a className="shell-mark" href="/inbox" aria-label="DeepSales inbox">
+        <a className="shell-mark" href="/inbox" aria-label="DeepSales 收件箱">
           DS<span>●</span>
         </a>
         <div className="workspace-label">
-          <small>Workspace</small>
+          <small>工作区</small>
           {me.workspaces.length > 1 ? (
             <select
-              aria-label="Active workspace"
+              aria-label="当前工作区"
               value={me.workspace.id}
               onChange={(event) => void onWorkspaceChange(event.currentTarget.value)}
             >
@@ -362,18 +383,18 @@ function Shell({
             <strong>{me.workspace.name}</strong>
           )}
         </div>
-        <nav aria-label="Primary navigation">
+        <nav aria-label="主要导航">
           <a aria-current={teamPage ? undefined : 'page'} href="/inbox">
-            Inbox
+            收件箱
           </a>
           <a aria-current={teamPage ? 'page' : undefined} href="/team">
-            Team
+            团队
           </a>
-          <a href="/knowledge">Knowledge</a>
-          <a href="/settings/facebook">Facebook</a>
+          <a href="/knowledge">知识库</a>
+          <a href="/settings/facebook">Facebook 设置</a>
         </nav>
         <button className="text-button" type="button" onClick={signOut}>
-          Sign out
+          退出登录
         </button>
       </header>
       {teamPage ? (
@@ -385,16 +406,16 @@ function Shell({
             <i />
             <i />
           </div>
-          <p className="eyebrow">Shared inbox · online</p>
-          <h1>Inbox, ready when you are.</h1>
-          <p>Connect a Facebook Page next. New customer conversations will land here.</p>
+          <p className="eyebrow">共享收件箱 · 在线</p>
+          <h1>收件箱已准备就绪</h1>
+          <p>接下来连接一个 Facebook 公共主页，新的客户对话会显示在这里。</p>
           <dl>
             <div>
-              <dt>Your role</dt>
-              <dd>{me.workspace.role}</dd>
+              <dt>你的角色</dt>
+              <dd>{roleLabel(me.workspace.role)}</dd>
             </div>
             <div>
-              <dt>Signed in as</dt>
+              <dt>登录账号</dt>
               <dd>{me.user.email}</dd>
             </div>
           </dl>
@@ -467,34 +488,34 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
       </main>
     )
   }
-  if (!team) return <main className="team-page">Loading team…</main>
+  if (!team) return <main className="team-page">正在加载团队…</main>
 
   return (
     <main className="team-page">
       <div className="team-heading">
         <div>
-          <p className="eyebrow">Workspace / people</p>
-          <h1>Team</h1>
-          <p>Human and AI members share one service identity.</p>
+          <p className="eyebrow">工作区 / 成员</p>
+          <h1>团队</h1>
+          <p>人工与 AI 成员共享同一服务身份。</p>
         </div>
-        <span className="role-pill">{workspace.role}</span>
+        <span className="role-pill">{roleLabel(workspace.role)}</span>
       </div>
 
       {canManage && (
         <div className="team-actions">
           <form className="team-card" onSubmit={inviteMember}>
-            <p className="card-label">Invite a teammate</p>
-            <Field label="Work email" name="email" type="email" autoComplete="off" />
-            <Field label="Display name" name="displayName" autoComplete="off" required={false} />
+            <p className="card-label">邀请团队成员</p>
+            <Field label="工作邮箱" name="email" type="email" autoComplete="off" />
+            <Field label="显示名称" name="displayName" autoComplete="off" required={false} />
             <label className="field">
-              <span>Workspace role</span>
+              <span>工作区角色</span>
               <select name="role" defaultValue="AGENT">
-                <option value="AGENT">Agent</option>
-                <option value="ADMIN">Admin</option>
+                <option value="AGENT">客服</option>
+                <option value="ADMIN">管理员</option>
               </select>
             </label>
             <Field
-              label="Capacity"
+              label="同时处理数"
               name="maxActiveConversations"
               type="number"
               min="0"
@@ -503,14 +524,14 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
             />
             <label className="check-field">
               <input name="autoAssignmentEnabled" type="checkbox" defaultChecked />
-              Auto-assignment
+              自动分配
             </label>
             <label className="check-field">
               <input name="available" type="checkbox" defaultChecked />
-              Available now
+              当前可用
             </label>
             <fieldset className="channel-fields">
-              <legend>Channel access</legend>
+              <legend>渠道权限</legend>
               {team.channels.length ? (
                 team.channels.map((channel) => (
                   <label className="check-field" key={channel.id}>
@@ -519,20 +540,20 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
                   </label>
                 ))
               ) : (
-                <span className="muted">No channels connected yet.</span>
+                <span className="muted">尚未连接任何渠道。</span>
               )}
             </fieldset>
             <button className="primary" type="submit">
-              Create invite link
+              创建邀请链接
             </button>
           </form>
 
           <form className="team-card" onSubmit={createAi}>
-            <p className="card-label">Add an AI member</p>
-            <p className="card-copy">Configuration and publishing arrive in the AI workspace.</p>
-            <Field label="Display name" name="displayName" autoComplete="off" />
+            <p className="card-label">添加 AI 成员</p>
+            <p className="card-copy">AI 工作区将提供配置和发布功能。</p>
+            <Field label="显示名称" name="displayName" autoComplete="off" />
             <button className="primary" type="submit">
-              Add AI member
+              添加 AI 成员
             </button>
           </form>
         </div>
@@ -541,14 +562,14 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
       {invite && (
         <section className="invite-result" aria-live="polite">
           <div>
-            <p className="card-label">One-time invite link</p>
+            <p className="card-label">一次性邀请链接</p>
             <p>
-              Share this link with {invite.email}. It expires{' '}
-              {new Date(invite.expiresAt).toLocaleString()}.
+              将此链接分享给 {invite.email}。有效期至{' '}
+              {new Date(invite.expiresAt).toLocaleString('zh-CN')}。
             </p>
           </div>
           <div className="invite-copy">
-            <input aria-label="Invite link" readOnly value={invite.url} />
+            <input aria-label="邀请链接" readOnly value={invite.url} />
             <button
               className="secondary"
               type="button"
@@ -558,7 +579,7 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
                 }
               }}
             >
-              {inviteCopied ? 'Copied' : 'Copy link'}
+              {inviteCopied ? '已复制' : '复制链接'}
             </button>
           </div>
         </section>
@@ -572,7 +593,7 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
       <section aria-labelledby="members-title">
         <div className="section-heading">
           <p className="card-label" id="members-title">
-            Members
+            成员
           </p>
           <span>{team.members.length}</span>
         </div>
@@ -639,7 +660,7 @@ function MemberEditor({
   }
 
   async function remove() {
-    if (!window.confirm(`Remove ${member.displayName ?? 'this member'}?`)) return
+    if (!window.confirm(`确定要移除“${member.displayName ?? '该成员'}”吗？`)) return
     setBusy(true)
     try {
       await request(`/api/workspaces/${workspaceId}/members/${member.id}`, {}, 'DELETE')
@@ -655,40 +676,48 @@ function MemberEditor({
     <form className="member-card" onSubmit={save}>
       <div className="member-summary">
         <div>
-          <span className={`type-badge ${member.type.toLowerCase()}`}>{member.type}</span>
-          <h2>{member.displayName ?? 'Unnamed member'}</h2>
+          <span className={`type-badge ${member.type.toLowerCase()}`}>
+            {memberTypeLabels[member.type]}
+          </span>
+          <h2>{member.displayName ?? '未命名成员'}</h2>
           {member.email && <p>{member.email}</p>}
         </div>
         <div className="member-state">
-          <span>{member.type === 'AI' ? member.configurationStatus : member.role}</span>
-          <strong>{member.status}</strong>
+          <span>
+            {member.type === 'AI'
+              ? member.configurationStatus
+                ? configurationStatusLabels[member.configurationStatus]
+                : ''
+              : roleLabel(member.role)}
+          </span>
+          <strong>{lifecycleLabels[member.status]}</strong>
         </div>
       </div>
       <div className="member-fields">
         <Field
-          label="Display name"
+          label="显示名称"
           name="displayName"
           defaultValue={member.displayName ?? ''}
           disabled={!canManage}
         />
         <label className="field">
-          <span>Lifecycle</span>
+          <span>成员状态</span>
           <select name="status" defaultValue={member.status} disabled={!canManage || owner}>
-            <option value="ACTIVE">Active</option>
-            <option value="DISABLED">Disabled</option>
+            <option value="ACTIVE">启用</option>
+            <option value="DISABLED">停用</option>
           </select>
         </label>
         {member.type === 'HUMAN' && !owner && (
           <label className="field">
-            <span>Role</span>
+            <span>角色</span>
             <select name="role" defaultValue={member.role ?? 'AGENT'} disabled={!canManage}>
-              <option value="AGENT">Agent</option>
-              <option value="ADMIN">Admin</option>
+              <option value="AGENT">客服</option>
+              <option value="ADMIN">管理员</option>
             </select>
           </label>
         )}
         <label className="field">
-          <span>Capacity</span>
+          <span>同时处理数</span>
           <input
             name="maxActiveConversations"
             type="number"
@@ -706,7 +735,7 @@ function MemberEditor({
             defaultChecked={member.autoAssignmentEnabled}
             disabled={!canManage}
           />
-          Auto-assignment
+          自动分配
         </label>
         {member.type === 'HUMAN' && (
           <label className="check-field">
@@ -716,12 +745,12 @@ function MemberEditor({
               defaultChecked={member.availability ?? false}
               disabled={!canManage}
             />
-            Available now
+            当前可用
           </label>
         )}
       </div>
       <fieldset className="channel-fields" disabled={!canManage}>
-        <legend>Channel access</legend>
+        <legend>渠道权限</legend>
         {channels.length ? (
           channels.map((channel) => (
             <label className="check-field" key={channel.id}>
@@ -735,13 +764,13 @@ function MemberEditor({
             </label>
           ))
         ) : (
-          <span className="muted">No channels connected yet.</span>
+          <span className="muted">尚未连接任何渠道。</span>
         )}
       </fieldset>
       {canManage && (
         <div className="member-actions">
           <button className="secondary" disabled={busy} type="submit">
-            {busy ? 'Saving…' : 'Save changes'}
+            {busy ? '保存中…' : '保存更改'}
           </button>
           {!owner && (
             <button
@@ -750,7 +779,7 @@ function MemberEditor({
               type="button"
               onClick={() => void remove()}
             >
-              Remove
+              移除成员
             </button>
           )}
         </div>
@@ -762,7 +791,7 @@ function MemberEditor({
 function SignalRail() {
   return (
     <aside className="signal-rail" aria-hidden="true">
-      <span>INBOX SIGNAL</span>
+      <span>收件箱信号</span>
       <i />
       <i />
       <i />
@@ -773,7 +802,7 @@ function SignalRail() {
 function Loading() {
   return (
     <main className="loading" aria-live="polite">
-      <span>DS</span> Opening inbox…
+      <span>DS</span> 正在打开收件箱…
     </main>
   )
 }
@@ -784,7 +813,7 @@ function Unavailable({ message, onRetry }: { message: string; onRetry: () => Pro
       <span>DS</span>
       {message}
       <button className="text-button" type="button" onClick={() => void onRetry()}>
-        Retry
+        重试
       </button>
     </main>
   )
@@ -812,51 +841,51 @@ async function responseError(response: Response): Promise<ApiError> {
 }
 
 function authenticationErrorMessage(cause: unknown): string {
-  if (!(cause instanceof ApiError)) return 'Authentication failed'
+  if (!(cause instanceof ApiError)) return '身份验证失败'
   return (
     {
-      INVALID_EMAIL_OR_PASSWORD: 'Email or password is incorrect.',
-      NOT_READY: 'DeepSales is not ready. Try again shortly.',
-      RATE_LIMITED: 'Too many attempts. Try again later.',
-      USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL: 'An account already exists for this email.',
-      VALIDATION_ERROR: 'Check your email and password.',
-    }[cause.code] ?? 'Authentication failed'
+      INVALID_EMAIL_OR_PASSWORD: '邮箱或密码不正确。',
+      NOT_READY: 'DeepSales 尚未就绪，请稍后重试。',
+      RATE_LIMITED: '尝试次数过多，请稍后再试。',
+      USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL: '此邮箱已存在账户。',
+      VALIDATION_ERROR: '请检查邮箱和密码。',
+    }[cause.code] ?? '身份验证失败'
   )
 }
 
 function workspaceErrorMessage(cause: unknown): string {
-  if (!(cause instanceof ApiError)) return 'Workspace creation failed'
+  if (!(cause instanceof ApiError)) return '工作区创建失败'
   return (
     {
-      INVALID_REQUEST: 'Enter a workspace name.',
-      NOT_READY: 'DeepSales is not ready. Try again shortly.',
-      UNAUTHORIZED: 'Sign in again to create a workspace.',
-    }[cause.code] ?? 'Workspace creation failed'
+      INVALID_REQUEST: '请输入工作区名称。',
+      NOT_READY: 'DeepSales 尚未就绪，请稍后重试。',
+      UNAUTHORIZED: '请重新登录以创建工作区。',
+    }[cause.code] ?? '工作区创建失败'
   )
 }
 
 function invitationErrorMessage(cause: unknown): string {
-  if (!(cause instanceof ApiError)) return 'Invitation acceptance failed.'
+  if (!(cause instanceof ApiError)) return '接受邀请失败。'
   return (
     {
-      INVITATION_EMAIL_MISMATCH: 'Sign in with the invited work email.',
-      INVITATION_EXPIRED: 'This invitation has expired.',
-      INVITATION_INVALID: 'This invitation link is not valid.',
-      INVITATION_USED: 'This invitation has already been used.',
-      ALREADY_MEMBER: 'You already belong to this workspace.',
-    }[cause.code] ?? 'Invitation acceptance failed.'
+      INVITATION_EMAIL_MISMATCH: '请使用受邀工作邮箱登录。',
+      INVITATION_EXPIRED: '此邀请已过期。',
+      INVITATION_INVALID: '此邀请链接无效。',
+      INVITATION_USED: '此邀请已被使用。',
+      ALREADY_MEMBER: '你已属于此工作区。',
+    }[cause.code] ?? '接受邀请失败。'
   )
 }
 
 function teamErrorMessage(cause: unknown): string {
-  if (!(cause instanceof ApiError)) return 'Team could not be updated.'
+  if (!(cause instanceof ApiError)) return '团队信息更新失败。'
   return (
     {
-      FORBIDDEN: 'You do not have permission to manage this team.',
-      ALREADY_MEMBER: 'That email already belongs to this workspace.',
-      INVALID_REQUEST: 'Check the team settings and try again.',
-      NOT_FOUND: 'That member no longer exists.',
-    }[cause.code] ?? 'Team could not be updated.'
+      FORBIDDEN: '你没有管理此团队的权限。',
+      ALREADY_MEMBER: '此邮箱已属于该工作区。',
+      INVALID_REQUEST: '请检查团队设置后重试。',
+      NOT_FOUND: '该成员已不存在。',
+    }[cause.code] ?? '团队信息更新失败。'
   )
 }
 
