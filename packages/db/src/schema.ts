@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm'
 import {
   boolean,
   check,
+  index,
   integer,
   pgEnum,
   pgTable,
@@ -21,18 +22,22 @@ export const user = pgTable('users', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 })
 
-export const session = pgTable('sessions', {
-  id: uuid().defaultRandom().primaryKey(),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-  token: text().notNull().unique(),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
-  ipAddress: text('ip_address'),
-  userAgent: text('user_agent'),
-  userId: uuid('user_id')
-    .notNull()
-    .references(() => user.id, { onDelete: 'cascade' }),
-})
+export const session = pgTable(
+  'sessions',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    token: text().notNull().unique(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    ipAddress: text('ip_address'),
+    userAgent: text('user_agent'),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+  },
+  (table) => [index('sessions_user_id_idx').on(table.userId)],
+)
 
 export const account = pgTable(
   'accounts',
@@ -53,17 +58,24 @@ export const account = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [unique().on(table.providerId, table.accountId)],
+  (table) => [
+    index('accounts_user_id_idx').on(table.userId),
+    unique().on(table.providerId, table.accountId),
+  ],
 )
 
-export const verification = pgTable('verifications', {
-  id: uuid().defaultRandom().primaryKey(),
-  identifier: text().notNull(),
-  value: text().notNull(),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
-})
+export const verification = pgTable(
+  'verifications',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    identifier: text().notNull(),
+    value: text().notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('verifications_identifier_idx').on(table.identifier)],
+)
 
 export const workspaceRole = pgEnum('workspace_role', ['OWNER', 'ADMIN', 'AGENT'])
 export const memberType = pgEnum('member_type', ['HUMAN', 'AI'])
@@ -104,7 +116,7 @@ export const member = pgTable(
     workspaceUserAccessId: uuid('workspace_user_access_id')
       .unique()
       .references(() => workspaceUserAccess.id, { onDelete: 'cascade' }),
-    displayName: text('display_name').notNull(),
+    displayName: text('display_name'),
     avatarUrl: text('avatar_url'),
     status: memberStatus().default('ACTIVE').notNull(),
     autoAssignmentEnabled: boolean('auto_assignment_enabled').default(true).notNull(),

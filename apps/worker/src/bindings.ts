@@ -1,5 +1,6 @@
 export type Bindings = {
   APP_URL: string
+  AUTH_RATE_LIMITER: RateLimit
   BETTER_AUTH_SECRET: string
   HYPERDRIVE: Hyperdrive
   META_APP_SECRET: string

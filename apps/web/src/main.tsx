@@ -9,30 +9,62 @@ import {
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 
+type Workspace = {
+  id: string
+  name: string
+  role: 'OWNER' | 'ADMIN' | 'AGENT'
+  memberId: string
+}
+
 type Me = {
   user: { id: string; name: string; email: string }
-  workspace: {
-    id: string
-    name: string
-    role: 'OWNER' | 'ADMIN' | 'AGENT'
-    memberId: string
-  } | null
+  workspaces: Workspace[]
+  workspace: Workspace | null
+}
+
+class ApiError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+  }
 }
 
 function App() {
   const [me, setMe] = useState<Me | null>()
+  const [loadError, setLoadError] = useState('')
 
   const refresh = useCallback(async () => {
-    const response = await fetch('/api/me')
+    const activeWorkspaceId = localStorage.getItem('activeWorkspaceId')
+    const response = await fetch('/api/me', {
+      headers: activeWorkspaceId ? { 'x-workspace-id': activeWorkspaceId } : undefined,
+    })
     if (response.status === 401) return setMe(null)
-    if (!response.ok) throw new Error('DeepSales is not ready. Check the database connection.')
-    setMe((await response.json()) as Me)
+    if (!response.ok) throw await responseError(response)
+    const next = (await response.json()) as Me
+    if (next.workspace) localStorage.setItem('activeWorkspaceId', next.workspace.id)
+    setMe(next)
   }, [])
 
-  useEffect(() => {
-    refresh().catch(() => setMe(null))
+  const load = useCallback(async () => {
+    setLoadError('')
+    try {
+      await refresh()
+    } catch (cause) {
+      setLoadError(
+        cause instanceof ApiError && cause.code === 'NOT_READY'
+          ? 'DeepSales is not ready. Check the database connection.'
+          : 'The inbox could not be loaded. Try again.',
+      )
+    }
   }, [refresh])
 
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  if (loadError) return <Unavailable message={loadError} onRetry={load} />
   if (me === undefined) return <Loading />
   if (!me) return <Auth onAuthenticated={refresh} />
   if (!me.workspace) return <WorkspaceSetup userName={me.user.name} onCreated={refresh} />
@@ -40,6 +72,10 @@ function App() {
     <Shell
       me={me as Me & { workspace: NonNullable<Me['workspace']> }}
       onSignOut={() => setMe(null)}
+      onWorkspaceChange={async (workspaceId) => {
+        localStorage.setItem('activeWorkspaceId', workspaceId)
+        await load()
+      }}
     />
   )
 }
@@ -208,12 +244,15 @@ function WorkspaceSetup({
 function Shell({
   me,
   onSignOut,
+  onWorkspaceChange,
 }: {
   me: Me & { workspace: NonNullable<Me['workspace']> }
   onSignOut: () => void
+  onWorkspaceChange: (workspaceId: string) => Promise<void>
 }) {
   async function signOut() {
     await request('/api/auth/sign-out', {})
+    localStorage.removeItem('activeWorkspaceId')
     history.replaceState(null, '', '/login')
     onSignOut()
   }
@@ -226,7 +265,21 @@ function Shell({
         </a>
         <div className="workspace-label">
           <small>Workspace</small>
-          <strong>{me.workspace.name}</strong>
+          {me.workspaces.length > 1 ? (
+            <select
+              aria-label="Active workspace"
+              value={me.workspace.id}
+              onChange={(event) => void onWorkspaceChange(event.currentTarget.value)}
+            >
+              {me.workspaces.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <strong>{me.workspace.name}</strong>
+          )}
         </div>
         <nav aria-label="Primary navigation">
           <a aria-current="page" href="/inbox">
@@ -283,15 +336,37 @@ function Loading() {
   )
 }
 
+function Unavailable({ message, onRetry }: { message: string; onRetry: () => Promise<void> }) {
+  return (
+    <main className="loading" role="alert">
+      <span>DS</span>
+      {message}
+      <button className="text-button" type="button" onClick={() => void onRetry()}>
+        Retry
+      </button>
+    </main>
+  )
+}
+
 async function request(path: string, body: unknown) {
   const response = await fetch(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   })
-  const payload = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
-  if (!response.ok) throw new Error(payload.error?.message ?? 'Request failed')
-  return payload
+  if (!response.ok) throw await responseError(response)
+  return response.json().catch(() => ({}))
+}
+
+async function responseError(response: Response): Promise<ApiError> {
+  const payload = (await response.json().catch(() => ({}))) as {
+    code?: string
+    message?: string
+    error?: { code?: string; message?: string }
+  }
+  const code = payload.error?.code ?? payload.code ?? 'REQUEST_FAILED'
+  const message = payload.error?.message ?? payload.message ?? 'Request failed'
+  return new ApiError(code, message)
 }
 
 const root = document.getElementById('root')

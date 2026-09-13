@@ -45,28 +45,54 @@ app.get('/ready', async (c) => {
   }
 })
 
+app.use('/api/auth/*', async (c, next) => {
+  const credentialAttempt =
+    c.req.method === 'POST' &&
+    (c.req.path.endsWith('/sign-in/email') || c.req.path.endsWith('/sign-up/email'))
+  if (!credentialAttempt) return next()
+  if (!hasAuthBindings(c.env)) return notReady(c)
+
+  const body = (await c.req.raw
+    .clone()
+    .json()
+    .catch(() => ({}))) as { email?: unknown }
+  const email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : 'invalid'
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(email))
+  const key = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join(
+    '',
+  )
+  const { success } = await c.env.AUTH_RATE_LIMITER.limit({ key: `${c.req.path}:${key}` })
+  if (!success) {
+    return c.json({ error: { code: 'RATE_LIMITED', message: 'Try again later' } }, 429)
+  }
+  return next()
+})
+
 app.all('/api/auth/*', async (c) => {
-  if (!hasApplicationBindings(c.env)) return notReady(c)
+  if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, (db) => createAuth(db, c.env).handler(c.req.raw))
 })
 
 app.get('/api/me', async (c) => {
-  if (!hasApplicationBindings(c.env)) return notReady(c)
+  if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
     const auth = createAuth(db, c.env)
     const session = await auth.api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
 
-    const access = await findAccess(db, session.user.id)
+    const accesses = await findAccesses(db, session.user.id)
+    const requestedWorkspaceId = c.req.header('x-workspace-id')
+    const access = accesses.find(({ id }) => id === requestedWorkspaceId) ?? accesses.at(0) ?? null
     return c.json({
       user: { id: session.user.id, name: session.user.name, email: session.user.email },
-      workspace: access ?? null,
+      workspaces: accesses,
+      workspace: access,
     })
   })
 })
 
 app.post('/api/workspaces', async (c) => {
-  if (!hasApplicationBindings(c.env)) return notReady(c)
+  if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
     const auth = createAuth(db, c.env)
     const session = await auth.api.getSession({ headers: c.req.raw.headers })
@@ -87,12 +113,12 @@ app.post('/api/workspaces', async (c) => {
 })
 
 app.get('/api/workspaces/:workspaceId', async (c) => {
-  if (!hasApplicationBindings(c.env)) return notReady(c)
+  if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
 
-    const access = await findAccess(db, session.user.id, c.req.param('workspaceId'))
+    const [access] = await findAccesses(db, session.user.id, c.req.param('workspaceId'))
     return access
       ? c.json({ workspace: access })
       : c.json({ error: { code: 'FORBIDDEN', message: 'Workspace access required' } }, 403)
@@ -100,7 +126,24 @@ app.get('/api/workspaces/:workspaceId', async (c) => {
 })
 
 function hasApplicationBindings(env: Bindings): boolean {
-  return Boolean(env.APP_URL && env.BETTER_AUTH_SECRET && env.HYPERDRIVE?.connectionString)
+  return Boolean(
+    hasAuthBindings(env) &&
+      env.META_APP_SECRET &&
+      env.META_VERIFY_TOKEN &&
+      env.META_PAGE_ID &&
+      env.META_PAGE_ACCESS_TOKEN &&
+      env.META_GRAPH_API_VERSION &&
+      env.M0_FIXED_REPLY,
+  )
+}
+
+function hasAuthBindings(env: Bindings): boolean {
+  return Boolean(
+    env.APP_URL &&
+      env.AUTH_RATE_LIMITER &&
+      env.BETTER_AUTH_SECRET &&
+      env.HYPERDRIVE?.connectionString,
+  )
 }
 
 async function withDatabase<T>(env: Bindings, work: (db: Database) => T | Promise<T>): Promise<T> {
@@ -112,8 +155,8 @@ async function withDatabase<T>(env: Bindings, work: (db: Database) => T | Promis
   }
 }
 
-async function findAccess(db: Database, userId: string, workspaceId?: string) {
-  const [access] = await db
+async function findAccesses(db: Database, userId: string, workspaceId?: string) {
+  return db
     .select({
       id: workspace.id,
       name: workspace.name,
@@ -128,8 +171,7 @@ async function findAccess(db: Database, userId: string, workspaceId?: string) {
         ? and(eq(workspaceUserAccess.userId, userId), eq(workspace.id, workspaceId))
         : eq(workspaceUserAccess.userId, userId),
     )
-    .limit(1)
-  return access
+    .orderBy(workspace.createdAt, workspace.id)
 }
 
 function unauthorized(c: Context<{ Bindings: Bindings }>) {

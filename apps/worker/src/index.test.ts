@@ -10,6 +10,16 @@ const bindings = {
   M0_FIXED_REPLY: 'fixed reply',
 }
 
+const applicationBindings = {
+  ...bindings,
+  APP_URL: 'http://localhost:8787',
+  BETTER_AUTH_SECRET: 'test-only-secret-that-is-at-least-32-characters',
+  HYPERDRIVE: { connectionString: 'postgresql://test:test@127.0.0.1:1/test' } as Hyperdrive,
+  AUTH_RATE_LIMITER: {
+    limit: vi.fn().mockResolvedValue({ success: true }),
+  } as unknown as RateLimit,
+}
+
 afterEach(() => vi.unstubAllGlobals())
 
 describe('M0 Facebook webhook', () => {
@@ -110,6 +120,36 @@ describe('application readiness', () => {
       ok: false,
       error: { code: 'NOT_READY', message: 'Database is unavailable' },
     })
+  })
+
+  it('reports a database failure and incomplete webhook configuration', async () => {
+    const failedDatabase = await app.request('/ready', undefined, applicationBindings)
+    const missingWebhookSecret = await app.request('/ready', undefined, {
+      ...applicationBindings,
+      META_APP_SECRET: '',
+    })
+
+    expect(failedDatabase.status).toBe(503)
+    expect(missingWebhookSecret.status).toBe(503)
+  })
+
+  it('rate limits credential attempts before opening a database connection', async () => {
+    const limit = vi.fn().mockResolvedValue({ success: false })
+    const response = await app.request(
+      '/api/auth/sign-in/email',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'owner@example.com', password: 'password' }),
+      },
+      { ...applicationBindings, AUTH_RATE_LIMITER: { limit } as unknown as RateLimit },
+    )
+
+    expect(response.status).toBe(429)
+    expect(await response.json()).toEqual({
+      error: { code: 'RATE_LIMITED', message: 'Try again later' },
+    })
+    expect(limit).toHaveBeenCalledOnce()
   })
 })
 

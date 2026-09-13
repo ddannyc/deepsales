@@ -19,7 +19,8 @@ body {
   min-height: 100vh;
 }
 button,
-input {
+input,
+select {
   font: inherit;
 }
 button,
@@ -28,9 +29,19 @@ a {
 }
 button:focus-visible,
 a:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible {
   outline: 3px solid #81a9ff;
   outline-offset: 3px;
+}
+.workspace-label select {
+  max-width: 180px;
+  border: 0;
+  padding: 1px 18px 1px 0;
+  color: var(--ink);
+  background: transparent;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .auth-layout {
