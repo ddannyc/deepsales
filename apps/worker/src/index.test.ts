@@ -151,6 +151,45 @@ describe('application readiness', () => {
     })
     expect(limit).toHaveBeenCalledOnce()
   })
+
+  it('wraps authentication validation errors in the API error envelope', async () => {
+    const response = await app.request(
+      '/api/auth/sign-in/email',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      },
+      applicationBindings,
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      error: { code: 'VALIDATION_ERROR', message: expect.any(String) },
+    })
+  })
+
+  it('wraps unexpected API failures without exposing internals', async () => {
+    const response = await app.request(
+      '/api/auth/sign-in/email',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'owner@example.com', password: 'password' }),
+      },
+      {
+        ...applicationBindings,
+        AUTH_RATE_LIMITER: {
+          limit: vi.fn().mockRejectedValue(new Error('secret infrastructure detail')),
+        } as unknown as RateLimit,
+      },
+    )
+
+    expect(response.status).toBe(500)
+    expect(await response.json()).toEqual({
+      error: { code: 'INTERNAL_ERROR', message: 'Request failed' },
+    })
+  })
 })
 
 async function deliver(body: string, signature: string): Promise<Response> {

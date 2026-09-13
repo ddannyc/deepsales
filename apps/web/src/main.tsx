@@ -23,11 +23,8 @@ type Me = {
 }
 
 class ApiError extends Error {
-  constructor(
-    readonly code: string,
-    message: string,
-  ) {
-    super(message)
+  constructor(readonly code: string) {
+    super(code)
   }
 }
 
@@ -98,7 +95,7 @@ function Auth({ onAuthenticated }: { onAuthenticated: () => Promise<void> }) {
       })
       await onAuthenticated()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Authentication failed')
+      setError(authenticationErrorMessage(cause))
     } finally {
       setBusy(false)
     }
@@ -212,7 +209,7 @@ function WorkspaceSetup({
       await request('/api/workspaces', { name: data.get('name') })
       await onCreated()
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Workspace creation failed')
+      setError(workspaceErrorMessage(cause))
     } finally {
       setBusy(false)
     }
@@ -360,13 +357,33 @@ async function request(path: string, body: unknown) {
 
 async function responseError(response: Response): Promise<ApiError> {
   const payload = (await response.json().catch(() => ({}))) as {
-    code?: string
-    message?: string
     error?: { code?: string; message?: string }
   }
-  const code = payload.error?.code ?? payload.code ?? 'REQUEST_FAILED'
-  const message = payload.error?.message ?? payload.message ?? 'Request failed'
-  return new ApiError(code, message)
+  return new ApiError(payload.error?.code ?? 'REQUEST_FAILED')
+}
+
+function authenticationErrorMessage(cause: unknown): string {
+  if (!(cause instanceof ApiError)) return 'Authentication failed'
+  return (
+    {
+      INVALID_EMAIL_OR_PASSWORD: 'Email or password is incorrect.',
+      NOT_READY: 'DeepSales is not ready. Try again shortly.',
+      RATE_LIMITED: 'Too many attempts. Try again later.',
+      USER_ALREADY_EXISTS_USE_ANOTHER_EMAIL: 'An account already exists for this email.',
+      VALIDATION_ERROR: 'Check your email and password.',
+    }[cause.code] ?? 'Authentication failed'
+  )
+}
+
+function workspaceErrorMessage(cause: unknown): string {
+  if (!(cause instanceof ApiError)) return 'Workspace creation failed'
+  return (
+    {
+      INVALID_REQUEST: 'Enter a workspace name.',
+      NOT_READY: 'DeepSales is not ready. Try again shortly.',
+      UNAUTHORIZED: 'Sign in again to create a workspace.',
+    }[cause.code] ?? 'Workspace creation failed'
+  )
 }
 
 const root = document.getElementById('root')

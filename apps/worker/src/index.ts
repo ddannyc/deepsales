@@ -32,6 +32,14 @@ const app = new Hono<{ Bindings: Bindings }>()
 
 const workspaceInput = z.object({ name: z.string().trim().min(1).max(100) })
 
+app.onError((_error, c) => {
+  if (c.req.path.startsWith('/api/')) {
+    console.error(JSON.stringify({ event: 'api_request_failed', path: c.req.path }))
+    return c.json({ error: { code: 'INTERNAL_ERROR', message: 'Request failed' } }, 500)
+  }
+  return c.text('Internal Server Error', 500)
+})
+
 app.get('/health', (c) => c.json({ ok: true }))
 
 app.get('/ready', async (c) => {
@@ -70,7 +78,8 @@ app.use('/api/auth/*', async (c, next) => {
 
 app.all('/api/auth/*', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
-  return withDatabase(c.env, (db) => createAuth(db, c.env).handler(c.req.raw))
+  const response = await withDatabase(c.env, (db) => createAuth(db, c.env).handler(c.req.raw))
+  return response.ok ? response : normalizeAuthError(response)
 })
 
 app.get('/api/me', async (c) => {
@@ -183,6 +192,24 @@ function notReady(c: Context<{ Bindings: Bindings }>) {
     { ok: false, error: { code: 'NOT_READY', message: 'Database is unavailable' } },
     503,
   )
+}
+
+async function normalizeAuthError(response: Response): Promise<Response> {
+  const payload = (await response
+    .clone()
+    .json()
+    .catch(() => ({}))) as {
+    code?: unknown
+    message?: unknown
+  }
+  const code = typeof payload.code === 'string' ? payload.code : 'AUTH_FAILED'
+  const message = typeof payload.message === 'string' ? payload.message : 'Authentication failed'
+  const headers = new Headers(response.headers)
+  headers.set('Content-Type', 'application/json; charset=UTF-8')
+  return new Response(JSON.stringify({ error: { code, message } }), {
+    status: response.status,
+    headers,
+  })
 }
 
 app.get('/webhooks/facebook', (c) => {
