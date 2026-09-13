@@ -424,7 +424,8 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
 
   async function inviteMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const data = new FormData(event.currentTarget)
+    const form = event.currentTarget
+    const data = new FormData(form)
     try {
       const result = (await request(`/api/workspaces/${workspace.id}/invitations`, {
         email: data.get('email'),
@@ -437,7 +438,7 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
       })) as { invitation: Invitation }
       setInvite(result.invitation)
       setInviteCopied(false)
-      event.currentTarget.reset()
+      form.reset()
     } catch (cause) {
       setLoadError(teamErrorMessage(cause))
     }
@@ -445,13 +446,14 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
 
   async function createAi(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const data = new FormData(event.currentTarget)
+    const form = event.currentTarget
+    const data = new FormData(form)
     try {
       await request(`/api/workspaces/${workspace.id}/members`, {
         type: 'AI',
         displayName: data.get('displayName'),
       })
-      event.currentTarget.reset()
+      form.reset()
       await refresh()
     } catch (cause) {
       setLoadError(teamErrorMessage(cause))
