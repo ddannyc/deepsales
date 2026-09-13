@@ -6,6 +6,7 @@ import {
   integer,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -80,6 +81,8 @@ export const verification = pgTable(
 export const workspaceRole = pgEnum('workspace_role', ['OWNER', 'ADMIN', 'AGENT'])
 export const memberType = pgEnum('member_type', ['HUMAN', 'AI'])
 export const memberStatus = pgEnum('member_status', ['ACTIVE', 'DISABLED'])
+export const channelProvider = pgEnum('channel_provider', ['FACEBOOK_MESSENGER'])
+export const channelStatus = pgEnum('channel_status', ['ACTIVE', 'DISABLED'])
 
 export const workspace = pgTable('workspace', {
   id: uuid().defaultRandom().primaryKey(),
@@ -103,6 +106,36 @@ export const workspaceUserAccess = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [unique().on(table.workspaceId, table.userId)],
+)
+
+export const workspaceInvitation = pgTable(
+  'workspace_invitation',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    email: text().notNull(),
+    role: workspaceRole().notNull(),
+    displayName: text('display_name'),
+    available: boolean().default(true).notNull(),
+    autoAssignmentEnabled: boolean('auto_assignment_enabled').default(true).notNull(),
+    maxActiveConversations: integer('max_active_conversations').default(10).notNull(),
+    channelIds: uuid('channel_ids').array().default(sql`ARRAY[]::uuid[]`).notNull(),
+    tokenHash: text('token_hash').notNull().unique(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+    createdByUserId: uuid('created_by_user_id')
+      .notNull()
+      .references(() => user.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('workspace_invitation_workspace_id_idx').on(table.workspaceId),
+    check('workspace_invitation_role', sql`${table.role} <> 'OWNER'`),
+    check('workspace_invitation_capacity', sql`${table.maxActiveConversations} >= 0`),
+  ],
 )
 
 export const member = pgTable(
@@ -142,3 +175,32 @@ export const humanMemberAvailability = pgTable('human_member_availability', {
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 })
+
+export const channel = pgTable(
+  'channel',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    provider: channelProvider().notNull(),
+    displayName: text('display_name').notNull(),
+    status: channelStatus().default('ACTIVE').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('channel_workspace_id_idx').on(table.workspaceId)],
+)
+
+export const memberChannelAccess = pgTable(
+  'member_channel_access',
+  {
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => channel.id, { onDelete: 'cascade' }),
+  },
+  (table) => [primaryKey({ columns: [table.memberId, table.channelId] })],
+)

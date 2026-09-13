@@ -1,0 +1,1 @@
+ALTER TABLE "workspace_invitation" ADD CONSTRAINT "workspace_invitation_role" CHECK ("workspace_invitation"."role" <> 'OWNER');

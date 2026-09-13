@@ -1,7 +1,15 @@
 import {
+  acceptInvitation,
   bootstrapWorkspace,
   createDatabase,
+  createAiMember,
+  createInvitation,
+  deleteMember,
+  listTeam,
+  MemberError,
   member,
+  setMemberChannelAccess,
+  updateMember,
   workspace,
   workspaceUserAccess,
   type Database,
@@ -31,6 +39,39 @@ const recentMessageIds = new Set<string>()
 const app = new Hono<{ Bindings: Bindings }>()
 
 const workspaceInput = z.object({ name: z.string().trim().min(1).max(100) })
+const invitationInput = z.object({
+  email: z
+    .string()
+    .trim()
+    .email()
+    .transform((email) => email.toLowerCase()),
+  role: z.enum(['ADMIN', 'AGENT']),
+  displayName: z.string().trim().min(1).max(100).nullable().optional(),
+  available: z.boolean().optional(),
+  autoAssignmentEnabled: z.boolean().optional(),
+  maxActiveConversations: z.number().int().min(0).max(10_000).optional(),
+  channelIds: z.array(z.string().uuid()).max(100).optional(),
+})
+const aiMemberInput = z.object({
+  type: z.literal('AI').optional(),
+  displayName: z.string().trim().min(1).max(100),
+  avatarUrl: z.string().trim().max(2_000).nullable().optional(),
+  autoAssignmentEnabled: z.boolean().optional(),
+  maxActiveConversations: z.number().int().min(0).max(10_000).optional(),
+  channelIds: z.array(z.string().uuid()).max(100).optional(),
+})
+const memberUpdateInput = z.object({
+  displayName: z.string().trim().min(1).max(100).nullable().optional(),
+  avatarUrl: z.string().trim().max(2_000).nullable().optional(),
+  status: z.enum(['ACTIVE', 'DISABLED']).optional(),
+  autoAssignmentEnabled: z.boolean().optional(),
+  maxActiveConversations: z.number().int().min(0).max(10_000).optional(),
+  available: z.boolean().optional(),
+  role: z.enum(['ADMIN', 'AGENT']).optional(),
+  channelIds: z.array(z.string().uuid()).max(100).optional(),
+})
+const channelAccessInput = z.object({ channelIds: z.array(z.string().uuid()).max(100) })
+const invitationAcceptInput = z.object({ token: z.string().min(1).max(200) })
 
 app.onError((_error, c) => {
   if (c.req.path.startsWith('/api/')) {
@@ -134,6 +175,185 @@ app.get('/api/workspaces/:workspaceId', async (c) => {
   })
 })
 
+app.get('/api/workspaces/:workspaceId/team', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    if (!(await findWorkspaceAccess(db, session.user.id, c.req.param('workspaceId')))) {
+      return forbidden(c)
+    }
+    return c.json(await listTeam(db, c.req.param('workspaceId')))
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/invitations', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+
+    const input = invitationInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json(
+        { error: { code: 'INVALID_REQUEST', message: 'Enter a valid invitation' } },
+        400,
+      )
+    }
+
+    try {
+      const invitation = await createInvitation(db, {
+        workspaceId: c.req.param('workspaceId'),
+        createdByUserId: session.user.id,
+        ...input.data,
+      })
+      return c.json(
+        {
+          invitation: {
+            id: invitation.id,
+            workspaceId: invitation.workspaceId,
+            email: invitation.email,
+            role: invitation.role,
+            displayName: invitation.displayName,
+            expiresAt: invitation.expiresAt,
+            token: invitation.token,
+            url: invitationUrl(c.env.APP_URL, invitation.token),
+          },
+        },
+        201,
+      )
+    } catch (error) {
+      return memberErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/invitations/accept', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+
+    const input = invitationAcceptInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json(
+        { error: { code: 'INVITATION_INVALID', message: 'Invitation is invalid' } },
+        400,
+      )
+    }
+
+    try {
+      const accepted = await acceptInvitation(db, {
+        token: input.data.token,
+        userId: session.user.id,
+        userEmail: session.user.email,
+        userName: session.user.name,
+      })
+      const [access] = await findAccesses(db, session.user.id, accepted.workspaceId)
+      return c.json({ workspace: access, memberId: accepted.memberId })
+    } catch (error) {
+      return memberErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/members', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const input = aiMemberInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json({ error: { code: 'INVALID_REQUEST', message: 'Enter a valid AI member' } }, 400)
+    }
+
+    try {
+      const created = await createAiMember(db, {
+        workspaceId: c.req.param('workspaceId'),
+        createdByUserId: session.user.id,
+        ...input.data,
+      })
+      const team = await listTeam(db, c.req.param('workspaceId'))
+      return c.json({ member: team.members.find(({ id }) => id === created.id) }, 201)
+    } catch (error) {
+      return memberErrorResponse(c, error)
+    }
+  })
+})
+
+app.patch('/api/workspaces/:workspaceId/members/:memberId', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const input = memberUpdateInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json(
+        { error: { code: 'INVALID_REQUEST', message: 'Enter valid member settings' } },
+        400,
+      )
+    }
+
+    try {
+      await updateMember(db, {
+        workspaceId: c.req.param('workspaceId'),
+        memberId: c.req.param('memberId'),
+        actingUserId: session.user.id,
+        ...input.data,
+      })
+      const team = await listTeam(db, c.req.param('workspaceId'))
+      return c.json({ member: team.members.find(({ id }) => id === c.req.param('memberId')) })
+    } catch (error) {
+      return memberErrorResponse(c, error)
+    }
+  })
+})
+
+app.put('/api/workspaces/:workspaceId/members/:memberId/channels', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const input = channelAccessInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json(
+        { error: { code: 'INVALID_REQUEST', message: 'Enter valid channel access' } },
+        400,
+      )
+    }
+
+    try {
+      const access = await setMemberChannelAccess(db, {
+        workspaceId: c.req.param('workspaceId'),
+        memberId: c.req.param('memberId'),
+        actingUserId: session.user.id,
+        channelIds: input.data.channelIds,
+      })
+      return c.json({ access })
+    } catch (error) {
+      return memberErrorResponse(c, error)
+    }
+  })
+})
+
+app.delete('/api/workspaces/:workspaceId/members/:memberId', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      await deleteMember(db, {
+        workspaceId: c.req.param('workspaceId'),
+        memberId: c.req.param('memberId'),
+        actingUserId: session.user.id,
+      })
+      return c.body(null, 204)
+    } catch (error) {
+      return memberErrorResponse(c, error)
+    }
+  })
+})
+
 function hasApplicationBindings(env: Bindings): boolean {
   return Boolean(
     hasAuthBindings(env) &&
@@ -183,8 +403,40 @@ async function findAccesses(db: Database, userId: string, workspaceId?: string) 
     .orderBy(workspace.createdAt, workspace.id)
 }
 
+async function findWorkspaceAccess(db: Database, userId: string, workspaceId: string) {
+  const [access] = await db
+    .select({ id: workspaceUserAccess.id, role: workspaceUserAccess.role })
+    .from(workspaceUserAccess)
+    .where(
+      and(eq(workspaceUserAccess.userId, userId), eq(workspaceUserAccess.workspaceId, workspaceId)),
+    )
+    .limit(1)
+  return access ?? null
+}
+
 function unauthorized(c: Context<{ Bindings: Bindings }>) {
   return c.json({ error: { code: 'UNAUTHORIZED', message: 'Sign in required' } }, 401)
+}
+
+function forbidden(c: Context<{ Bindings: Bindings }>) {
+  return c.json({ error: { code: 'FORBIDDEN', message: 'Workspace access required' } }, 403)
+}
+
+function invitationUrl(appUrl: string, token: string) {
+  return `${appUrl.replace(/\/$/, '')}/invite?token=${encodeURIComponent(token)}`
+}
+
+function memberErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (!(error instanceof MemberError)) throw error
+  const status =
+    error.code === 'FORBIDDEN' || error.code === 'INVITATION_EMAIL_MISMATCH'
+      ? 403
+      : error.code === 'NOT_FOUND'
+        ? 404
+        : error.code === 'ALREADY_MEMBER' || error.code === 'INVITATION_USED'
+          ? 409
+          : 400
+  return c.json({ error: { code: error.code, message: error.message } }, status)
 }
 
 function notReady(c: Context<{ Bindings: Bindings }>) {
