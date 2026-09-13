@@ -620,7 +620,7 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
                   {facebookStatusLabels[channel.connectionStatus]}
                   {channel.lastCheckedAt && ` · 最近检查 ${formatDate(channel.lastCheckedAt)}`}
                 </p>
-                {channel.lastErrorMessage && (
+                {(channel.lastErrorCode || channel.lastErrorMessage) && (
                   <p className="form-error">
                     连接需要处理 · {channel.lastErrorCode ?? 'FACEBOOK_CHECK_FAILED'}
                   </p>
