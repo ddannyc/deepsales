@@ -1,17 +1,17 @@
 import {
-  completeFacebookOAuthSelection,
   assertFacebookPagesAvailable,
+  completeFacebookOAuthSelection,
   connectFacebookPages,
   consumeFacebookOAuthState,
+  type Database,
   FacebookError,
+  type FacebookPageConnection,
   getFacebookChannelForManager,
   getFacebookOAuthToken,
   markFacebookChannelHealth,
   recordFacebookConnectionFailure,
   startFacebookOAuth,
   storeFacebookOAuthToken,
-  type Database,
-  type FacebookPageConnection,
 } from '@deepsales/db'
 import type { Bindings } from './bindings'
 import {
@@ -19,8 +19,8 @@ import {
   createFacebookAdapter,
   decryptFacebookToken,
   encryptFacebookToken,
-  redactedFacebookFailure,
   type FacebookPageSummary,
+  redactedFacebookFailure,
 } from './facebook'
 
 export type FacebookServiceConfig = {
@@ -221,5 +221,7 @@ function facebookRedirectUri(appUrl: string) {
 }
 
 function selectablePages<T extends { tasks: string[] }>(pages: T[]) {
-  return pages.filter((page) => page.tasks.includes('MESSAGE'))
+  return pages.filter((page) =>
+    page.tasks.some((task) => task === 'MESSAGING' || task.endsWith('_MESSAGING')),
+  )
 }
