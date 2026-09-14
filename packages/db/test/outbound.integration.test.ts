@@ -276,6 +276,40 @@ describe.skipIf(!connectionString)('human reply delivery', () => {
     ).toHaveLength(1)
   })
 
+  it('keeps a committed reply deliverable after ownership changes', async () => {
+    const fixture = await createFixture(db)
+    await takeOverConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: fixture.conversationId,
+      actingUserId: fixture.ownerId,
+    })
+    const created = await createHumanReply(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: fixture.conversationId,
+      actingUserId: fixture.ownerId,
+      text: 'Ownership can change after commit',
+    })
+
+    await db
+      .update(conversation)
+      .set({
+        assigneeMemberId: null,
+        queueReason: 'MANUAL_UNASSIGN',
+        routingQueuedAt: new Date(),
+      })
+      .where(eq(conversation.id, fixture.conversationId))
+
+    const claimed = await claimOutboundMessage(db, { messageId: created.message.id })
+    const sent = await completeOutboundMessage(db, {
+      messageId: created.message.id,
+      attemptId: claimed?.attemptId ?? '',
+      externalMessageId: 'meta-independent-1',
+    })
+    expect(sent).toEqual(
+      expect.objectContaining({ deliveryState: 'SENT', externalMessageId: 'meta-independent-1' }),
+    )
+  })
+
   it('fails an abandoned claim instead of allowing a resend', async () => {
     const fixture = await createFixture(db)
     await takeOverConversation(db, {
