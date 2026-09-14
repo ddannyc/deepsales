@@ -32,7 +32,7 @@ pnpm run deploy
 - Node.js、pnpm 已安装。
 - 一个可用的 Neon PostgreSQL 数据库，以及生产环境直连 `DATABASE_URL`。
 - Cloudflare 账号和 Wrangler 登录权限。
-- Meta App、App Secret、Webhook Verify Token、OpenAI API key，以及可连接的 Facebook Page。
+- Meta App、App Secret、Webhook Verify Token、Alibaba Cloud International Model Studio API key，以及可连接的 Facebook Page。
 
 所有命令均在仓库根目录执行。
 
@@ -106,7 +106,7 @@ pnpm --filter @deepsales/worker exec wrangler secret put BETTER_AUTH_SECRET
 pnpm --filter @deepsales/worker exec wrangler secret put META_APP_SECRET
 pnpm --filter @deepsales/worker exec wrangler secret put META_VERIFY_TOKEN
 pnpm --filter @deepsales/worker exec wrangler secret put TOKEN_ENCRYPTION_KEY
-pnpm --filter @deepsales/worker exec wrangler secret put OPENAI_API_KEY
+pnpm --filter @deepsales/worker exec wrangler secret put AI_API_KEY
 ```
 
 要求：
@@ -115,7 +115,9 @@ pnpm --filter @deepsales/worker exec wrangler secret put OPENAI_API_KEY
 - `BETTER_AUTH_SECRET` 使用至少 32 个字符的随机值。
 - `META_VERIFY_TOKEN` 使用随机值，并在 Meta 配置中使用同一个值。
 - `TOKEN_ENCRYPTION_KEY` 必须是 Base64 编码的 32 字节随机密钥。
-- `OPENAI_API_KEY` 用于生成知识库 embeddings；不要写入 `wrangler.jsonc`。
+- `AI_API_KEY` 用于生成知识库 embeddings；不要写入 `wrangler.jsonc`。
+- `AI_BASE_URL` 使用 Alibaba Cloud International Model Studio 对应区域和 workspace 的兼容 API base URL；不要在代码中硬编码 endpoint。
+- `EMBEDDING_PROVIDER=alibaba`、`EMBEDDING_MODEL=qwen3.7-text-embedding`、`EMBEDDING_DIMENSIONS=1536`、`LLM_PROVIDER=alibaba`、`LLM_MODEL=qwen3.8-flash` 保持为 Worker variables；LLM 变量仅供 T11 使用。
 - `META_APP_ID` 和 `META_GRAPH_API_VERSION` 已在 `wrangler.jsonc` 的 `vars` 中配置；如使用其他 Meta App，请先修改它们。
 - 生产环境不要配置测试用的 `FACEBOOK_GRAPH_BASE_URL`。
 
@@ -169,3 +171,5 @@ pnpm --filter @deepsales/worker exec wrangler tail
 ## 迁移与回滚
 
 上线前先备份生产数据库。数据库迁移采用 forward-fix 策略，不执行自动回滚；破坏性迁移必须经过单独的运维确认。发布失败时先保留当前部署和日志，再修复代码或迁移后重新部署。
+
+本次 migration 只新增 nullable embedding metadata。若数据库已有旧 embedding，需在批准的维护窗口执行 `psql $env:DATABASE_URL -f scripts/reindex-knowledge.sql`：它保留 inline source/R2 key，清除旧 active chunks，将可处理文档重置为 `UPLOADED`，再由 documents queue 使用 Alibaba embedding 重建。metadata 为空期间 retrieval 会拒绝查询，避免混用旧 vector space；不要在线并行执行该脚本。

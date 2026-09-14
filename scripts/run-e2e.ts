@@ -100,7 +100,7 @@ async function freePort() {
   return port
 }
 
-function workerBindings(baseUrl: string, facebookGraphBaseUrl: string, openAIBaseUrl: string) {
+function workerBindings(baseUrl: string, facebookGraphBaseUrl: string, aiBaseUrl: string) {
   return {
     APP_URL: baseUrl,
     BETTER_AUTH_SECRET: 'e2e-only-better-auth-secret-32-characters',
@@ -110,9 +110,11 @@ function workerBindings(baseUrl: string, facebookGraphBaseUrl: string, openAIBas
     META_GRAPH_API_VERSION: 'v26.0',
     FACEBOOK_GRAPH_BASE_URL: facebookGraphBaseUrl,
     TOKEN_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-    OPENAI_API_KEY: 'e2e-openai-api-key',
-    OPENAI_EMBEDDING_MODEL: 'text-embedding-3-small',
-    OPENAI_BASE_URL: openAIBaseUrl,
+    AI_API_KEY: 'e2e-ai-api-key',
+    AI_BASE_URL: aiBaseUrl,
+    EMBEDDING_PROVIDER: 'alibaba',
+    EMBEDDING_MODEL: 'qwen3.7-text-embedding',
+    EMBEDDING_DIMENSIONS: '1536',
   }
 }
 
@@ -121,7 +123,7 @@ function startWorker(
   connectionString: string,
   baseUrl: string,
   facebookGraphBaseUrl: string,
-  openAIBaseUrl: string,
+  aiBaseUrl: string,
 ) {
   const args = [
     'exec',
@@ -137,7 +139,7 @@ function startWorker(
     '--show-interactive-dev-session=false',
   ]
   for (const [key, value] of Object.entries(
-    workerBindings(baseUrl, facebookGraphBaseUrl, openAIBaseUrl),
+    workerBindings(baseUrl, facebookGraphBaseUrl, aiBaseUrl),
   )) {
     args.push('--var', `${key}:${value}`)
   }
@@ -227,8 +229,17 @@ async function startFakeAI() {
 
     const chunks: Buffer[] = []
     for await (const chunk of request) chunks.push(Buffer.from(chunk))
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { input?: unknown }
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+      input?: unknown
+      model?: unknown
+      dimensions?: unknown
+    }
     const input = Array.isArray(body.input) ? body.input : []
+    if (body.model !== 'qwen3.7-text-embedding' || body.dimensions !== 1_536) {
+      response.statusCode = 400
+      response.end()
+      return
+    }
     await sleep(2_500)
     response.setHeader('content-type', 'application/json')
     response.end(

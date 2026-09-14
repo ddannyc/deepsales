@@ -52,7 +52,7 @@ A release is acceptable when a real workspace can:
 | Durable jobs | Five Cloudflare Queues: `webhooks`, `outbound`, `ai`, `documents`, `maintenance`; one shared DLQ |
 | Realtime | One hibernating Durable Object per workspace; notifications only, followed by canonical API reads |
 | Object storage | Private Cloudflare R2 bucket |
-| Initial AI adapter | OpenAI Responses and Embeddings APIs through native `fetch`; model IDs are environment configuration |
+| AI provider | Alibaba Cloud International Model Studio through native `fetch`; T08 uses `qwen3.7-text-embedding` at 1,536 dimensions and T11 will use `qwen3.8-flash` |
 | Vector search | pgvector cosine distance, HNSW index |
 | PDF extraction | `unpdf` serverless build |
 | DOCX extraction | `mammoth.extractRawText` with `ArrayBuffer`; external file access remains disabled |
@@ -89,7 +89,7 @@ Cloudflare Worker
 
 External calls
   |- Meta OAuth / Graph Send API
-  `- OpenAI Responses / Embeddings APIs
+  `- Alibaba Cloud International Model Studio APIs
 ```
 
 The Worker and React assets deploy together. `run_worker_first` covers `/api/*`, `/webhooks/*`, `/health`, and `/ready`; navigation and other asset misses use SPA fallback.
@@ -145,16 +145,21 @@ runAIResponse(runId: string, deps: AIRuntimeDependencies): Promise<void>
 
 Retrieval, prompt construction, structured-output validation, handoff policy, and the final authorization/freshness transaction remain inside this module.
 
-The required provider seam stays small:
+The required provider seams stay small:
 
 ```ts
-interface AIClient {
-  generateResponse(input: AIResponseInput): Promise<AIResponseDecision>
+interface EmbeddingProvider {
   embed(input: string[]): Promise<number[][]>
+}
+
+interface LlmProvider {
+  generateResponse(input: AIResponseInput): Promise<AIResponseDecision>
 }
 ```
 
-V1 has one production adapter and test fakes only.
+T08 has one `AlibabaEmbeddingProvider` production adapter and test fakes only.
+T11 will add the Alibaba LLM adapter behind `LlmProvider`; T08 does not implement
+that integration.
 
 ### 6.3 Channel module
 
@@ -389,6 +394,8 @@ A partial unique index permits only one `QUEUED` or `GENERATING` run per convers
 `knowledge_base`
 
 - `id`, `workspace_id`, `name`
+- active vector metadata: `embedding_provider`, `embedding_model`, `embedding_dimensions`
+  (nullable until the first complete index; legacy/unknown vectors are not searchable)
 
 `knowledge_document`
 
@@ -537,9 +544,13 @@ Queue duplicates see `delivery_started_at` or a terminal state and do not resend
 2. Backend validates declared type, extension, and file signature where available; uploads private content to R2; creates UPLOADED document; queues processing.
 3. Consumer claims the document, extracts plain text, normalizes line endings/control characters, and rejects empty/scanned-only content as FAILED.
 4. Text is split on paragraph boundaries into at most 2,000 Unicode code points with 200-code-point overlap.
-5. The AI adapter embeds batches; dimension must equal 1536.
-6. A short transaction replaces chunks and marks READY.
-7. Retrieval embeds the customer query and selects up to 6 chunks from the configured READY KnowledgeBase by cosine distance.
+5. `AlibabaEmbeddingProvider` embeds batches with `model=qwen3.7-text-embedding`
+   and `dimensions=1536`; every response count and vector dimension is validated.
+6. A short transaction replaces chunks, records matching active embedding metadata,
+   and marks READY. Any failure leaves no partial chunks or READY state.
+7. Retrieval verifies the query provider/model/dimensions against the active
+   KnowledgeBase metadata, embeds the customer query with the same provider, and
+   selects up to 6 chunks by cosine distance.
 
 `AI_RETRIEVAL_MAX_DISTANCE`, default `0.35`, is an environment calibration value. The character chunker is the deliberate V1 ceiling; add OCR or token-aware/layout-aware chunking only after real documents demonstrate a failure.
 
@@ -797,8 +808,12 @@ Required non-secret configuration:
 - `APP_URL`
 - `META_APP_ID`
 - `META_GRAPH_API_VERSION=v26.0`
-- `OPENAI_RESPONSE_MODEL`
-- `OPENAI_EMBEDDING_MODEL=text-embedding-3-small`
+- `AI_BASE_URL` (Alibaba Cloud International Model Studio region/workspace-compatible base URL)
+- `EMBEDDING_PROVIDER=alibaba`
+- `EMBEDDING_MODEL=qwen3.7-text-embedding`
+- `EMBEDDING_DIMENSIONS=1536`
+- `LLM_PROVIDER=alibaba` (used by T11)
+- `LLM_MODEL=qwen3.8-flash` (used by T11)
 - `AI_RETRIEVAL_MAX_DISTANCE=0.35`
 - `AI_DEBOUNCE_SECONDS=2`
 
@@ -808,7 +823,7 @@ Required secrets:
 - `META_APP_SECRET`
 - `META_VERIFY_TOKEN`
 - `TOKEN_ENCRYPTION_KEY`
-- `OPENAI_API_KEY`
+- `AI_API_KEY`
 - direct `DATABASE_URL` only in migration/CI environments
 
 Required bindings:

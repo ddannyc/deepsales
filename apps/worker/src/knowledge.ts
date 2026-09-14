@@ -1,11 +1,13 @@
 import {
   DEFAULT_KNOWLEDGE_RETRIEVAL_MAX_DISTANCE,
+  assertKnowledgeBaseEmbeddingCompatibility,
   searchKnowledgeChunks,
   type Database,
 } from '@deepsales/db'
 import { z } from 'zod'
 import type { Bindings } from './bindings'
-import { AIEmbeddingError, createAIClient } from './ai'
+import type { EmbeddingProvider } from './ai'
+import { AIEmbeddingError } from './ai'
 
 export const knowledgeDocumentJobSchema = z.object({
   v: z.literal(1),
@@ -15,24 +17,23 @@ export const knowledgeDocumentJobSchema = z.object({
 
 export async function retrieveKnowledgeChunks(
   db: Database,
-  env: Pick<
-    Bindings,
-    'OPENAI_API_KEY' | 'OPENAI_EMBEDDING_MODEL' | 'OPENAI_BASE_URL' | 'AI_RETRIEVAL_MAX_DISTANCE'
-  >,
+  embeddingProvider: EmbeddingProvider,
+  env: Pick<Bindings, 'AI_RETRIEVAL_MAX_DISTANCE'>,
   input: { workspaceId: string; knowledgeBaseId: string; query: string },
 ) {
-  if (!env.OPENAI_API_KEY) throw new AIEmbeddingError()
-  const [embedding] = await createAIClient({
-    apiKey: env.OPENAI_API_KEY,
-    embeddingModel: env.OPENAI_EMBEDDING_MODEL,
-    baseUrl: env.OPENAI_BASE_URL,
-  }).embed([input.query])
+  await assertKnowledgeBaseEmbeddingCompatibility(db, {
+    workspaceId: input.workspaceId,
+    knowledgeBaseId: input.knowledgeBaseId,
+    embeddingMetadata: embeddingProvider.metadata,
+  })
+  const [embedding] = await embeddingProvider.embed([input.query])
   if (!embedding) throw new AIEmbeddingError()
 
   return searchKnowledgeChunks(db, {
     workspaceId: input.workspaceId,
     knowledgeBaseId: input.knowledgeBaseId,
     embedding,
+    embeddingMetadata: embeddingProvider.metadata,
     maxDistance: env.AI_RETRIEVAL_MAX_DISTANCE
       ? Number(env.AI_RETRIEVAL_MAX_DISTANCE)
       : DEFAULT_KNOWLEDGE_RETRIEVAL_MAX_DISTANCE,

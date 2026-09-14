@@ -38,7 +38,12 @@ TypeScript monorepo.
 - preferred providers: Neon or Supabase PostgreSQL
 
 ### AI
-Provider-neutral application AI service wrapping external model providers.
+Alibaba Cloud International Model Studio.
+
+- LLM: `qwen3.8-flash` when T11 is implemented.
+- Embedding: `qwen3.7-text-embedding`, 1,536 dimensions for T08.
+- Vector store: PostgreSQL + pgvector.
+- T08 uses native `fetch`; the provider boundary remains provider-neutral.
 
 ### Testing
 - TypeScript compiler
@@ -219,16 +224,23 @@ Complex OCR/layout parsing is deferred unless real documents prove it necessary.
 
 Domain code must not call a provider SDK directly.
 
-Use an application abstraction, e.g.:
+T08 uses this provider-neutral application seam:
 
 ```ts
-interface AIClient {
-  generateResponse(input: AIResponseInput): Promise<AIResponseDecision>;
+interface EmbeddingProvider {
   embed(input: string[]): Promise<number[][]>;
 }
 ```
 
-The provider implementation may use OpenAI, Anthropic, or compatible services.
+The production T08 adapter is `AlibabaEmbeddingProvider`, implemented with native
+`fetch` against the configured Alibaba Cloud International Model Studio
+compatible embeddings endpoint. T11 will add an `LlmProvider` for
+`qwen3.8-flash`; it is not implemented in T08.
+
+Every KnowledgeBase records the provider, model, and dimensions of its active
+vectors. Ingestion and retrieval reject a mismatch, so different vector spaces
+cannot be mixed in one active KnowledgeBase. Switching models requires clearing
+the active chunks and reindexing the retained source documents.
 
 ## 13. Authentication
 

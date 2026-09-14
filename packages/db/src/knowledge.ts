@@ -9,6 +9,12 @@ export const KNOWLEDGE_DOCUMENT_CLAIM_TIMEOUT_MS = 5 * 60 * 1_000
 export const MAX_KNOWLEDGE_RETRIEVAL_CHUNKS = 6
 export const DEFAULT_KNOWLEDGE_RETRIEVAL_MAX_DISTANCE = 0.35
 
+export type KnowledgeEmbeddingMetadata = {
+  provider: string
+  model: string
+  dimensions: number
+}
+
 export type KnowledgeErrorCode = 'FORBIDDEN' | 'NOT_FOUND' | 'INVALID_REQUEST'
 
 export class KnowledgeError extends Error {
@@ -24,6 +30,7 @@ export type KnowledgeProcessingErrorCode =
   | 'EMPTY_CONTENT'
   | 'DOCUMENT_CONTENT_MISSING'
   | 'INVALID_EMBEDDING'
+  | 'EMBEDDING_CONFIGURATION_MISMATCH'
   | 'DOCUMENT_NOT_PROCESSABLE'
 
 export class KnowledgeProcessingError extends Error {
@@ -311,15 +318,34 @@ export async function completeKnowledgeDocument(
     workspaceId: string
     knowledgeBaseId: string
     contentSha256: string
+    embeddingMetadata: KnowledgeEmbeddingMetadata
     chunks: Array<{ text: string; embedding: number[] }>
     now?: Date
   },
 ) {
   if (!input.chunks.length) throw new KnowledgeProcessingError('EMPTY_CONTENT')
+  assertEmbeddingMetadata(input.embeddingMetadata)
   for (const chunk of input.chunks) assertEmbedding(chunk.embedding)
 
   const now = input.now ?? new Date()
   return db.transaction(async (tx) => {
+    const [base] = await tx
+      .select({
+        embeddingProvider: knowledgeBase.embeddingProvider,
+        embeddingModel: knowledgeBase.embeddingModel,
+        embeddingDimensions: knowledgeBase.embeddingDimensions,
+      })
+      .from(knowledgeBase)
+      .where(
+        and(
+          eq(knowledgeBase.id, input.knowledgeBaseId),
+          eq(knowledgeBase.workspaceId, input.workspaceId),
+        ),
+      )
+      .for('update')
+      .limit(1)
+    if (!base) return null
+
     const [current] = await tx
       .select({
         status: knowledgeDocument.status,
@@ -340,6 +366,35 @@ export async function completeKnowledgeDocument(
       current.processingStartedAt?.getTime() !== input.processingStartedAt.getTime()
     ) {
       return null
+    }
+
+    const [existingChunk] = await tx
+      .select({ id: knowledgeChunk.id })
+      .from(knowledgeChunk)
+      .where(eq(knowledgeChunk.knowledgeBaseId, input.knowledgeBaseId))
+      .limit(1)
+    const activeMetadata =
+      base.embeddingProvider !== null &&
+      base.embeddingModel !== null &&
+      base.embeddingDimensions !== null
+        ? {
+            provider: base.embeddingProvider,
+            model: base.embeddingModel,
+            dimensions: base.embeddingDimensions,
+          }
+        : null
+    if (
+      existingChunk ||
+      base.embeddingProvider !== null ||
+      base.embeddingModel !== null ||
+      base.embeddingDimensions !== null
+    ) {
+      if (!activeMetadata || !embeddingMetadataMatches(activeMetadata, input.embeddingMetadata)) {
+        throw new KnowledgeProcessingError(
+          'EMBEDDING_CONFIGURATION_MISMATCH',
+          'Knowledge base embedding configuration mismatch',
+        )
+      }
     }
 
     await tx.delete(knowledgeChunk).where(eq(knowledgeChunk.knowledgeDocumentId, input.documentId))
@@ -365,6 +420,17 @@ export async function completeKnowledgeDocument(
       })
       .where(eq(knowledgeDocument.id, input.documentId))
       .returning(documentSummarySelection)
+    if (!activeMetadata) {
+      await tx
+        .update(knowledgeBase)
+        .set({
+          embeddingProvider: input.embeddingMetadata.provider,
+          embeddingModel: input.embeddingMetadata.model,
+          embeddingDimensions: input.embeddingMetadata.dimensions,
+          updatedAt: now,
+        })
+        .where(eq(knowledgeBase.id, input.knowledgeBaseId))
+    }
     return updated ?? null
   })
 }
@@ -469,10 +535,12 @@ export async function searchKnowledgeChunks(
     workspaceId: string
     knowledgeBaseId: string
     embedding: number[]
+    embeddingMetadata: KnowledgeEmbeddingMetadata
     maxDistance?: number
     limit?: number
   },
 ) {
+  await assertKnowledgeBaseEmbeddingCompatibility(db, input)
   assertEmbedding(input.embedding)
   const maxDistance = input.maxDistance ?? DEFAULT_KNOWLEDGE_RETRIEVAL_MAX_DISTANCE
   if (!Number.isFinite(maxDistance) || maxDistance < 0) {
@@ -502,6 +570,45 @@ export async function searchKnowledgeChunks(
     )
     .orderBy(distance, asc(knowledgeChunk.knowledgeDocumentId), asc(knowledgeChunk.ordinal))
     .limit(limit)
+}
+
+export async function assertKnowledgeBaseEmbeddingCompatibility(
+  db: Database,
+  input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    embeddingMetadata: KnowledgeEmbeddingMetadata
+  },
+) {
+  const [base] = await db
+    .select({
+      embeddingProvider: knowledgeBase.embeddingProvider,
+      embeddingModel: knowledgeBase.embeddingModel,
+      embeddingDimensions: knowledgeBase.embeddingDimensions,
+    })
+    .from(knowledgeBase)
+    .where(
+      and(
+        eq(knowledgeBase.id, input.knowledgeBaseId),
+        eq(knowledgeBase.workspaceId, input.workspaceId),
+      ),
+    )
+    .limit(1)
+  if (!base) throw new KnowledgeError('NOT_FOUND', 'Knowledge base not found')
+
+  const activeMetadata =
+    base.embeddingProvider !== null &&
+    base.embeddingModel !== null &&
+    base.embeddingDimensions !== null
+      ? {
+          provider: base.embeddingProvider,
+          model: base.embeddingModel,
+          dimensions: base.embeddingDimensions,
+        }
+      : null
+  if (!activeMetadata || !embeddingMetadataMatches(activeMetadata, input.embeddingMetadata)) {
+    throw new KnowledgeError('INVALID_REQUEST', 'Knowledge base embedding configuration mismatch')
+  }
 }
 
 const documentSummarySelection = {
@@ -580,4 +687,24 @@ function assertEmbedding(embedding: number[]): asserts embedding is number[] {
   if (embedding.length !== 1_536 || embedding.some((value) => !Number.isFinite(value))) {
     throw new KnowledgeProcessingError('INVALID_EMBEDDING', 'Embedding dimension must be 1536')
   }
+}
+
+function assertEmbeddingMetadata(metadata: KnowledgeEmbeddingMetadata) {
+  if (!metadata.provider || !metadata.model || metadata.dimensions !== 1_536) {
+    throw new KnowledgeProcessingError(
+      'EMBEDDING_CONFIGURATION_MISMATCH',
+      'Knowledge base embedding configuration mismatch',
+    )
+  }
+}
+
+function embeddingMetadataMatches(
+  left: KnowledgeEmbeddingMetadata,
+  right: KnowledgeEmbeddingMetadata,
+) {
+  return (
+    left.provider === right.provider &&
+    left.model === right.model &&
+    left.dimensions === right.dimensions
+  )
 }

@@ -35,6 +35,14 @@ pnpm test:e2e          # resets/migrates the E2E database and owns the Worker li
 `_e2e` or `-e2e`. The runner injects test-only Worker settings and never uses
 the application `DATABASE_URL`.
 
+If a development database, or an approved production maintenance window,
+contains vectors from an older embedding model, apply the migration, then run
+`psql $env:DATABASE_URL -f scripts/reindex-knowledge.sql`. It preserves inline
+source text and R2 keys, removes all active chunks, resets processable documents
+to `UPLOADED`, and lets the scheduled documents queue reindex them with Alibaba
+embeddings. While metadata is unset, retrieval rejects queries, so old and new
+vectors are never mixed. Do not run this SQL as an online production migration.
+
 ## Deploy
 
 Create Hyperdrive with caching disabled because authentication, authorization, and
@@ -46,8 +54,9 @@ pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DATABASE
 
 Replace the placeholder Hyperdrive ID in `apps/worker/wrangler.jsonc`, set
 `APP_URL`, `BETTER_AUTH_SECRET`, `META_APP_SECRET`, `META_VERIFY_TOKEN`,
-`TOKEN_ENCRYPTION_KEY`, and `OPENAI_API_KEY` with Wrangler. Set `META_APP_ID`,
-`META_GRAPH_API_VERSION`, and `OPENAI_EMBEDDING_MODEL` as Worker variables, then:
+`TOKEN_ENCRYPTION_KEY`, and `AI_API_KEY` with Wrangler. Set `AI_BASE_URL` to the
+Alibaba Cloud International Model Studio region/workspace-compatible base URL, then keep the
+Alibaba embedding and LLM variables from `wrangler.jsonc`:
 
 ```powershell
 pnpm db:migrate

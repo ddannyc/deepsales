@@ -13,13 +13,20 @@ import {
   deleteKnowledgeDocument,
   failKnowledgeDocument,
   knowledgeChunk,
+  knowledgeBase,
   knowledgeDocument,
+  type KnowledgeError,
   listPendingKnowledgeDocumentIds,
   searchKnowledgeChunks,
   user,
 } from '../src'
 
 const connectionString = process.env.DATABASE_URL
+const embeddingMetadata = {
+  provider: 'alibaba',
+  model: 'qwen3.7-text-embedding',
+  dimensions: 1_536,
+} as const
 
 describe.skipIf(!connectionString)('knowledge indexing', () => {
   const pool = new Pool({ connectionString })
@@ -92,6 +99,7 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
       knowledgeBaseId: firstBase.id,
       processingStartedAt: firstClaim.processingStartedAt,
       contentSha256: 'a'.repeat(64),
+      embeddingMetadata,
       chunks: Array.from({ length: 7 }, (_, ordinal) => ({
         text: `shipping ${ordinal}`,
         embedding: near,
@@ -104,6 +112,7 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
       knowledgeBaseId: firstBase.id,
       processingStartedAt: secondClaim.processingStartedAt,
       contentSha256: 'b'.repeat(64),
+      embeddingMetadata,
       chunks: [{ text: 'returns', embedding: far }],
     })
     await completeKnowledgeDocument(db, {
@@ -112,6 +121,7 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
       knowledgeBaseId: secondBase.id,
       processingStartedAt: otherClaim.processingStartedAt,
       contentSha256: 'c'.repeat(64),
+      embeddingMetadata,
       chunks: [{ text: 'private', embedding: near }],
     })
 
@@ -119,6 +129,7 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
       workspaceId: firstWorkspace.id,
       knowledgeBaseId: firstBase.id,
       embedding: near,
+      embeddingMetadata,
       maxDistance: 0.01,
       limit: 10,
     })
@@ -131,6 +142,7 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
       workspaceId: secondWorkspace.id,
       knowledgeBaseId: secondBase.id,
       embedding: near,
+      embeddingMetadata,
       maxDistance: 0.01,
     })
     expect(otherResults.map(({ knowledgeDocumentId }) => knowledgeDocumentId)).toEqual([
@@ -155,6 +167,64 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
         .from(knowledgeChunk)
         .where(eq(knowledgeChunk.knowledgeDocumentId, secondDocument.id)),
     ).toHaveLength(1)
+  })
+
+  it('records active embedding metadata and rejects retrieval mismatches', async () => {
+    const ownerId = randomUUID()
+    await db
+      .insert(user)
+      .values({ id: ownerId, name: 'Metadata owner', email: `${ownerId}@example.com` })
+    const workspace = await bootstrapWorkspace(db, {
+      userId: ownerId,
+      userName: 'Metadata owner',
+      name: 'Knowledge metadata',
+    })
+    const base = await createKnowledgeBase(db, {
+      workspaceId: workspace.id,
+      createdByUserId: ownerId,
+      name: 'Metadata facts',
+    })
+    const document = await createInlineKnowledgeDocument(db, {
+      workspaceId: workspace.id,
+      knowledgeBaseId: base.id,
+      createdByUserId: ownerId,
+      name: 'Metadata document',
+      text: 'Metadata content',
+    })
+    const claimed = await claimKnowledgeDocument(db, { documentId: document.id })
+    if (!claimed) throw new Error('Document was not claimed')
+
+    await completeKnowledgeDocument(db, {
+      documentId: document.id,
+      workspaceId: workspace.id,
+      knowledgeBaseId: base.id,
+      processingStartedAt: claimed.processingStartedAt,
+      contentSha256: 'e'.repeat(64),
+      embeddingMetadata,
+      chunks: [{ text: 'metadata', embedding: vector(0) }],
+    })
+
+    const [storedBase] = await db
+      .select({
+        provider: knowledgeBase.embeddingProvider,
+        model: knowledgeBase.embeddingModel,
+        dimensions: knowledgeBase.embeddingDimensions,
+      })
+      .from(knowledgeBase)
+      .where(eq(knowledgeBase.id, base.id))
+    expect(storedBase).toEqual(embeddingMetadata)
+
+    await expect(
+      searchKnowledgeChunks(db, {
+        workspaceId: workspace.id,
+        knowledgeBaseId: base.id,
+        embedding: vector(0),
+        embeddingMetadata: { ...embeddingMetadata, model: 'other-model' },
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_REQUEST',
+      message: 'Knowledge base embedding configuration mismatch',
+    } satisfies Partial<KnowledgeError>)
   })
 
   it('leaves no chunks when a processing failure is persisted', async () => {
@@ -188,6 +258,7 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
         knowledgeBaseId: base.id,
         processingStartedAt: claimed.processingStartedAt,
         contentSha256: 'd'.repeat(64),
+        embeddingMetadata,
         chunks: [{ text: 'broken', embedding: [1] }],
       }),
     ).rejects.toMatchObject({ code: 'INVALID_EMBEDDING' })

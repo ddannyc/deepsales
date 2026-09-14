@@ -9,7 +9,12 @@ META_VERIFY_TOKEN=choose-a-long-random-value
 # Generate a base64-encoded 32-byte AES key for Page-token encryption.
 TOKEN_ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
-# AI settings. Keep the API key as a local secret.
-OPENAI_API_KEY=your-openai-api-key
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+# AI settings. Keep the API key as a local secret. Set the region/workspace URL.
+AI_BASE_URL=
+AI_API_KEY=your-alibaba-api-key
+EMBEDDING_PROVIDER=alibaba
+EMBEDDING_MODEL=qwen3.7-text-embedding
+EMBEDDING_DIMENSIONS=1536
+LLM_PROVIDER=alibaba
+LLM_MODEL=qwen3.8-flash
 AI_RETRIEVAL_MAX_DISTANCE=0.35

@@ -92,7 +92,14 @@ import {
 import { publishRealtime, WorkspaceRealtime } from './realtime'
 import { createObjectStorage } from './object-storage'
 import { createJobQueue, type JobQueue } from './queue'
-import { AIEmbeddingError, AIProviderError, createAIClient } from './ai'
+import {
+  ALIBABA_EMBEDDING_PROVIDER,
+  AIEmbeddingError,
+  AIProviderError,
+  createAlibabaEmbeddingProvider,
+  DEFAULT_EMBEDDING_MODEL,
+  EMBEDDING_DIMENSIONS,
+} from './ai'
 import { knowledgeDocumentJobSchema } from './knowledge'
 
 const app = new Hono<{ Bindings: Bindings }>()
@@ -1079,8 +1086,11 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.META_VERIFY_TOKEN &&
       env.META_GRAPH_API_VERSION &&
       env.TOKEN_ENCRYPTION_KEY &&
-      env.OPENAI_API_KEY &&
-      env.OPENAI_EMBEDDING_MODEL &&
+      env.AI_API_KEY &&
+      env.AI_BASE_URL &&
+      env.EMBEDDING_PROVIDER === ALIBABA_EMBEDDING_PROVIDER &&
+      env.EMBEDDING_MODEL === DEFAULT_EMBEDDING_MODEL &&
+      env.EMBEDDING_DIMENSIONS === String(EMBEDDING_DIMENSIONS) &&
       env.WEBHOOKS_QUEUE &&
       env.OUTBOUND_QUEUE &&
       env.DOCUMENTS_QUEUE &&
@@ -1617,13 +1627,15 @@ async function handleKnowledgeDocument(
     const text = normalizeKnowledgeText(claimed.sourceText)
     const chunks = chunkKnowledgeText(text)
     if (!chunks.length) throw new KnowledgeProcessingError('EMPTY_CONTENT')
-    if (!env.OPENAI_API_KEY) throw new AIProviderError(0, true)
 
-    const embeddings = await createAIClient({
-      apiKey: env.OPENAI_API_KEY,
-      embeddingModel: env.OPENAI_EMBEDDING_MODEL,
-      baseUrl: env.OPENAI_BASE_URL,
-    }).embed(chunks)
+    const embeddingProvider = createAlibabaEmbeddingProvider({
+      provider: env.EMBEDDING_PROVIDER,
+      apiKey: env.AI_API_KEY,
+      baseUrl: env.AI_BASE_URL,
+      model: env.EMBEDDING_MODEL,
+      dimensions: env.EMBEDDING_DIMENSIONS,
+    })
+    const embeddings = await embeddingProvider.embed(chunks)
     if (embeddings.length !== chunks.length) throw new AIEmbeddingError()
     const contentSha256 = await hashKnowledgeText(text)
 
@@ -1634,6 +1646,7 @@ async function handleKnowledgeDocument(
         knowledgeBaseId: claimed.knowledgeBaseId,
         processingStartedAt: claimed.processingStartedAt,
         contentSha256,
+        embeddingMetadata: embeddingProvider.metadata,
         chunks: chunks.map((chunk, index) => ({ text: chunk, embedding: embeddings[index] })),
       }),
     )

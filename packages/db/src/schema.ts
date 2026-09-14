@@ -550,6 +550,9 @@ export const knowledgeBase = pgTable(
       .notNull()
       .references(() => workspace.id, { onDelete: 'cascade' }),
     name: text().notNull(),
+    embeddingProvider: text('embedding_provider'),
+    embeddingModel: text('embedding_model'),
+    embeddingDimensions: integer('embedding_dimensions'),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

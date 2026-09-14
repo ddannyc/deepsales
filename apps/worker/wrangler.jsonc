@@ -104,7 +104,12 @@
 	"vars": {
 		"META_APP_ID": "REDACTED_META_APP_ID",
 		"META_GRAPH_API_VERSION": "v26.0",
-		"OPENAI_EMBEDDING_MODEL": "text-embedding-3-small",
+		"AI_BASE_URL": "",
+		"EMBEDDING_PROVIDER": "alibaba",
+		"EMBEDDING_MODEL": "qwen3.7-text-embedding",
+		"EMBEDDING_DIMENSIONS": "1536",
+		"LLM_PROVIDER": "alibaba",
+		"LLM_MODEL": "qwen3.8-flash",
 		"AI_RETRIEVAL_MAX_DISTANCE": "0.35"
 	}
 }

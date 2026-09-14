@@ -265,7 +265,7 @@ Human outbound media remains excluded.
 
 ## What to build
 
-Deliver the thinnest complete `/knowledge` path: create a KnowledgeBase, submit inline text, process it asynchronously, generate embeddings through the AI client, store pgvector chunks atomically, retrieve relevant chunks, and expose processing status. This slice makes grounded AI implementation possible without waiting for file-format adapters.
+Deliver the thinnest complete `/knowledge` path: create a KnowledgeBase, submit inline text, process it asynchronously, generate embeddings through the provider-neutral `EmbeddingProvider` using Alibaba Cloud International Model Studio, store pgvector chunks atomically, retrieve relevant chunks, and expose processing status. This slice makes grounded AI implementation possible without waiting for file-format adapters.
 
 ## Acceptance criteria
 
@@ -273,6 +273,7 @@ Deliver the thinnest complete `/knowledge` path: create a KnowledgeBase, submit 
 - [ ] Empty or oversized inline text becomes visibly FAILED without partial chunks.
 - [ ] Normalized text is split on paragraph boundaries using the specified 2,000/200 code-point limits.
 - [ ] Embedding batches must return 1,536-dimensional vectors; all chunks and READY state commit atomically.
+- [ ] Active KnowledgeBase vectors record Alibaba/qwen3.7-text-embedding/1,536 metadata, and retrieval rejects a provider/model/dimension mismatch.
 - [ ] Retrieval is workspace/KnowledgeBase scoped, READY-only, uses cosine distance, and returns at most six chunks under the configured threshold.
 - [ ] Deleting an inline document removes its chunks without affecting other documents.
 - [ ] Queue duplicates cannot create duplicate chunks; maintenance can recover UPLOADED/PROCESSING work.
@@ -370,7 +371,7 @@ Implement automatic assignment as one concurrency-safe domain operation and conn
 
 ## What to build
 
-Consume the AIResponseRun created when T11 assigns AI, update the same run for later inbound messages while AI remains owner, retrieve its published KnowledgeBase, generate a structured decision through the OpenAI adapter, enforce grounding, commit a valid AI text as a PENDING MEMBER Message, and reuse the existing outbound delivery path. Show AI generating state and final delivery state in the inbox.
+Consume the AIResponseRun created when T11 assigns AI, update the same run for later inbound messages while AI remains owner, retrieve its published KnowledgeBase, generate a structured decision through the configured LlmProvider, enforce grounding, commit a valid AI text as a PENDING MEMBER Message, and reuse the existing outbound delivery path. Show AI generating state and final delivery state in the inbox.
 
 This ticket implements the success path; concurrency cancellation and handoff are completed in T13 and T14.
 
@@ -379,7 +380,7 @@ This ticket implements the success path; concurrency cancellation and handoff ar
 - [ ] A run created by AI assignment, or ensured by later inbound on an AI-owned OPEN conversation, contains member and input first/last message IDs and is durably queued once.
 - [ ] The consumer claims the run as GENERATING before external work and uses the published snapshot, never the current draft.
 - [ ] Retrieval uses only READY chunks in the snapshot's one KnowledgeBase and records retrieved chunk IDs on the run.
-- [ ] OpenAI calls live behind the required AIClient and use native `fetch`; domain code imports no provider SDK.
+- [ ] Alibaba Cloud International Model Studio calls live behind the required LlmProvider and use native `fetch`; domain code imports no provider SDK.
 - [ ] Provider output is Zod-validated for decision, response, handoff reason, business-fact flag, and used chunk IDs.
 - [ ] An ANSWER containing business facts commits only with a non-empty used-chunk subset of retrieved chunks.
 - [ ] If grounding fails, configured no-knowledge behavior becomes HANDOFF-ready state or a localized factual-free uncertainty reply; invented company facts are never committed.

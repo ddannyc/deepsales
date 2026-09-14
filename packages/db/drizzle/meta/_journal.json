@@ -71,6 +71,13 @@
       "when": 1789382688822,
       "tag": "0009_goofy_captain_cross",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1789388549781,
+      "tag": "0010_free_thaddeus_ross",
+      "breakpoints": true
     }
   ]
 }
