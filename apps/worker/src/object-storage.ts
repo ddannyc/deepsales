@@ -5,6 +5,7 @@ export type ObjectStorageObject = {
 export type ObjectStorage = {
   get(key: string): Promise<ObjectStorageObject | null>
   put(key: string, body: Uint8Array, contentType: string): Promise<void>
+  delete(key: string): Promise<void>
 }
 
 export function createObjectStorage(bucket: R2Bucket): ObjectStorage {
@@ -15,6 +16,9 @@ export function createObjectStorage(bucket: R2Bucket): ObjectStorage {
     },
     async put(key, body, contentType) {
       await bucket.put(key, body, { httpMetadata: { contentType } })
+    },
+    async delete(key) {
+      await bucket.delete(key)
     },
   }
 }

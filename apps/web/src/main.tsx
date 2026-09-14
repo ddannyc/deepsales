@@ -1295,6 +1295,11 @@ const knowledgeSourceLabels: Record<KnowledgeDocument['sourceType'], string> = {
 const knowledgeFailureLabels: Record<string, string> = {
   EMPTY_CONTENT: '文本内容为空',
   TOO_LARGE: '文本内容过大',
+  MIME_MISMATCH: '文件类型与扩展名不一致',
+  INVALID_FILE_SIGNATURE: '文件格式无效',
+  INVALID_UTF8: '文件编码无效',
+  FILE_EXTRACTION_FAILED: '文件无法解析',
+  UPLOAD_READ_FAILED: '文件读取失败',
   DOCUMENT_CONTENT_MISSING: '文档内容不可用',
   INVALID_EMBEDDING: '嵌入结果无效',
   AI_PROVIDER_ERROR: 'AI 服务返回了无效结果',
@@ -1388,6 +1393,30 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
     }
   }
 
+  async function addFile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedBaseId) return
+    const form = event.currentTarget
+    const data = new FormData(form)
+    if (!(data.get('file') instanceof File)) return
+    setBusy('document')
+    setError('')
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspace.id}/knowledge-bases/${selectedBaseId}/documents/upload`,
+        { method: 'POST', body: data },
+      )
+      if (!response.ok) throw await responseError(response)
+      const result = (await response.json()) as { document: KnowledgeDocument }
+      form.reset()
+      setDocuments((current) => (current ? [...current, result.document] : [result.document]))
+    } catch (cause) {
+      setError(knowledgeErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
   async function removeDocument(document: KnowledgeDocument) {
     if (!selectedBaseId || !window.confirm(`删除“${document.name}”？`)) return
     setBusy(document.id)
@@ -1412,7 +1441,7 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
         <div>
           <p className="eyebrow">工作区 / 知识库</p>
           <h1>知识库</h1>
-          <p>添加业务文本，让后续 AI 回复有可验证的依据。</p>
+          <p>添加业务文本或文件，让后续 AI 回复有可验证的依据。</p>
         </div>
         <span className="role-pill">{roleLabel(workspace.role)}</span>
       </div>
@@ -1468,6 +1497,24 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
                   </button>
                 </form>
               )}
+              {canManage && (
+                <form className="knowledge-card knowledge-upload" onSubmit={addFile}>
+                  <p className="card-label">上传文件</p>
+                  <p className="muted">PDF、DOCX、TXT 或 Markdown，最大 10 MiB。</p>
+                  <label className="field">
+                    <span>文件</span>
+                    <input
+                      accept=".pdf,.docx,.txt,.md,.markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+                      name="file"
+                      required
+                      type="file"
+                    />
+                  </label>
+                  <button className="primary" disabled={busy === 'document'} type="submit">
+                    {busy === 'document' ? '上传中…' : '上传文件'}
+                  </button>
+                </form>
+              )}
               <section className="knowledge-documents">
                 <div className="section-heading">
                   <h2>{selectedBase.name} 的文档</h2>
@@ -1478,7 +1525,12 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
                 ) : documents.length ? (
                   <div className="knowledge-document-list">
                     {documents.map((document) => (
-                      <article className="knowledge-document" key={document.id}>
+                      <article
+                        className="knowledge-document"
+                        data-source-type={document.sourceType}
+                        data-status={document.status}
+                        key={document.id}
+                      >
                         <div>
                           <strong>{document.name}</strong>
                           <p>
@@ -2026,6 +2078,8 @@ function knowledgeErrorMessage(cause: unknown): string {
       NOT_FOUND: '知识库或文档不存在。',
       INVALID_REQUEST: '请检查知识库或文档内容后重试。',
       RATE_LIMITED: '操作过于频繁，请稍后重试。',
+      UNSUPPORTED_FILE_TYPE: '请上传 PDF、DOCX、TXT 或 Markdown 文件。',
+      STORAGE_UNAVAILABLE: '文件存储暂时不可用，请稍后再试。',
     }[cause.code] ?? '知识库操作失败，请稍后重试。'
   )
 }

@@ -29,8 +29,11 @@ export class KnowledgeError extends Error {
 export type KnowledgeProcessingErrorCode =
   | 'EMPTY_CONTENT'
   | 'DOCUMENT_CONTENT_MISSING'
+  | 'FILE_EXTRACTION_FAILED'
+  | 'INVALID_UTF8'
   | 'INVALID_EMBEDDING'
   | 'EMBEDDING_CONFIGURATION_MISMATCH'
+  | 'TOO_LARGE'
   | 'DOCUMENT_NOT_PROCESSABLE'
 
 export class KnowledgeProcessingError extends Error {
@@ -58,6 +61,8 @@ export type KnowledgeDocumentSummary = {
   createdAt: Date
   updatedAt: Date
 }
+
+export type KnowledgeFileSourceType = 'PDF' | 'DOCX' | 'TXT' | 'MARKDOWN'
 
 export function normalizeKnowledgeText(text: string) {
   const normalizedLineEndings = text.replace(/\r\n?/g, '\n')
@@ -228,6 +233,84 @@ export async function createInlineKnowledgeDocument(
   })
 }
 
+export async function createFileKnowledgeDocument(
+  db: Database,
+  input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    createdByUserId: string
+    name: string
+    sourceType: KnowledgeFileSourceType
+    storageKey?: string
+    failureCode?: string
+    failureMessage?: string
+  },
+) {
+  const name = cleanName(input.name, 'Document name')
+  const failureCode = input.failureCode?.slice(0, 100) ?? null
+  const now = new Date()
+
+  return db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.createdByUserId)
+    await assertKnowledgeBase(tx, input.workspaceId, input.knowledgeBaseId)
+    const [created] = await tx
+      .insert(knowledgeDocument)
+      .values({
+        workspaceId: input.workspaceId,
+        knowledgeBaseId: input.knowledgeBaseId,
+        name,
+        sourceType: input.sourceType,
+        storageKey: input.storageKey ?? null,
+        status: failureCode ? 'FAILED' : 'UPLOADED',
+        failureCode,
+        failureMessage: failureCode
+          ? (input.failureMessage ?? failureMessage(failureCode)).slice(0, 500)
+          : null,
+        updatedAt: now,
+      })
+      .returning(documentSummarySelection)
+    if (!created) throw new KnowledgeError('INVALID_REQUEST', 'Document was not created')
+    return created
+  })
+}
+
+export async function assertKnowledgeBaseManager(
+  db: Database,
+  input: { workspaceId: string; knowledgeBaseId: string; userId: string },
+) {
+  await db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.userId)
+    await assertKnowledgeBase(tx, input.workspaceId, input.knowledgeBaseId)
+  })
+}
+
+export async function getKnowledgeDocumentStorageKey(
+  db: Database,
+  input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    documentId: string
+    actingUserId: string
+  },
+) {
+  return db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.actingUserId)
+    const [document] = await tx
+      .select({ id: knowledgeDocument.id, storageKey: knowledgeDocument.storageKey })
+      .from(knowledgeDocument)
+      .where(
+        and(
+          eq(knowledgeDocument.id, input.documentId),
+          eq(knowledgeDocument.workspaceId, input.workspaceId),
+          eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+        ),
+      )
+      .limit(1)
+    if (!document) throw new KnowledgeError('NOT_FOUND', 'Document not found')
+    return document
+  })
+}
+
 export async function deleteKnowledgeDocument(
   db: Database,
   input: {
@@ -274,6 +357,7 @@ export async function claimKnowledgeDocument(
         name: knowledgeDocument.name,
         sourceType: knowledgeDocument.sourceType,
         sourceText: knowledgeDocument.sourceText,
+        storageKey: knowledgeDocument.storageKey,
         status: knowledgeDocument.status,
         processingStartedAt: knowledgeDocument.processingStartedAt,
       })
@@ -680,7 +764,18 @@ function cleanName(value: string, label: string) {
 }
 
 function failureMessage(code: string) {
-  return code === 'EMPTY_CONTENT' ? 'Inline text is empty' : 'Inline text is too large'
+  return (
+    {
+      EMPTY_CONTENT: 'Inline text is empty',
+      TOO_LARGE: 'Document is larger than 10 MiB',
+      INVALID_UTF8: 'Document is not valid UTF-8',
+      FILE_EXTRACTION_FAILED: 'Document could not be extracted',
+      DOCUMENT_CONTENT_MISSING: 'Document content is unavailable',
+      MIME_MISMATCH: 'File type does not match its extension',
+      INVALID_FILE_SIGNATURE: 'File signature is invalid',
+      UNSUPPORTED_FILE_TYPE: 'File type is not supported',
+    }[code] ?? 'Document processing failed'
+  )
 }
 
 function assertEmbedding(embedding: number[]): asserts embedding is number[] {

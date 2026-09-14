@@ -7,6 +7,7 @@ import {
   claimKnowledgeDocument,
   chunkKnowledgeText,
   hashKnowledgeText,
+  assertKnowledgeBaseManager,
   closeConversation,
   completeFacebookInboundAttachment,
   completeKnowledgeDocument,
@@ -16,6 +17,7 @@ import {
   createInvitation,
   createFacebookHumanReply,
   createKnowledgeBase,
+  createFileKnowledgeDocument,
   createInlineKnowledgeDocument,
   deleteKnowledgeDocument,
   disableFacebookChannel,
@@ -23,6 +25,7 @@ import {
   FacebookError,
   getFacebookAttachmentForDownload,
   getFacebookOutboundDelivery,
+  getKnowledgeDocumentStorageKey,
   InboxError,
   AttachmentError,
   MAX_INBOUND_ATTACHMENT_BYTES,
@@ -101,6 +104,14 @@ import {
   EMBEDDING_DIMENSIONS,
 } from './ai'
 import { knowledgeDocumentJobSchema } from './knowledge'
+import {
+  extractKnowledgeText,
+  KnowledgeFileError,
+  knowledgeFileTypeForName,
+  MAX_KNOWLEDGE_FILE_BYTES,
+  readKnowledgeFileBody,
+  validateKnowledgeFile,
+} from './knowledge-files'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
@@ -569,6 +580,106 @@ app.post(
   },
 )
 
+app.post(
+  '/api/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId/documents/upload',
+  async (c) => {
+    if (!hasAuthBindings(c.env)) return notReady(c)
+    const objects = c.env.OBJECTS
+    if (!objects) {
+      return c.json(
+        { error: { code: 'STORAGE_UNAVAILABLE', message: 'File storage is unavailable' } },
+        503,
+      )
+    }
+    return withDatabase(c.env, async (db) => {
+      const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+      if (!session) return unauthorized(c)
+      const limited = await rateLimit(c, `knowledge-upload:${session.user.id}`)
+      if (limited) return limited
+
+      try {
+        await assertKnowledgeBaseManager(db, {
+          workspaceId: c.req.param('workspaceId'),
+          knowledgeBaseId: c.req.param('knowledgeBaseId'),
+          userId: session.user.id,
+        })
+        const form = await c.req.raw.formData().catch(() => null)
+        const value = form?.get('file')
+        if (!(value instanceof File)) {
+          return c.json({ error: { code: 'INVALID_REQUEST', message: 'Choose a file' } }, 400)
+        }
+        const fileType = knowledgeFileTypeForName(value.name)
+        if (!fileType) {
+          return c.json(
+            {
+              error: { code: 'UNSUPPORTED_FILE_TYPE', message: 'Use PDF, DOCX, TXT, or Markdown' },
+            },
+            400,
+          )
+        }
+
+        const createFailure = async (failureCode: string) => {
+          const document = await createFileKnowledgeDocument(db, {
+            workspaceId: c.req.param('workspaceId'),
+            knowledgeBaseId: c.req.param('knowledgeBaseId'),
+            createdByUserId: session.user.id,
+            name: displayFileName(value.name),
+            sourceType: fileType.sourceType,
+            failureCode,
+          })
+          await publishKnowledgeChange(c.env, c.req.param('workspaceId'), document.id)
+          return c.json({ document }, 201)
+        }
+
+        if (value.size > MAX_KNOWLEDGE_FILE_BYTES) return createFailure('TOO_LARGE')
+
+        let bytes: Uint8Array
+        try {
+          bytes = new Uint8Array(await value.arrayBuffer())
+        } catch {
+          return createFailure('UPLOAD_READ_FAILED')
+        }
+        try {
+          const validated = validateKnowledgeFile(value.name, value.type, bytes)
+          const storageKey = `knowledge/${crypto.randomUUID()}`
+          const storage = createObjectStorage(objects)
+          try {
+            await storage.put(storageKey, bytes, validated.mimeType)
+          } catch {
+            return c.json(
+              { error: { code: 'STORAGE_UNAVAILABLE', message: 'File storage is unavailable' } },
+              503,
+            )
+          }
+
+          let document: Awaited<ReturnType<typeof createFileKnowledgeDocument>>
+          try {
+            document = await createFileKnowledgeDocument(db, {
+              workspaceId: c.req.param('workspaceId'),
+              knowledgeBaseId: c.req.param('knowledgeBaseId'),
+              createdByUserId: session.user.id,
+              name: displayFileName(value.name),
+              sourceType: validated.sourceType,
+              storageKey,
+            })
+          } catch (error) {
+            await storage.delete(storageKey).catch(() => {})
+            throw error
+          }
+          await enqueueKnowledgeDocumentJob(c.env.DOCUMENTS_QUEUE, document.id)
+          await publishKnowledgeChange(c.env, c.req.param('workspaceId'), document.id)
+          return c.json({ document }, 201)
+        } catch (error) {
+          if (!(error instanceof KnowledgeFileError)) throw error
+          return createFailure(error.code)
+        }
+      } catch (error) {
+        return knowledgeErrorResponse(c, error)
+      }
+    })
+  },
+)
+
 app.delete(
   '/api/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId/documents/:documentId',
   async (c) => {
@@ -579,6 +690,28 @@ app.delete(
       const limited = await rateLimit(c, `knowledge-delete:${session.user.id}`)
       if (limited) return limited
       try {
+        const document = await getKnowledgeDocumentStorageKey(db, {
+          workspaceId: c.req.param('workspaceId'),
+          knowledgeBaseId: c.req.param('knowledgeBaseId'),
+          documentId: c.req.param('documentId'),
+          actingUserId: session.user.id,
+        })
+        if (document.storageKey) {
+          if (!c.env.OBJECTS) {
+            return c.json(
+              { error: { code: 'STORAGE_UNAVAILABLE', message: 'File storage is unavailable' } },
+              503,
+            )
+          }
+          try {
+            await createObjectStorage(c.env.OBJECTS).delete(document.storageKey)
+          } catch {
+            return c.json(
+              { error: { code: 'STORAGE_UNAVAILABLE', message: 'File storage is unavailable' } },
+              503,
+            )
+          }
+        }
         const deleted = await deleteKnowledgeDocument(db, {
           workspaceId: c.req.param('workspaceId'),
           knowledgeBaseId: c.req.param('knowledgeBaseId'),
@@ -1312,6 +1445,10 @@ function contentDisposition(filename: string | null, kind: string) {
   return `${disposition}; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`
 }
 
+function displayFileName(filename: string) {
+  return filename.split(/[\\/]/).pop()?.trim() || 'Uploaded document'
+}
+
 function safeContentType(value: string | null) {
   return safeMimeType(value) ?? 'application/octet-stream'
 }
@@ -1621,10 +1758,31 @@ async function handleKnowledgeDocument(
   }
 
   try {
-    if (claimed.sourceType !== 'TEXT' || !claimed.sourceText) {
-      throw new KnowledgeProcessingError('DOCUMENT_CONTENT_MISSING')
+    let extractedText: string
+    if (claimed.sourceType === 'TEXT') {
+      if (!claimed.sourceText) throw new KnowledgeProcessingError('DOCUMENT_CONTENT_MISSING')
+      extractedText = claimed.sourceText
+    } else {
+      if (!claimed.storageKey) throw new KnowledgeProcessingError('DOCUMENT_CONTENT_MISSING')
+      if (!env.OBJECTS) throw new Error('Knowledge file storage is unavailable')
+      const object = await createObjectStorage(env.OBJECTS).get(claimed.storageKey)
+      if (!object?.body) throw new KnowledgeProcessingError('DOCUMENT_CONTENT_MISSING')
+      let bytes: Uint8Array
+      try {
+        bytes = await readKnowledgeFileBody(object.body)
+      } catch (error) {
+        if (error instanceof KnowledgeFileError) throw knowledgeFileProcessingError(error)
+        throw error
+      }
+      try {
+        extractedText = await extractKnowledgeText(claimed.sourceType, bytes)
+      } catch (error) {
+        if (error instanceof KnowledgeFileError) throw knowledgeFileProcessingError(error)
+        throw error
+      }
     }
-    const text = normalizeKnowledgeText(claimed.sourceText)
+
+    const text = normalizeKnowledgeText(extractedText)
     const chunks = chunkKnowledgeText(text)
     if (!chunks.length) throw new KnowledgeProcessingError('EMPTY_CONTENT')
 
@@ -1684,9 +1842,7 @@ async function handleKnowledgeDocument(
           failureCode,
           failureMessage:
             error instanceof KnowledgeProcessingError
-              ? error.code === 'EMPTY_CONTENT'
-                ? 'Document text is empty'
-                : 'Document content is unavailable'
+              ? knowledgeProcessingFailureMessage(error.code)
               : 'Embedding provider returned an invalid response',
         }),
       )
@@ -1696,6 +1852,29 @@ async function handleKnowledgeDocument(
       queueMessage.retry()
     }
   }
+}
+
+function knowledgeFileProcessingError(error: KnowledgeFileError) {
+  switch (error.code) {
+    case 'TOO_LARGE':
+      return new KnowledgeProcessingError('TOO_LARGE')
+    case 'INVALID_UTF8':
+      return new KnowledgeProcessingError('INVALID_UTF8')
+    default:
+      return new KnowledgeProcessingError('FILE_EXTRACTION_FAILED')
+  }
+}
+
+function knowledgeProcessingFailureMessage(code: string) {
+  return (
+    {
+      EMPTY_CONTENT: 'Document text is empty',
+      DOCUMENT_CONTENT_MISSING: 'Document content is unavailable',
+      TOO_LARGE: 'Document is larger than 10 MiB',
+      INVALID_UTF8: 'Document is not valid UTF-8',
+      FILE_EXTRACTION_FAILED: 'Document could not be extracted',
+    }[code] ?? 'Document processing failed'
+  )
 }
 
 export async function handleDocumentsBatch(batch: MessageBatch<unknown>, env: Bindings) {

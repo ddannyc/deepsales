@@ -745,6 +745,11 @@ form {
   min-height: 170px;
   resize: vertical;
 }
+.knowledge-upload .field input[type="file"] {
+  border: 1px solid #b9cbd7;
+  padding: 10px;
+  background: #f9fbfc;
+}
 .knowledge-documents {
   border-top: 1px solid #c8d7e0;
   padding-top: 24px;

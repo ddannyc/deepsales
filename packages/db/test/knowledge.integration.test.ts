@@ -6,6 +6,7 @@ import { Pool } from 'pg'
 import {
   bootstrapWorkspace,
   claimKnowledgeDocument,
+  createFileKnowledgeDocument,
   completeKnowledgeDocument,
   createDatabase,
   createInlineKnowledgeDocument,
@@ -327,6 +328,48 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
         claimTimeoutMs: 5 * 60 * 1_000,
       }),
     ).toContain(processing.id)
+  })
+
+  it('persists file documents, exposes their storage key, and keeps validation failures terminal', async () => {
+    const ownerId = randomUUID()
+    await db
+      .insert(user)
+      .values({ id: ownerId, name: 'File owner', email: `${ownerId}@example.com` })
+    const workspace = await bootstrapWorkspace(db, {
+      userId: ownerId,
+      userName: 'File owner',
+      name: 'Knowledge files',
+    })
+    const base = await createKnowledgeBase(db, {
+      workspaceId: workspace.id,
+      createdByUserId: ownerId,
+      name: 'File facts',
+    })
+
+    const uploaded = await createFileKnowledgeDocument(db, {
+      workspaceId: workspace.id,
+      knowledgeBaseId: base.id,
+      createdByUserId: ownerId,
+      name: 'Guide.pdf',
+      sourceType: 'PDF',
+      storageKey: 'knowledge/guide',
+    })
+    expect(uploaded).toEqual(expect.objectContaining({ sourceType: 'PDF', status: 'UPLOADED' }))
+    const claimed = await claimKnowledgeDocument(db, { documentId: uploaded.id })
+    expect(claimed).toEqual(expect.objectContaining({ storageKey: 'knowledge/guide' }))
+
+    const failed = await createFileKnowledgeDocument(db, {
+      workspaceId: workspace.id,
+      knowledgeBaseId: base.id,
+      createdByUserId: ownerId,
+      name: 'Oversized.txt',
+      sourceType: 'TXT',
+      failureCode: 'TOO_LARGE',
+    })
+    expect(failed).toEqual(expect.objectContaining({ status: 'FAILED', failureCode: 'TOO_LARGE' }))
+    expect(
+      await listPendingKnowledgeDocumentIds(db, { now: new Date(), claimTimeoutMs: 1_000 }),
+    ).not.toContain(failed.id)
   })
 })
 

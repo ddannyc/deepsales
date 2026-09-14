@@ -7,6 +7,7 @@ import { Pool } from 'pg'
 import {
   bootstrapWorkspace,
   createDatabase,
+  createFileKnowledgeDocument,
   createInlineKnowledgeDocument,
   createKnowledgeBase,
   knowledgeChunk,
@@ -135,6 +136,72 @@ describe.skipIf(!connectionString)('knowledge Worker consumer', () => {
         .where(eq(knowledgeChunk.knowledgeDocumentId, fixture.documentId)),
     ).toHaveLength(0)
   })
+
+  it('extracts a stored TXT file through the existing READY pipeline', async () => {
+    const fixture = await createFileFixture(db, 'TXT')
+    const objects = memoryBucket(fixture.storageKey, new TextEncoder().encode('Shipping is free.'))
+    const embedding = vector(0)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(Response.json({ data: [{ index: 0, embedding }] })),
+    )
+
+    const queued = queueMessage(fixture.documentId)
+    await handleDocumentsBatch(batch(queued), environment(objects))
+
+    expect(queued.ack).toHaveBeenCalledOnce()
+    const [storedDocument] = await db
+      .select({ status: knowledgeDocument.status })
+      .from(knowledgeDocument)
+      .where(eq(knowledgeDocument.id, fixture.documentId))
+    expect(storedDocument?.status).toBe('READY')
+    expect(
+      await db
+        .select({ text: knowledgeChunk.text })
+        .from(knowledgeChunk)
+        .where(eq(knowledgeChunk.knowledgeDocumentId, fixture.documentId)),
+    ).toEqual([{ text: 'Shipping is free.' }])
+  })
+
+  it('marks a malformed stored PDF FAILED without chunks', async () => {
+    const fixture = await createFileFixture(db, 'PDF')
+    const objects = memoryBucket(fixture.storageKey, new TextEncoder().encode('%PDF-1.7'))
+    const queued = queueMessage(fixture.documentId)
+
+    await handleDocumentsBatch(batch(queued), environment(objects))
+
+    expect(queued.ack).toHaveBeenCalledOnce()
+    const [storedDocument] = await db
+      .select({ status: knowledgeDocument.status, failureCode: knowledgeDocument.failureCode })
+      .from(knowledgeDocument)
+      .where(eq(knowledgeDocument.id, fixture.documentId))
+    expect(storedDocument).toEqual({ status: 'FAILED', failureCode: 'FILE_EXTRACTION_FAILED' })
+    expect(
+      await db
+        .select()
+        .from(knowledgeChunk)
+        .where(eq(knowledgeChunk.knowledgeDocumentId, fixture.documentId)),
+    ).toHaveLength(0)
+  })
+
+  it('releases a file claim for retry when R2 reads fail', async () => {
+    const fixture = await createFileFixture(db, 'TXT')
+    const objects = memoryBucket(fixture.storageKey, new TextEncoder().encode('retry me'))
+    objects.failGet = true
+    const queued = queueMessage(fixture.documentId)
+
+    await handleDocumentsBatch(batch(queued), environment(objects))
+
+    expect(queued.retry).toHaveBeenCalledOnce()
+    const [pending] = await db
+      .select({
+        status: knowledgeDocument.status,
+        processingStartedAt: knowledgeDocument.processingStartedAt,
+      })
+      .from(knowledgeDocument)
+      .where(eq(knowledgeDocument.id, fixture.documentId))
+    expect(pending).toEqual({ status: 'UPLOADED', processingStartedAt: null })
+  })
 })
 
 async function createFixture(db: ReturnType<typeof createDatabase>) {
@@ -160,7 +227,35 @@ async function createFixture(db: ReturnType<typeof createDatabase>) {
   return { workspaceId: workspace.id, knowledgeBaseId: base.id, documentId: document.id }
 }
 
-function environment(): Bindings {
+async function createFileFixture(
+  db: ReturnType<typeof createDatabase>,
+  sourceType: 'PDF' | 'DOCX' | 'TXT' | 'MARKDOWN',
+) {
+  const ownerId = crypto.randomUUID()
+  const storageKey = `knowledge/${ownerId}`
+  await db.insert(user).values({ id: ownerId, name: 'Owner', email: `${ownerId}@example.com` })
+  const workspace = await bootstrapWorkspace(db, {
+    userId: ownerId,
+    userName: 'Owner',
+    name: 'Knowledge file test',
+  })
+  const base = await createKnowledgeBase(db, {
+    workspaceId: workspace.id,
+    createdByUserId: ownerId,
+    name: 'Support facts',
+  })
+  const document = await createFileKnowledgeDocument(db, {
+    workspaceId: workspace.id,
+    knowledgeBaseId: base.id,
+    createdByUserId: ownerId,
+    name: `file.${sourceType.toLowerCase()}`,
+    sourceType,
+    storageKey,
+  })
+  return { documentId: document.id, storageKey }
+}
+
+function environment(objects?: R2Bucket): Bindings {
   return {
     APP_URL: 'http://localhost:8787',
     AUTH_RATE_LIMITER: {} as RateLimit,
@@ -176,6 +271,7 @@ function environment(): Bindings {
     EMBEDDING_PROVIDER: 'alibaba',
     EMBEDDING_MODEL: 'qwen3.7-text-embedding',
     EMBEDDING_DIMENSIONS: '1536',
+    OBJECTS: objects,
   }
 }
 
@@ -195,4 +291,27 @@ function vector(axis: number) {
   const result = Array.from({ length: 1_536 }, () => 0)
   result[axis] = 1
   return result
+}
+
+function memoryBucket(key: string, bytes: Uint8Array) {
+  const values = new Map([[key, bytes]])
+  const bucket = {
+    values,
+    failGet: false,
+    get: vi.fn(async (requestedKey: string) => {
+      if (values.has(requestedKey) && bucket.failGet) {
+        throw new Error('R2 unavailable')
+      }
+      const value = values.get(requestedKey)
+      return value ? { body: new Response(value).body } : null
+    }),
+    put: vi.fn(),
+    delete: vi.fn(async (requestedKey: string) => {
+      values.delete(requestedKey)
+    }),
+  } as unknown as R2Bucket & {
+    values: Map<string, Uint8Array>
+    failGet: boolean
+  }
+  return bucket
 }
