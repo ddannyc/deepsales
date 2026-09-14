@@ -248,7 +248,8 @@ describe.skipIf(!connectionString)('knowledge Worker consumer', () => {
       documentId: fixture.documentId,
       actingUserId: fixture.ownerId,
     })
-    await storage.delete(document.storageKey!)
+    if (!document.storageKey) throw new Error('File fixture storage key is missing')
+    await storage.delete(document.storageKey)
     await deleteKnowledgeDocument(db, {
       workspaceId: fixture.workspaceId,
       knowledgeBaseId: fixture.knowledgeBaseId,
