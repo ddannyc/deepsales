@@ -17,10 +17,12 @@ import {
   listFacebookChannelsPage,
   listConversations,
   listMessages,
+  listUnclaimedOutboundMessageIds,
   deleteMember,
   listTeam,
   MemberError,
   processFacebookInbound,
+  recoverStaleOutboundMessages,
   member,
   setMemberChannelAccess,
   takeOverConversation,
@@ -1272,6 +1274,29 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
   }
 }
 
+export async function handleScheduled(env: Bindings) {
+  if (!env.HYPERDRIVE?.connectionString) return
+
+  try {
+    const stale = await withDatabase(env, (db) => recoverStaleOutboundMessages(db))
+    if (stale.length) {
+      console.warn(JSON.stringify({ event: 'outbound_claims_recovered', messages: stale.length }))
+    }
+    if (!env.OUTBOUND_QUEUE) return
+
+    const pending = await withDatabase(env, (db) => listUnclaimedOutboundMessageIds(db))
+    for (const messageId of pending) {
+      try {
+        await env.OUTBOUND_QUEUE.send({ v: 1, type: 'facebook.outbound', messageId })
+      } catch {
+        console.warn(JSON.stringify({ event: 'outbound_queue_failed', messageId }))
+      }
+    }
+  } catch {
+    console.error(JSON.stringify({ event: 'outbound_recovery_failed' }))
+  }
+}
+
 export { app, hasValidSignature, WorkspaceRealtime }
 
 const worker = {
@@ -1281,6 +1306,7 @@ const worker = {
     batch.queue === 'deepsales-outbound'
       ? handleOutboundBatch(batch, env)
       : handleWebhookBatch(batch, env),
+  scheduled: (_controller: ScheduledController, env: Bindings) => handleScheduled(env),
 }
 
 export default worker

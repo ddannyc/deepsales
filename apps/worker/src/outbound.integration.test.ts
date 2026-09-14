@@ -18,7 +18,7 @@ import {
   user,
 } from '@deepsales/db'
 import type { Bindings } from './bindings'
-import { handleOutboundBatch } from './index'
+import { handleOutboundBatch, handleScheduled } from './index'
 import { encryptFacebookToken as encryptToken } from './facebook'
 
 const connectionString = process.env.DATABASE_URL
@@ -128,6 +128,22 @@ describe.skipIf(!connectionString)('outbound Worker consumer', () => {
         failureCode: 'AMBIGUOUS_DELIVERY',
       }),
     )
+  })
+
+  it('requeues unclaimed committed messages during scheduled recovery', async () => {
+    const fixture = await createFixture(db)
+    const send = vi.fn().mockResolvedValue(undefined)
+
+    await handleScheduled({
+      ...environment(),
+      OUTBOUND_QUEUE: { send } as unknown as Queue,
+    })
+
+    expect(send).toHaveBeenCalledWith({
+      v: 1,
+      type: 'facebook.outbound',
+      messageId: fixture.messageId,
+    })
   })
 })
 

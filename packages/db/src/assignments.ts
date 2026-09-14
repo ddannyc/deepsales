@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
   channel,
@@ -53,17 +53,8 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
     throw new AssignmentError('NOT_FOUND', 'Conversation not found')
   }
 
-  const actorLock = await tx.execute(
-    sql`select m.id
-        from ${member} m
-        inner join ${workspaceUserAccess} a on a.id = m.workspace_user_access_id
-        where m.workspace_id = ${command.workspaceId} and a.user_id = ${command.actingUserId}
-        for update`,
-  )
-  if (!actorLock.rows.length) throw new AssignmentError('FORBIDDEN', 'Human member access required')
-
   const [actor] = await tx
-    .select({ id: member.id, type: member.type, status: member.status })
+    .select({ id: member.id })
     .from(member)
     .innerJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
     .where(
@@ -73,9 +64,7 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
       ),
     )
     .limit(1)
-  if (actor?.type !== 'HUMAN' || actor.status !== 'ACTIVE') {
-    throw new AssignmentError('FORBIDDEN', 'An active human member is required')
-  }
+  if (!actor) throw new AssignmentError('FORBIDDEN', 'Human member access required')
 
   const [current] = await tx
     .select({
@@ -95,6 +84,25 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
   if (!current) throw new AssignmentError('NOT_FOUND', 'Conversation not found')
   if (current.status !== 'OPEN') {
     throw new AssignmentError('CONVERSATION_CLOSED', 'Conversation is closed')
+  }
+
+  const involvedMemberIds = [actor.id, current.assigneeMemberId].filter((id): id is string =>
+    Boolean(id),
+  )
+  await tx
+    .select({ id: member.id })
+    .from(member)
+    .where(and(eq(member.workspaceId, command.workspaceId), inArray(member.id, involvedMemberIds)))
+    .orderBy(asc(member.id))
+    .for('update')
+
+  const [lockedActor] = await tx
+    .select({ type: member.type, status: member.status })
+    .from(member)
+    .where(eq(member.id, actor.id))
+    .limit(1)
+  if (lockedActor?.type !== 'HUMAN' || lockedActor.status !== 'ACTIVE') {
+    throw new AssignmentError('FORBIDDEN', 'An active human member is required')
   }
 
   const [access] = await tx

@@ -1,4 +1,4 @@
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, asc, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
   channelIdentity,
@@ -225,6 +225,58 @@ export async function claimOutboundMessage(
     if (!delivery) throw new ReplyError('NOT_FOUND', 'Message was not found')
     return { ...delivery, attemptId: attempt.id, attemptNumber: attempt.attemptNumber }
   })
+}
+
+export async function recoverStaleOutboundMessages(
+  db: Database,
+  input: { now?: Date; limit?: number } = {},
+) {
+  const now = input.now ?? new Date()
+  const cutoff = new Date(now.getTime() - OUTBOUND_CLAIM_TIMEOUT_MS)
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 100)
+  return db.transaction(async (tx) => {
+    const stale = await tx
+      .select({ id: message.id })
+      .from(message)
+      .where(
+        and(
+          eq(message.direction, 'OUTBOUND'),
+          eq(message.deliveryState, 'PENDING'),
+          isNotNull(message.deliveryStartedAt),
+          lte(message.deliveryStartedAt, cutoff),
+        ),
+      )
+      .orderBy(asc(message.deliveryStartedAt))
+      .limit(limit)
+      .for('update', { skipLocked: true })
+
+    for (const item of stale) {
+      await failClaimedMessage(
+        tx,
+        item.id,
+        now,
+        'AMBIGUOUS_DELIVERY',
+        'Delivery result was ambiguous',
+      )
+    }
+    return stale.map(({ id }) => id)
+  })
+}
+
+export async function listUnclaimedOutboundMessageIds(db: Database, limit = 100) {
+  const rows = await db
+    .select({ id: message.id })
+    .from(message)
+    .where(
+      and(
+        eq(message.direction, 'OUTBOUND'),
+        eq(message.deliveryState, 'PENDING'),
+        isNull(message.deliveryStartedAt),
+      ),
+    )
+    .orderBy(asc(message.createdAt), asc(message.id))
+    .limit(Math.min(Math.max(limit, 1), 100))
+  return rows.map(({ id }) => id)
 }
 
 export async function completeOutboundMessage(

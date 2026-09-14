@@ -19,6 +19,7 @@ import {
   member,
   message,
   processFacebookInbound,
+  recoverStaleOutboundMessages,
   setMemberChannelAccess,
   takeOverConversation,
   user,
@@ -328,11 +329,10 @@ describe.skipIf(!connectionString)('human reply delivery', () => {
       claimOutboundMessage(db, { messageId: created.message.id, now: claimedAt }),
     ).resolves.toBeTruthy()
     await expect(
-      claimOutboundMessage(db, {
-        messageId: created.message.id,
+      recoverStaleOutboundMessages(db, {
         now: new Date(claimedAt.getTime() + 5 * 60 * 1_000),
       }),
-    ).resolves.toBeNull()
+    ).resolves.toEqual([created.message.id])
 
     const [failed] = await db.select().from(message).where(eq(message.id, created.message.id))
     expect(failed).toEqual(

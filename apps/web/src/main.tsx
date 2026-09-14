@@ -482,7 +482,10 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [error, setError] = useState('')
   const [reply, setReply] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
+  const [clock, setClock] = useState(() => Date.now())
   const selectedIdRef = useRef<string | null>(null)
+  const selectedConversation = conversations.find(({ id }) => id === selectedId)
+  const replyWindowEligibleUntil = selectedConversation?.replyWindowEligibleUntil ?? null
 
   const refresh = useCallback(async () => {
     const response = await fetch(
@@ -556,6 +559,18 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       setError(inboxErrorMessage(cause))
     })
   }, [refresh])
+
+  useEffect(() => {
+    if (!replyWindowEligibleUntil) return
+    const expiresAt = Date.parse(replyWindowEligibleUntil)
+    const refreshClock = () => setClock(Date.now())
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      refreshClock()
+      return
+    }
+    const timer = window.setTimeout(refreshClock, expiresAt - Date.now() + 1)
+    return () => window.clearTimeout(timer)
+  }, [replyWindowEligibleUntil])
 
   useEffect(() => {
     selectedIdRef.current = selectedId
@@ -682,8 +697,12 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       <section className="inbox-thread" aria-label="对话详情">
         {selectedId ? (
           (() => {
-            const selected = conversations.find(({ id }) => id === selectedId)
+            const selected = selectedConversation
             if (!selected) return <p className="inbox-placeholder">请选择一个对话。</p>
+            const replyWindowOpen =
+              selected.replyWindowOpen &&
+              (!selected.replyWindowEligibleUntil ||
+                Date.parse(selected.replyWindowEligibleUntil) > clock)
             return (
               <>
                 <header className="thread-heading">
@@ -691,9 +710,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                     <p className="eyebrow">{selected.channelName}</p>
                     <h2>{selected.customerName ?? '新客户'}</h2>
                     <p className="reply-window" role="status">
-                      {selected.replyWindowOpen
-                        ? 'Messenger 回复窗口开放'
-                        : 'Messenger 回复窗口已关闭'}
+                      {replyWindowOpen ? 'Messenger 回复窗口开放' : 'Messenger 回复窗口已关闭'}
                     </p>
                   </div>
                   <div className="thread-actions">
@@ -748,12 +765,12 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                       maxLength={2_000}
                       onChange={(event) => setReply(event.target.value)}
                       placeholder="输入文字回复"
-                      disabled={!selected.replyWindowOpen || actionLoading}
+                      disabled={!replyWindowOpen || actionLoading}
                     />
                     <button
                       className="primary"
                       type="submit"
-                      disabled={!selected.replyWindowOpen || actionLoading || !reply.trim()}
+                      disabled={!replyWindowOpen || actionLoading || !reply.trim()}
                     >
                       {actionLoading ? '发送中…' : '发送回复'}
                     </button>
