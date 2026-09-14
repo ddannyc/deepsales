@@ -697,6 +697,89 @@ form {
   margin: 0 auto;
   padding: 64px 0 96px;
 }
+.knowledge-page {
+  width: min(1120px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 64px 0 96px;
+}
+.knowledge-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 18px;
+  margin-bottom: 28px;
+  border: 1px solid #c8d7e0;
+  padding: 20px 24px;
+  background: white;
+}
+.knowledge-create .primary,
+.knowledge-card .primary {
+  margin-top: 0;
+}
+.knowledge-selector {
+  display: grid;
+  gap: 8px;
+  max-width: 420px;
+  margin-bottom: 20px;
+  color: #41596b;
+  font-size: 13px;
+  font-weight: 700;
+}
+.knowledge-selector select,
+.knowledge-card textarea {
+  width: 100%;
+  border: 1px solid #b9cbd7;
+  padding: 10px;
+  color: var(--ink);
+  background: #f9fbfc;
+}
+.knowledge-card {
+  display: grid;
+  gap: 18px;
+  margin-bottom: 36px;
+  border: 1px solid #c8d7e0;
+  padding: 24px;
+  background: white;
+}
+.knowledge-card textarea {
+  min-height: 170px;
+  resize: vertical;
+}
+.knowledge-documents {
+  border-top: 1px solid #c8d7e0;
+  padding-top: 24px;
+}
+.knowledge-documents h2 {
+  margin: 0;
+  font-size: 22px;
+}
+.knowledge-document-list {
+  display: grid;
+  gap: 12px;
+}
+.knowledge-document {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border: 1px solid #c8d7e0;
+  padding: 18px 20px;
+  background: white;
+}
+.knowledge-document p {
+  margin: 6px 0 0;
+  color: #708495;
+  font-size: 13px;
+}
+.knowledge-empty {
+  border: 1px solid #c8d7e0;
+  padding: 24px;
+  color: #63788a;
+  background: white;
+}
+.knowledge-empty p:last-child {
+  margin-bottom: 0;
+}
 .facebook-list {
   display: grid;
   gap: 14px;
@@ -1092,8 +1175,13 @@ form {
     flex-direction: column;
   }
   .team-actions,
-  .member-fields {
+  .member-fields,
+  .knowledge-create {
     grid-template-columns: 1fr;
+  }
+  .knowledge-page {
+    width: min(100% - 36px, 720px);
+    padding-top: 44px;
   }
   .team-heading {
     flex-direction: column;

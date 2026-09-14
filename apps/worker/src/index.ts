@@ -4,13 +4,20 @@ import {
   bootstrapWorkspace,
   claimOutboundMessage,
   claimFacebookInboundAttachment,
+  claimKnowledgeDocument,
+  chunkKnowledgeText,
+  hashKnowledgeText,
   closeConversation,
   completeFacebookInboundAttachment,
+  completeKnowledgeDocument,
   completeOutboundMessage,
   createDatabase,
   createAiMember,
   createInvitation,
   createFacebookHumanReply,
+  createKnowledgeBase,
+  createInlineKnowledgeDocument,
+  deleteKnowledgeDocument,
   disableFacebookChannel,
   expireFacebookInboundAttachments,
   FacebookError,
@@ -22,17 +29,25 @@ import {
   ReplyError,
   failOutboundMessage,
   failFacebookInboundAttachment,
+  failKnowledgeDocument,
   listFacebookChannels,
   listFacebookChannelsPage,
   listFacebookConversations,
   listMessages,
   listPendingFacebookInboundAttachmentIds,
+  listPendingKnowledgeDocumentIds,
+  listKnowledgeBases,
+  listKnowledgeDocuments,
+  KnowledgeError,
+  KnowledgeProcessingError,
+  normalizeKnowledgeText,
   listUnclaimedOutboundMessageIds,
   deleteMember,
   listTeam,
   MemberError,
   processFacebookInbound,
   releaseFacebookInboundAttachment,
+  releaseKnowledgeDocument,
   recoverStaleOutboundMessages,
   member,
   setMemberChannelAccess,
@@ -77,6 +92,8 @@ import {
 import { publishRealtime, WorkspaceRealtime } from './realtime'
 import { createObjectStorage } from './object-storage'
 import { createJobQueue, type JobQueue } from './queue'
+import { AIEmbeddingError, AIProviderError, createAIClient } from './ai'
+import { knowledgeDocumentJobSchema } from './knowledge'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
@@ -139,6 +156,10 @@ const replyInput = z
   .strict()
 const transferInput = z
   .object({ targetMemberId: z.string().uuid(), confirmOverride: z.boolean().optional() })
+  .strict()
+const knowledgeBaseInput = z.object({ name: z.string().trim().min(1).max(100) }).strict()
+const knowledgeTextInput = z
+  .object({ name: z.string().trim().min(1).max(100), text: z.string() })
   .strict()
 
 app.onError((_error, c) => {
@@ -442,6 +463,129 @@ app.get('/api/workspaces/:workspaceId/team', async (c) => {
     return c.json(await listTeam(db, c.req.param('workspaceId')))
   })
 })
+
+app.get('/api/workspaces/:workspaceId/knowledge-bases', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      return c.json({
+        knowledgeBases: await listKnowledgeBases(db, {
+          workspaceId: c.req.param('workspaceId'),
+          userId: session.user.id,
+        }),
+      })
+    } catch (error) {
+      return knowledgeErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/knowledge-bases', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `knowledge-base:${session.user.id}`)
+    if (limited) return limited
+    const input = knowledgeBaseInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json(
+        { error: { code: 'INVALID_REQUEST', message: 'Enter a knowledge base name' } },
+        400,
+      )
+    }
+    try {
+      const knowledgeBase = await createKnowledgeBase(db, {
+        workspaceId: c.req.param('workspaceId'),
+        createdByUserId: session.user.id,
+        name: input.data.name,
+      })
+      await publishKnowledgeChange(c.env, c.req.param('workspaceId'), knowledgeBase.id)
+      return c.json({ knowledgeBase }, 201)
+    } catch (error) {
+      return knowledgeErrorResponse(c, error)
+    }
+  })
+})
+
+app.get('/api/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId/documents', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      return c.json({
+        documents: await listKnowledgeDocuments(db, {
+          workspaceId: c.req.param('workspaceId'),
+          knowledgeBaseId: c.req.param('knowledgeBaseId'),
+          userId: session.user.id,
+        }),
+      })
+    } catch (error) {
+      return knowledgeErrorResponse(c, error)
+    }
+  })
+})
+
+app.post(
+  '/api/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId/documents/text',
+  async (c) => {
+    if (!hasAuthBindings(c.env)) return notReady(c)
+    return withDatabase(c.env, async (db) => {
+      const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+      if (!session) return unauthorized(c)
+      const limited = await rateLimit(c, `knowledge-document:${session.user.id}`)
+      if (limited) return limited
+      const input = knowledgeTextInput.safeParse(await c.req.json().catch(() => null))
+      if (!input.success) {
+        return c.json({ error: { code: 'INVALID_REQUEST', message: 'Enter document text' } }, 400)
+      }
+      try {
+        const document = await createInlineKnowledgeDocument(db, {
+          workspaceId: c.req.param('workspaceId'),
+          knowledgeBaseId: c.req.param('knowledgeBaseId'),
+          createdByUserId: session.user.id,
+          name: input.data.name,
+          text: input.data.text,
+        })
+        if (document.status === 'UPLOADED') {
+          await enqueueKnowledgeDocumentJob(c.env.DOCUMENTS_QUEUE, document.id)
+        }
+        await publishKnowledgeChange(c.env, c.req.param('workspaceId'), document.id)
+        return c.json({ document }, 201)
+      } catch (error) {
+        return knowledgeErrorResponse(c, error)
+      }
+    })
+  },
+)
+
+app.delete(
+  '/api/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId/documents/:documentId',
+  async (c) => {
+    if (!hasAuthBindings(c.env)) return notReady(c)
+    return withDatabase(c.env, async (db) => {
+      const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+      if (!session) return unauthorized(c)
+      const limited = await rateLimit(c, `knowledge-delete:${session.user.id}`)
+      if (limited) return limited
+      try {
+        const deleted = await deleteKnowledgeDocument(db, {
+          workspaceId: c.req.param('workspaceId'),
+          knowledgeBaseId: c.req.param('knowledgeBaseId'),
+          documentId: c.req.param('documentId'),
+          actingUserId: session.user.id,
+        })
+        await publishKnowledgeChange(c.env, c.req.param('workspaceId'), deleted.id)
+        return c.body(null, 204)
+      } catch (error) {
+        return knowledgeErrorResponse(c, error)
+      }
+    })
+  },
+)
 
 app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
@@ -935,6 +1079,8 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.META_VERIFY_TOKEN &&
       env.META_GRAPH_API_VERSION &&
       env.TOKEN_ENCRYPTION_KEY &&
+      env.OPENAI_API_KEY &&
+      env.OPENAI_EMBEDDING_MODEL &&
       env.WEBHOOKS_QUEUE &&
       env.OUTBOUND_QUEUE &&
       env.DOCUMENTS_QUEUE &&
@@ -1123,6 +1269,12 @@ function facebookProviderResponse(
 
 function inboxErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
   if (!(error instanceof InboxError)) throw error
+  const status = error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : 400
+  return c.json({ error: { code: error.code, message: error.message } }, status)
+}
+
+function knowledgeErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (!(error instanceof KnowledgeError)) throw error
   const status = error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : 400
   return c.json({ error: { code: error.code, message: error.message } }, status)
 }
@@ -1352,6 +1504,26 @@ async function enqueueAttachmentJobs(queue: JobQueue | undefined, attachmentIds:
   }
 }
 
+async function enqueueKnowledgeDocumentJob(queue: Queue | undefined, documentId: string) {
+  if (!queue) return
+  try {
+    await createJobQueue(queue).send({ v: 1, type: 'knowledge.document', documentId })
+  } catch {
+    console.warn(JSON.stringify({ event: 'knowledge_queue_failed', documentId }))
+  }
+}
+
+async function publishKnowledgeChange(env: Bindings, workspaceId: string, documentId: string) {
+  try {
+    await publishRealtime(env.WORKSPACE_REALTIME, workspaceId, {
+      type: 'knowledge.changed',
+      entityId: documentId,
+    })
+  } catch {
+    console.warn(JSON.stringify({ event: 'realtime_publish_failed', type: 'knowledge.changed' }))
+  }
+}
+
 export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bindings) {
   const documentsQueue = env.DOCUMENTS_QUEUE ? createJobQueue(env.DOCUMENTS_QUEUE) : undefined
   for (const message of batch.messages) {
@@ -1419,8 +1591,108 @@ class AttachmentRetryError extends Error {
   }
 }
 
+type DocumentQueueMessage = { ack(): void; retry(): void }
+
+async function handleKnowledgeDocument(
+  queueMessage: DocumentQueueMessage,
+  documentId: string,
+  env: Bindings,
+) {
+  let claimed: Awaited<ReturnType<typeof claimKnowledgeDocument>>
+  try {
+    claimed = await withDatabase(env, (db) => claimKnowledgeDocument(db, { documentId }))
+  } catch {
+    queueMessage.retry()
+    return
+  }
+  if (!claimed) {
+    queueMessage.ack()
+    return
+  }
+
+  try {
+    if (claimed.sourceType !== 'TEXT' || !claimed.sourceText) {
+      throw new KnowledgeProcessingError('DOCUMENT_CONTENT_MISSING')
+    }
+    const text = normalizeKnowledgeText(claimed.sourceText)
+    const chunks = chunkKnowledgeText(text)
+    if (!chunks.length) throw new KnowledgeProcessingError('EMPTY_CONTENT')
+    if (!env.OPENAI_API_KEY) throw new AIProviderError(0, true)
+
+    const embeddings = await createAIClient({
+      apiKey: env.OPENAI_API_KEY,
+      embeddingModel: env.OPENAI_EMBEDDING_MODEL,
+      baseUrl: env.OPENAI_BASE_URL,
+    }).embed(chunks)
+    if (embeddings.length !== chunks.length) throw new AIEmbeddingError()
+    const contentSha256 = await hashKnowledgeText(text)
+
+    const completed = await withDatabase(env, (db) =>
+      completeKnowledgeDocument(db, {
+        documentId: claimed.id,
+        workspaceId: claimed.workspaceId,
+        knowledgeBaseId: claimed.knowledgeBaseId,
+        processingStartedAt: claimed.processingStartedAt,
+        contentSha256,
+        chunks: chunks.map((chunk, index) => ({ text: chunk, embedding: embeddings[index] })),
+      }),
+    )
+    if (completed) await publishKnowledgeChange(env, claimed.workspaceId, claimed.id)
+    queueMessage.ack()
+  } catch (error) {
+    const retryable =
+      error instanceof AIProviderError
+        ? error.retryable
+        : !(error instanceof KnowledgeProcessingError || error instanceof AIEmbeddingError)
+    if (retryable) {
+      try {
+        await withDatabase(env, (db) =>
+          releaseKnowledgeDocument(db, {
+            documentId: claimed.id,
+            processingStartedAt: claimed.processingStartedAt,
+          }),
+        )
+      } catch {}
+      queueMessage.retry()
+      return
+    }
+
+    const failureCode =
+      error instanceof KnowledgeProcessingError
+        ? error.code
+        : error instanceof AIEmbeddingError
+          ? 'INVALID_EMBEDDING'
+          : 'AI_PROVIDER_ERROR'
+    try {
+      const failed = await withDatabase(env, (db) =>
+        failKnowledgeDocument(db, {
+          documentId: claimed.id,
+          processingStartedAt: claimed.processingStartedAt,
+          failureCode,
+          failureMessage:
+            error instanceof KnowledgeProcessingError
+              ? error.code === 'EMPTY_CONTENT'
+                ? 'Document text is empty'
+                : 'Document content is unavailable'
+              : 'Embedding provider returned an invalid response',
+        }),
+      )
+      if (failed) await publishKnowledgeChange(env, claimed.workspaceId, claimed.id)
+      queueMessage.ack()
+    } catch {
+      queueMessage.retry()
+    }
+  }
+}
+
 export async function handleDocumentsBatch(batch: MessageBatch<unknown>, env: Bindings) {
   for (const queueMessage of batch.messages) {
+    const knowledgeJob = knowledgeDocumentJobSchema.safeParse(queueMessage.body)
+    if (knowledgeJob.success) {
+      await handleKnowledgeDocument(queueMessage, knowledgeJob.data.documentId, env)
+      continue
+    }
+
     const job = facebookAttachmentJobSchema.safeParse(queueMessage.body)
     if (!job.success) {
       queueMessage.ack()
@@ -1776,6 +2048,12 @@ export async function handleScheduled(env: Bindings) {
         } catch {
           console.warn(JSON.stringify({ event: 'attachment_queue_failed', attachmentId }))
         }
+      }
+      const pendingKnowledgeDocuments = await withDatabase(env, (db) =>
+        listPendingKnowledgeDocumentIds(db),
+      )
+      for (const documentId of pendingKnowledgeDocuments) {
+        await enqueueKnowledgeDocumentJob(env.DOCUMENTS_QUEUE, documentId)
       }
     }
   } catch {

@@ -45,9 +45,9 @@ pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DATABASE
 ```
 
 Replace the placeholder Hyperdrive ID in `apps/worker/wrangler.jsonc`, set
-`APP_URL`, `BETTER_AUTH_SECRET`, `META_APP_SECRET`, `META_VERIFY_TOKEN`, and
-`TOKEN_ENCRYPTION_KEY` with Wrangler. Set `META_APP_ID` and `META_GRAPH_API_VERSION`
-as Worker variables, then:
+`APP_URL`, `BETTER_AUTH_SECRET`, `META_APP_SECRET`, `META_VERIFY_TOKEN`,
+`TOKEN_ENCRYPTION_KEY`, and `OPENAI_API_KEY` with Wrangler. Set `META_APP_ID`,
+`META_GRAPH_API_VERSION`, and `OPENAI_EMBEDDING_MODEL` as Worker variables, then:
 
 ```powershell
 pnpm db:migrate

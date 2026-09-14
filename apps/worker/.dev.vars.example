@@ -8,3 +8,8 @@ META_APP_SECRET=your-meta-app-secret
 META_VERIFY_TOKEN=choose-a-long-random-value
 # Generate a base64-encoded 32-byte AES key for Page-token encryption.
 TOKEN_ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+# AI settings. Keep the API key as a local secret.
+OPENAI_API_KEY=your-openai-api-key
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+AI_RETRIEVAL_MAX_DISTANCE=0.35

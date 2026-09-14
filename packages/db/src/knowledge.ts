@@ -1,0 +1,583 @@
+import { and, asc, cosineDistance, eq, isNull, lte, or } from 'drizzle-orm'
+import type { Database } from './database'
+import { knowledgeBase, knowledgeChunk, knowledgeDocument, workspaceUserAccess } from './schema'
+
+export const KNOWLEDGE_CHUNK_CODE_POINTS = 2_000
+export const KNOWLEDGE_CHUNK_OVERLAP_CODE_POINTS = 200
+export const MAX_INLINE_KNOWLEDGE_CODE_POINTS = 1_000_000
+export const KNOWLEDGE_DOCUMENT_CLAIM_TIMEOUT_MS = 5 * 60 * 1_000
+export const MAX_KNOWLEDGE_RETRIEVAL_CHUNKS = 6
+export const DEFAULT_KNOWLEDGE_RETRIEVAL_MAX_DISTANCE = 0.35
+
+export type KnowledgeErrorCode = 'FORBIDDEN' | 'NOT_FOUND' | 'INVALID_REQUEST'
+
+export class KnowledgeError extends Error {
+  constructor(
+    readonly code: KnowledgeErrorCode,
+    message: string = code,
+  ) {
+    super(message)
+  }
+}
+
+export type KnowledgeProcessingErrorCode =
+  | 'EMPTY_CONTENT'
+  | 'DOCUMENT_CONTENT_MISSING'
+  | 'INVALID_EMBEDDING'
+  | 'DOCUMENT_NOT_PROCESSABLE'
+
+export class KnowledgeProcessingError extends Error {
+  constructor(
+    readonly code: KnowledgeProcessingErrorCode,
+    message: string = code,
+  ) {
+    super(message)
+  }
+}
+
+type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
+
+export type KnowledgeDocumentSummary = {
+  id: string
+  workspaceId: string
+  knowledgeBaseId: string
+  name: string
+  sourceType: 'TEXT' | 'PDF' | 'DOCX' | 'TXT' | 'MARKDOWN'
+  status: 'UPLOADED' | 'PROCESSING' | 'READY' | 'FAILED'
+  contentSha256: string | null
+  failureCode: string | null
+  failureMessage: string | null
+  processingStartedAt: Date | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+export function normalizeKnowledgeText(text: string) {
+  const normalizedLineEndings = text.replace(/\r\n?/g, '\n')
+  const withoutControls = Array.from(normalizedLineEndings, (character) => {
+    const code = character.charCodeAt(0)
+    return (code < 32 && code !== 9 && code !== 10) || (code >= 127 && code <= 159)
+      ? ' '
+      : character
+  }).join('')
+  return withoutControls
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .join('\n')
+    .trim()
+}
+
+export function chunkKnowledgeText(text: string) {
+  const normalized = normalizeKnowledgeText(text)
+  if (!normalized) return []
+
+  const chunks: string[] = []
+  let current: string[] = []
+  const paragraphs = normalized
+    .split(/\n(?:[ \t]*\n)+/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+
+  for (const paragraph of paragraphs) {
+    const points = Array.from(paragraph)
+    if (points.length > KNOWLEDGE_CHUNK_CODE_POINTS) {
+      if (current.length) {
+        chunks.push(current.join(''))
+        current = []
+      }
+      for (
+        let start = 0;
+        start < points.length;
+        start += KNOWLEDGE_CHUNK_CODE_POINTS - KNOWLEDGE_CHUNK_OVERLAP_CODE_POINTS
+      ) {
+        const end = Math.min(start + KNOWLEDGE_CHUNK_CODE_POINTS, points.length)
+        chunks.push(points.slice(start, end).join(''))
+        if (end === points.length) break
+      }
+      continue
+    }
+
+    const candidate = current.length ? [...current, '\n', '\n', ...points] : points
+    if (candidate.length <= KNOWLEDGE_CHUNK_CODE_POINTS) {
+      current = candidate
+      continue
+    }
+
+    chunks.push(current.join(''))
+    const overlap = current.slice(-KNOWLEDGE_CHUNK_OVERLAP_CODE_POINTS)
+    current =
+      overlap.length + 2 + points.length <= KNOWLEDGE_CHUNK_CODE_POINTS
+        ? [...overlap, '\n', '\n', ...points]
+        : points
+  }
+
+  if (current.length) chunks.push(current.join(''))
+  return chunks
+}
+
+export async function hashKnowledgeText(text: string) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export async function createKnowledgeBase(
+  db: Database,
+  input: { workspaceId: string; createdByUserId: string; name: string },
+) {
+  const name = cleanName(input.name, 'Knowledge base name')
+  return db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.createdByUserId)
+    const [created] = await tx
+      .insert(knowledgeBase)
+      .values({ workspaceId: input.workspaceId, name })
+      .returning({
+        id: knowledgeBase.id,
+        workspaceId: knowledgeBase.workspaceId,
+        name: knowledgeBase.name,
+        createdAt: knowledgeBase.createdAt,
+        updatedAt: knowledgeBase.updatedAt,
+      })
+    if (!created) throw new KnowledgeError('INVALID_REQUEST', 'Knowledge base was not created')
+    return created
+  })
+}
+
+export async function listKnowledgeBases(
+  db: Database,
+  input: { workspaceId: string; userId: string },
+) {
+  await assertAccess(db, input.workspaceId, input.userId)
+  return db
+    .select({
+      id: knowledgeBase.id,
+      workspaceId: knowledgeBase.workspaceId,
+      name: knowledgeBase.name,
+      createdAt: knowledgeBase.createdAt,
+      updatedAt: knowledgeBase.updatedAt,
+    })
+    .from(knowledgeBase)
+    .where(eq(knowledgeBase.workspaceId, input.workspaceId))
+    .orderBy(asc(knowledgeBase.name), asc(knowledgeBase.id))
+}
+
+export async function listKnowledgeDocuments(
+  db: Database,
+  input: { workspaceId: string; knowledgeBaseId: string; userId: string },
+) {
+  await assertKnowledgeBaseAccess(db, input)
+  return db
+    .select(documentSummarySelection)
+    .from(knowledgeDocument)
+    .where(
+      and(
+        eq(knowledgeDocument.workspaceId, input.workspaceId),
+        eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+      ),
+    )
+    .orderBy(asc(knowledgeDocument.createdAt), asc(knowledgeDocument.id))
+}
+
+export async function createInlineKnowledgeDocument(
+  db: Database,
+  input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    createdByUserId: string
+    name: string
+    text: string
+  },
+) {
+  const name = cleanName(input.name, 'Document name')
+  const normalized = normalizeKnowledgeText(input.text)
+  const codePointLength = Array.from(normalized).length
+  const failureCode = !normalized
+    ? 'EMPTY_CONTENT'
+    : codePointLength > MAX_INLINE_KNOWLEDGE_CODE_POINTS
+      ? 'TOO_LARGE'
+      : null
+  const contentSha256 = failureCode ? await hashKnowledgeText(normalized) : null
+  const now = new Date()
+
+  return db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.createdByUserId)
+    await assertKnowledgeBase(tx, input.workspaceId, input.knowledgeBaseId)
+    const [created] = await tx
+      .insert(knowledgeDocument)
+      .values({
+        workspaceId: input.workspaceId,
+        knowledgeBaseId: input.knowledgeBaseId,
+        name,
+        sourceType: 'TEXT',
+        sourceText: input.text,
+        status: failureCode ? 'FAILED' : 'UPLOADED',
+        contentSha256,
+        failureCode,
+        failureMessage: failureCode ? failureMessage(failureCode) : null,
+        updatedAt: now,
+      })
+      .returning(documentSummarySelection)
+    if (!created) throw new KnowledgeError('INVALID_REQUEST', 'Document was not created')
+    return created
+  })
+}
+
+export async function deleteKnowledgeDocument(
+  db: Database,
+  input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    documentId: string
+    actingUserId: string
+  },
+) {
+  return db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.actingUserId)
+    const [document] = await tx
+      .select({ id: knowledgeDocument.id })
+      .from(knowledgeDocument)
+      .where(
+        and(
+          eq(knowledgeDocument.id, input.documentId),
+          eq(knowledgeDocument.workspaceId, input.workspaceId),
+          eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+        ),
+      )
+      .limit(1)
+    if (!document) throw new KnowledgeError('NOT_FOUND', 'Document not found')
+    await tx.delete(knowledgeDocument).where(eq(knowledgeDocument.id, input.documentId))
+    return document
+  })
+}
+
+export async function claimKnowledgeDocument(
+  db: Database,
+  input: { documentId: string; now?: Date; claimTimeoutMs?: number },
+) {
+  const now = input.now ?? new Date()
+  const cutoff = new Date(
+    now.getTime() - (input.claimTimeoutMs ?? KNOWLEDGE_DOCUMENT_CLAIM_TIMEOUT_MS),
+  )
+
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({
+        id: knowledgeDocument.id,
+        workspaceId: knowledgeDocument.workspaceId,
+        knowledgeBaseId: knowledgeDocument.knowledgeBaseId,
+        name: knowledgeDocument.name,
+        sourceType: knowledgeDocument.sourceType,
+        sourceText: knowledgeDocument.sourceText,
+        status: knowledgeDocument.status,
+        processingStartedAt: knowledgeDocument.processingStartedAt,
+      })
+      .from(knowledgeDocument)
+      .where(eq(knowledgeDocument.id, input.documentId))
+      .for('update')
+      .limit(1)
+    if (!current || current.status === 'READY' || current.status === 'FAILED') return null
+    if (current.processingStartedAt && current.processingStartedAt.getTime() > cutoff.getTime()) {
+      return null
+    }
+
+    const [claimed] = await tx
+      .update(knowledgeDocument)
+      .set({ status: 'PROCESSING', processingStartedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(knowledgeDocument.id, input.documentId),
+          or(
+            eq(knowledgeDocument.status, 'UPLOADED'),
+            and(
+              eq(knowledgeDocument.status, 'PROCESSING'),
+              or(
+                isNull(knowledgeDocument.processingStartedAt),
+                lte(knowledgeDocument.processingStartedAt, cutoff),
+              ),
+            ),
+          ),
+        ),
+      )
+      .returning({ id: knowledgeDocument.id })
+    if (!claimed) return null
+    return { ...current, status: 'PROCESSING' as const, processingStartedAt: now }
+  })
+}
+
+export async function completeKnowledgeDocument(
+  db: Database,
+  input: {
+    documentId: string
+    processingStartedAt: Date
+    workspaceId: string
+    knowledgeBaseId: string
+    contentSha256: string
+    chunks: Array<{ text: string; embedding: number[] }>
+    now?: Date
+  },
+) {
+  if (!input.chunks.length) throw new KnowledgeProcessingError('EMPTY_CONTENT')
+  for (const chunk of input.chunks) assertEmbedding(chunk.embedding)
+
+  const now = input.now ?? new Date()
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({
+        status: knowledgeDocument.status,
+        processingStartedAt: knowledgeDocument.processingStartedAt,
+      })
+      .from(knowledgeDocument)
+      .where(
+        and(
+          eq(knowledgeDocument.id, input.documentId),
+          eq(knowledgeDocument.workspaceId, input.workspaceId),
+          eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+        ),
+      )
+      .for('update')
+      .limit(1)
+    if (
+      current?.status !== 'PROCESSING' ||
+      current.processingStartedAt?.getTime() !== input.processingStartedAt.getTime()
+    ) {
+      return null
+    }
+
+    await tx.delete(knowledgeChunk).where(eq(knowledgeChunk.knowledgeDocumentId, input.documentId))
+    await tx.insert(knowledgeChunk).values(
+      input.chunks.map((chunk, ordinal) => ({
+        knowledgeDocumentId: input.documentId,
+        knowledgeBaseId: input.knowledgeBaseId,
+        workspaceId: input.workspaceId,
+        ordinal,
+        text: chunk.text,
+        embedding: chunk.embedding,
+      })),
+    )
+    const [updated] = await tx
+      .update(knowledgeDocument)
+      .set({
+        status: 'READY',
+        processingStartedAt: null,
+        contentSha256: input.contentSha256,
+        failureCode: null,
+        failureMessage: null,
+        updatedAt: now,
+      })
+      .where(eq(knowledgeDocument.id, input.documentId))
+      .returning(documentSummarySelection)
+    return updated ?? null
+  })
+}
+
+export async function failKnowledgeDocument(
+  db: Database,
+  input: {
+    documentId: string
+    processingStartedAt: Date
+    failureCode: string
+    failureMessage?: string
+    now?: Date
+  },
+) {
+  const now = input.now ?? new Date()
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({
+        status: knowledgeDocument.status,
+        processingStartedAt: knowledgeDocument.processingStartedAt,
+      })
+      .from(knowledgeDocument)
+      .where(eq(knowledgeDocument.id, input.documentId))
+      .for('update')
+      .limit(1)
+    if (
+      current?.status !== 'PROCESSING' ||
+      current.processingStartedAt?.getTime() !== input.processingStartedAt.getTime()
+    ) {
+      return null
+    }
+
+    await tx.delete(knowledgeChunk).where(eq(knowledgeChunk.knowledgeDocumentId, input.documentId))
+    const [failed] = await tx
+      .update(knowledgeDocument)
+      .set({
+        status: 'FAILED',
+        processingStartedAt: null,
+        failureCode: input.failureCode.slice(0, 100),
+        failureMessage: (input.failureMessage ?? 'Document processing failed').slice(0, 500),
+        updatedAt: now,
+      })
+      .where(eq(knowledgeDocument.id, input.documentId))
+      .returning(documentSummarySelection)
+    return failed ?? null
+  })
+}
+
+export async function releaseKnowledgeDocument(
+  db: Database,
+  input: { documentId: string; processingStartedAt: Date; now?: Date },
+) {
+  const now = input.now ?? new Date()
+  return db
+    .update(knowledgeDocument)
+    .set({ status: 'UPLOADED', processingStartedAt: null, updatedAt: now })
+    .where(
+      and(
+        eq(knowledgeDocument.id, input.documentId),
+        eq(knowledgeDocument.status, 'PROCESSING'),
+        eq(knowledgeDocument.processingStartedAt, input.processingStartedAt),
+      ),
+    )
+    .returning({ id: knowledgeDocument.id })
+}
+
+export async function listPendingKnowledgeDocumentIds(
+  db: Database,
+  input: { now?: Date; claimTimeoutMs?: number; limit?: number } = {},
+) {
+  const now = input.now ?? new Date()
+  const cutoff = new Date(
+    now.getTime() - (input.claimTimeoutMs ?? KNOWLEDGE_DOCUMENT_CLAIM_TIMEOUT_MS),
+  )
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 100)
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .select({ id: knowledgeDocument.id })
+      .from(knowledgeDocument)
+      .where(
+        or(
+          eq(knowledgeDocument.status, 'UPLOADED'),
+          and(
+            eq(knowledgeDocument.status, 'PROCESSING'),
+            or(
+              isNull(knowledgeDocument.processingStartedAt),
+              lte(knowledgeDocument.processingStartedAt, cutoff),
+            ),
+          ),
+        ),
+      )
+      .orderBy(asc(knowledgeDocument.updatedAt), asc(knowledgeDocument.id))
+      .limit(limit)
+      .for('update', { skipLocked: true })
+    return rows.map(({ id }) => id)
+  })
+}
+
+export async function searchKnowledgeChunks(
+  db: Database,
+  input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    embedding: number[]
+    maxDistance?: number
+    limit?: number
+  },
+) {
+  assertEmbedding(input.embedding)
+  const maxDistance = input.maxDistance ?? DEFAULT_KNOWLEDGE_RETRIEVAL_MAX_DISTANCE
+  if (!Number.isFinite(maxDistance) || maxDistance < 0) {
+    throw new KnowledgeError('INVALID_REQUEST', 'Invalid retrieval distance')
+  }
+  const limit = Math.min(Math.max(input.limit ?? MAX_KNOWLEDGE_RETRIEVAL_CHUNKS, 1), 6)
+  const distance = cosineDistance(knowledgeChunk.embedding, input.embedding)
+  return db
+    .select({
+      id: knowledgeChunk.id,
+      knowledgeDocumentId: knowledgeChunk.knowledgeDocumentId,
+      text: knowledgeChunk.text,
+      ordinal: knowledgeChunk.ordinal,
+      distance,
+    })
+    .from(knowledgeChunk)
+    .innerJoin(knowledgeDocument, eq(knowledgeDocument.id, knowledgeChunk.knowledgeDocumentId))
+    .where(
+      and(
+        eq(knowledgeChunk.workspaceId, input.workspaceId),
+        eq(knowledgeChunk.knowledgeBaseId, input.knowledgeBaseId),
+        eq(knowledgeDocument.workspaceId, input.workspaceId),
+        eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+        eq(knowledgeDocument.status, 'READY'),
+        lte(distance, maxDistance),
+      ),
+    )
+    .orderBy(distance, asc(knowledgeChunk.knowledgeDocumentId), asc(knowledgeChunk.ordinal))
+    .limit(limit)
+}
+
+const documentSummarySelection = {
+  id: knowledgeDocument.id,
+  workspaceId: knowledgeDocument.workspaceId,
+  knowledgeBaseId: knowledgeDocument.knowledgeBaseId,
+  name: knowledgeDocument.name,
+  sourceType: knowledgeDocument.sourceType,
+  status: knowledgeDocument.status,
+  contentSha256: knowledgeDocument.contentSha256,
+  failureCode: knowledgeDocument.failureCode,
+  failureMessage: knowledgeDocument.failureMessage,
+  processingStartedAt: knowledgeDocument.processingStartedAt,
+  createdAt: knowledgeDocument.createdAt,
+  updatedAt: knowledgeDocument.updatedAt,
+}
+
+async function assertKnowledgeBaseAccess(
+  db: Database,
+  input: { workspaceId: string; knowledgeBaseId: string; userId: string },
+) {
+  await assertAccess(db, input.workspaceId, input.userId)
+  await assertKnowledgeBase(db, input.workspaceId, input.knowledgeBaseId)
+}
+
+async function assertAccess(db: Database | Transaction, workspaceId: string, userId: string) {
+  const [access] = await db
+    .select({ id: workspaceUserAccess.id })
+    .from(workspaceUserAccess)
+    .where(
+      and(eq(workspaceUserAccess.workspaceId, workspaceId), eq(workspaceUserAccess.userId, userId)),
+    )
+    .limit(1)
+  if (!access) throw new KnowledgeError('FORBIDDEN', 'Workspace access required')
+}
+
+async function assertManager(tx: Transaction, workspaceId: string, userId: string) {
+  const [access] = await tx
+    .select({ role: workspaceUserAccess.role })
+    .from(workspaceUserAccess)
+    .where(
+      and(eq(workspaceUserAccess.workspaceId, workspaceId), eq(workspaceUserAccess.userId, userId)),
+    )
+    .limit(1)
+  if (!access || access.role === 'AGENT') {
+    throw new KnowledgeError('FORBIDDEN', 'Manager access required')
+  }
+}
+
+async function assertKnowledgeBase(
+  db: Database | Transaction,
+  workspaceId: string,
+  knowledgeBaseId: string,
+) {
+  const [base] = await db
+    .select({ id: knowledgeBase.id })
+    .from(knowledgeBase)
+    .where(and(eq(knowledgeBase.id, knowledgeBaseId), eq(knowledgeBase.workspaceId, workspaceId)))
+    .limit(1)
+  if (!base) throw new KnowledgeError('NOT_FOUND', 'Knowledge base not found')
+}
+
+function cleanName(value: string, label: string) {
+  const name = value.trim()
+  if (!name || Array.from(name).length > 100) {
+    throw new KnowledgeError('INVALID_REQUEST', `${label} is invalid`)
+  }
+  return name
+}
+
+function failureMessage(code: string) {
+  return code === 'EMPTY_CONTENT' ? 'Inline text is empty' : 'Inline text is too large'
+}
+
+function assertEmbedding(embedding: number[]): asserts embedding is number[] {
+  if (embedding.length !== 1_536 || embedding.some((value) => !Number.isFinite(value))) {
+    throw new KnowledgeProcessingError('INVALID_EMBEDDING', 'Embedding dimension must be 1536')
+  }
+}

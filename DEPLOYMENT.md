@@ -1,6 +1,6 @@
 # DeepSales 部署步骤
 
-本文档适用于当前 T05 版本：React SPA、Cloudflare Worker、Neon PostgreSQL、Cloudflare Queues 和 Durable Object。应用部署不会自动执行数据库迁移。
+本文档适用于当前 T08 版本：React SPA、Cloudflare Worker、Neon PostgreSQL、pgvector、Cloudflare Queues 和 Durable Object。应用部署不会自动执行数据库迁移。
 
 ## 执行分类
 
@@ -32,7 +32,7 @@ pnpm run deploy
 - Node.js、pnpm 已安装。
 - 一个可用的 Neon PostgreSQL 数据库，以及生产环境直连 `DATABASE_URL`。
 - Cloudflare 账号和 Wrangler 登录权限。
-- Meta App、App Secret、Webhook Verify Token，以及可连接的 Facebook Page。
+- Meta App、App Secret、Webhook Verify Token、OpenAI API key，以及可连接的 Facebook Page。
 
 所有命令均在仓库根目录执行。
 
@@ -106,6 +106,7 @@ pnpm --filter @deepsales/worker exec wrangler secret put BETTER_AUTH_SECRET
 pnpm --filter @deepsales/worker exec wrangler secret put META_APP_SECRET
 pnpm --filter @deepsales/worker exec wrangler secret put META_VERIFY_TOKEN
 pnpm --filter @deepsales/worker exec wrangler secret put TOKEN_ENCRYPTION_KEY
+pnpm --filter @deepsales/worker exec wrangler secret put OPENAI_API_KEY
 ```
 
 要求：
@@ -114,6 +115,7 @@ pnpm --filter @deepsales/worker exec wrangler secret put TOKEN_ENCRYPTION_KEY
 - `BETTER_AUTH_SECRET` 使用至少 32 个字符的随机值。
 - `META_VERIFY_TOKEN` 使用随机值，并在 Meta 配置中使用同一个值。
 - `TOKEN_ENCRYPTION_KEY` 必须是 Base64 编码的 32 字节随机密钥。
+- `OPENAI_API_KEY` 用于生成知识库 embeddings；不要写入 `wrangler.jsonc`。
 - `META_APP_ID` 和 `META_GRAPH_API_VERSION` 已在 `wrangler.jsonc` 的 `vars` 中配置；如使用其他 Meta App，请先修改它们。
 - 生产环境不要配置测试用的 `FACEBOOK_GRAPH_BASE_URL`。
 

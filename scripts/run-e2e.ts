@@ -100,7 +100,7 @@ async function freePort() {
   return port
 }
 
-function workerBindings(baseUrl: string, facebookGraphBaseUrl: string) {
+function workerBindings(baseUrl: string, facebookGraphBaseUrl: string, openAIBaseUrl: string) {
   return {
     APP_URL: baseUrl,
     BETTER_AUTH_SECRET: 'e2e-only-better-auth-secret-32-characters',
@@ -110,6 +110,9 @@ function workerBindings(baseUrl: string, facebookGraphBaseUrl: string) {
     META_GRAPH_API_VERSION: 'v26.0',
     FACEBOOK_GRAPH_BASE_URL: facebookGraphBaseUrl,
     TOKEN_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+    OPENAI_API_KEY: 'e2e-openai-api-key',
+    OPENAI_EMBEDDING_MODEL: 'text-embedding-3-small',
+    OPENAI_BASE_URL: openAIBaseUrl,
   }
 }
 
@@ -118,6 +121,7 @@ function startWorker(
   connectionString: string,
   baseUrl: string,
   facebookGraphBaseUrl: string,
+  openAIBaseUrl: string,
 ) {
   const args = [
     'exec',
@@ -132,7 +136,9 @@ function startWorker(
     String(port),
     '--show-interactive-dev-session=false',
   ]
-  for (const [key, value] of Object.entries(workerBindings(baseUrl, facebookGraphBaseUrl))) {
+  for (const [key, value] of Object.entries(
+    workerBindings(baseUrl, facebookGraphBaseUrl, openAIBaseUrl),
+  )) {
     args.push('--var', `${key}:${value}`)
   }
 
@@ -210,6 +216,42 @@ async function startFakeFacebook() {
   }
 }
 
+async function startFakeAI() {
+  const server = createHttpServer(async (request, response) => {
+    const pathname = request.url ? new URL(request.url, 'http://fake-ai').pathname : ''
+    if (request.method !== 'POST' || pathname !== '/v1/embeddings') {
+      response.statusCode = 404
+      response.end()
+      return
+    }
+
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { input?: unknown }
+    const input = Array.isArray(body.input) ? body.input : []
+    await sleep(2_500)
+    response.setHeader('content-type', 'application/json')
+    response.end(
+      JSON.stringify({
+        data: input.map((_, index) => ({
+          index,
+          embedding: Array.from({ length: 1_536 }, (_value, position) => (position === 0 ? 1 : 0)),
+        })),
+      }),
+    )
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Could not start fake AI')
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}/v1`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  }
+}
+
 async function waitForReady(baseUrl: string, worker: ChildProcess) {
   const deadline = Date.now() + readyTimeoutMs
   let lastStatus = 'unreachable'
@@ -268,7 +310,8 @@ async function main() {
   const port = await freePort()
   const baseUrl = `http://127.0.0.1:${port}`
   const fakeFacebook = await startFakeFacebook()
-  const worker = startWorker(port, connectionString, baseUrl, fakeFacebook.baseUrl)
+  const fakeAI = await startFakeAI()
+  const worker = startWorker(port, connectionString, baseUrl, fakeFacebook.baseUrl, fakeAI.baseUrl)
 
   try {
     await waitForReady(baseUrl, worker)
@@ -283,6 +326,7 @@ async function main() {
   } finally {
     await stopWorker(worker)
     await fakeFacebook.close()
+    await fakeAI.close()
   }
 }
 

@@ -12,6 +12,10 @@ export type Bindings = {
   META_APP_SECRET: string
   META_VERIFY_TOKEN: string
   META_GRAPH_API_VERSION: string
+  OPENAI_API_KEY?: string
+  OPENAI_EMBEDDING_MODEL?: string
+  OPENAI_BASE_URL?: string
+  AI_RETRIEVAL_MAX_DISTANCE?: string
   FACEBOOK_GRAPH_BASE_URL?: string
   TOKEN_ENCRYPTION_KEY: string
 }

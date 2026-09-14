@@ -64,6 +64,13 @@
       "when": 1789377965580,
       "tag": "0008_giant_gateway",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1789382688822,
+      "tag": "0009_goofy_captain_cross",
+      "breakpoints": true
     }
   ]
 }

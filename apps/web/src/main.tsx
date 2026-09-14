@@ -118,6 +118,29 @@ type Invitation = {
   expiresAt: string
 }
 
+type KnowledgeBase = {
+  id: string
+  workspaceId: string
+  name: string
+  createdAt: string
+  updatedAt: string
+}
+
+type KnowledgeDocument = {
+  id: string
+  workspaceId: string
+  knowledgeBaseId: string
+  name: string
+  sourceType: 'TEXT' | 'PDF' | 'DOCX' | 'TXT' | 'MARKDOWN'
+  status: 'UPLOADED' | 'PROCESSING' | 'READY' | 'FAILED'
+  contentSha256: string | null
+  failureCode: string | null
+  failureMessage: string | null
+  processingStartedAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -418,6 +441,7 @@ function Shell({
   onWorkspaceChange: (workspaceId: string) => Promise<void>
 }) {
   const teamPage = window.location.pathname === '/team'
+  const knowledgePage = window.location.pathname === '/knowledge'
   const facebookPage = window.location.pathname === '/settings/facebook'
 
   async function signOut() {
@@ -452,13 +476,18 @@ function Shell({
           )}
         </div>
         <nav aria-label="主要导航">
-          <a aria-current={!teamPage && !facebookPage ? 'page' : undefined} href="/inbox">
+          <a
+            aria-current={!teamPage && !knowledgePage && !facebookPage ? 'page' : undefined}
+            href="/inbox"
+          >
             收件箱
           </a>
           <a aria-current={teamPage ? 'page' : undefined} href="/team">
             团队
           </a>
-          <a href="/knowledge">知识库</a>
+          <a aria-current={knowledgePage ? 'page' : undefined} href="/knowledge">
+            知识库
+          </a>
           <a aria-current={facebookPage ? 'page' : undefined} href="/settings/facebook">
             Facebook 设置
           </a>
@@ -469,6 +498,8 @@ function Shell({
       </header>
       {teamPage ? (
         <TeamPage workspace={me.workspace} />
+      ) : knowledgePage ? (
+        <KnowledgePage workspace={me.workspace} />
       ) : facebookPage ? (
         <FacebookSettingsPage workspace={me.workspace} />
       ) : (
@@ -1248,6 +1279,243 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
   )
 }
 
+const knowledgeStatusLabels: Record<KnowledgeDocument['status'], string> = {
+  UPLOADED: '已上传',
+  PROCESSING: '处理中',
+  READY: '已就绪',
+  FAILED: '失败',
+}
+const knowledgeSourceLabels: Record<KnowledgeDocument['sourceType'], string> = {
+  TEXT: '文本',
+  PDF: 'PDF',
+  DOCX: 'DOCX',
+  TXT: 'TXT',
+  MARKDOWN: 'Markdown',
+}
+const knowledgeFailureLabels: Record<string, string> = {
+  EMPTY_CONTENT: '文本内容为空',
+  TOO_LARGE: '文本内容过大',
+  DOCUMENT_CONTENT_MISSING: '文档内容不可用',
+  INVALID_EMBEDDING: '嵌入结果无效',
+  AI_PROVIDER_ERROR: 'AI 服务返回了无效结果',
+}
+
+function KnowledgePage({ workspace }: { workspace: Workspace }) {
+  const [bases, setBases] = useState<KnowledgeBase[]>()
+  const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null)
+  const [documents, setDocuments] = useState<KnowledgeDocument[]>()
+  const [error, setError] = useState('')
+  const [busy, setBusy] = useState('')
+  const canManage = workspace.role !== 'AGENT'
+  const selectedBase = bases?.find(({ id }) => id === selectedBaseId)
+
+  const refreshBases = useCallback(async () => {
+    const response = await fetch(`/api/workspaces/${workspace.id}/knowledge-bases`)
+    if (!response.ok) throw await responseError(response)
+    const next = ((await response.json()) as { knowledgeBases: KnowledgeBase[] }).knowledgeBases
+    setBases(next)
+    setSelectedBaseId((current) =>
+      current && next.some(({ id }) => id === current) ? current : (next[0]?.id ?? null),
+    )
+  }, [workspace.id])
+
+  const refreshDocuments = useCallback(
+    async (knowledgeBaseId: string) => {
+      const response = await fetch(
+        `/api/workspaces/${workspace.id}/knowledge-bases/${knowledgeBaseId}/documents`,
+      )
+      if (!response.ok) throw await responseError(response)
+      setDocuments(((await response.json()) as { documents: KnowledgeDocument[] }).documents)
+    },
+    [workspace.id],
+  )
+
+  useEffect(() => {
+    void refreshBases().catch((cause) => setError(knowledgeErrorMessage(cause)))
+  }, [refreshBases])
+
+  useEffect(() => {
+    if (!selectedBaseId) {
+      setDocuments([])
+      return
+    }
+    setDocuments(undefined)
+    void refreshDocuments(selectedBaseId).catch((cause) => setError(knowledgeErrorMessage(cause)))
+    const timer = window.setInterval(() => {
+      void refreshDocuments(selectedBaseId).catch((cause) => setError(knowledgeErrorMessage(cause)))
+    }, 2_000)
+    return () => window.clearInterval(timer)
+  }, [refreshDocuments, selectedBaseId])
+
+  async function createBase(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const form = event.currentTarget
+    setBusy('base')
+    setError('')
+    try {
+      const data = new FormData(event.currentTarget)
+      const result = (await request(`/api/workspaces/${workspace.id}/knowledge-bases`, {
+        name: data.get('name'),
+      })) as { knowledgeBase: KnowledgeBase }
+      form.reset()
+      await refreshBases()
+      setSelectedBaseId(result.knowledgeBase.id)
+    } catch (cause) {
+      setError(knowledgeErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function addText(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedBaseId) return
+    const form = event.currentTarget
+    setBusy('document')
+    setError('')
+    try {
+      const data = new FormData(event.currentTarget)
+      const result = (await request(
+        `/api/workspaces/${workspace.id}/knowledge-bases/${selectedBaseId}/documents/text`,
+        { name: data.get('name'), text: data.get('text') },
+      )) as { document: KnowledgeDocument }
+      form.reset()
+      setDocuments((current) => (current ? [...current, result.document] : [result.document]))
+    } catch (cause) {
+      setError(knowledgeErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function removeDocument(document: KnowledgeDocument) {
+    if (!selectedBaseId || !window.confirm(`删除“${document.name}”？`)) return
+    setBusy(document.id)
+    setError('')
+    try {
+      await request(
+        `/api/workspaces/${workspace.id}/knowledge-bases/${selectedBaseId}/documents/${document.id}`,
+        {},
+        'DELETE',
+      )
+      await refreshDocuments(selectedBaseId)
+    } catch (cause) {
+      setError(knowledgeErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <main className="knowledge-page">
+      <div className="team-heading">
+        <div>
+          <p className="eyebrow">工作区 / 知识库</p>
+          <h1>知识库</h1>
+          <p>添加业务文本，让后续 AI 回复有可验证的依据。</p>
+        </div>
+        <span className="role-pill">{roleLabel(workspace.role)}</span>
+      </div>
+
+      {error && (
+        <p className="form-error" role="alert">
+          {error}
+        </p>
+      )}
+      {canManage && (
+        <form className="knowledge-create" onSubmit={createBase}>
+          <Field label="知识库名称" name="name" maxLength={100} />
+          <button className="primary" disabled={busy === 'base'} type="submit">
+            {busy === 'base' ? '创建中…' : '创建知识库'}
+          </button>
+        </form>
+      )}
+
+      {!bases ? (
+        <p className="muted">正在加载知识库…</p>
+      ) : !bases.length ? (
+        <section className="knowledge-empty">
+          <p className="card-label">尚未创建</p>
+          <p>创建一个知识库，然后添加第一段业务文本。</p>
+        </section>
+      ) : (
+        <>
+          <label className="knowledge-selector">
+            <span>当前知识库</span>
+            <select
+              value={selectedBaseId ?? ''}
+              onChange={(event) => setSelectedBaseId(event.currentTarget.value)}
+            >
+              {bases.map((base) => (
+                <option key={base.id} value={base.id}>
+                  {base.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedBase && (
+            <>
+              {canManage && (
+                <form className="knowledge-card" onSubmit={addText}>
+                  <p className="card-label">添加文本</p>
+                  <Field label="文档名称" name="name" maxLength={100} />
+                  <label className="field">
+                    <span>文本内容</span>
+                    <textarea name="text" required rows={9} />
+                  </label>
+                  <button className="primary" disabled={busy === 'document'} type="submit">
+                    {busy === 'document' ? '提交中…' : '添加文本'}
+                  </button>
+                </form>
+              )}
+              <section className="knowledge-documents">
+                <div className="section-heading">
+                  <h2>{selectedBase.name} 的文档</h2>
+                  <span>{documents?.length ?? 0} 个</span>
+                </div>
+                {!documents ? (
+                  <p className="muted">正在加载文档…</p>
+                ) : documents.length ? (
+                  <div className="knowledge-document-list">
+                    {documents.map((document) => (
+                      <article className="knowledge-document" key={document.id}>
+                        <div>
+                          <strong>{document.name}</strong>
+                          <p>
+                            {knowledgeSourceLabels[document.sourceType]} ·{' '}
+                            {knowledgeStatusLabels[document.status]}
+                          </p>
+                          {document.failureCode && (
+                            <p className="form-error">
+                              {knowledgeFailureLabels[document.failureCode] ?? '处理失败'}
+                            </p>
+                          )}
+                        </div>
+                        {canManage && (
+                          <button
+                            className="danger-button"
+                            disabled={busy === document.id}
+                            type="button"
+                            onClick={() => void removeDocument(document)}
+                          >
+                            删除
+                          </button>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="muted">还没有文档。</p>
+                )}
+              </section>
+            </>
+          )}
+        </>
+      )}
+    </main>
+  )
+}
+
 function TeamPage({ workspace }: { workspace: Workspace }) {
   const [team, setTeam] = useState<Team>()
   const [loadError, setLoadError] = useState('')
@@ -1747,6 +2015,18 @@ function inboxErrorMessage(cause: unknown): string {
       CONVERSATION_CLOSED: '该对话已关闭。',
       REPLY_WINDOW_CLOSED: 'Messenger 回复窗口已关闭。',
     }[cause.code] ?? '收件箱加载失败，请稍后重试。'
+  )
+}
+
+function knowledgeErrorMessage(cause: unknown): string {
+  if (!(cause instanceof ApiError)) return '知识库加载失败，请稍后重试。'
+  return (
+    {
+      FORBIDDEN: '你没有管理此知识库的权限。',
+      NOT_FOUND: '知识库或文档不存在。',
+      INVALID_REQUEST: '请检查知识库或文档内容后重试。',
+      RATE_LIMITED: '操作过于频繁，请稍后重试。',
+    }[cause.code] ?? '知识库操作失败，请稍后重试。'
   )
 }
 

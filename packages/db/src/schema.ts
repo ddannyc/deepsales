@@ -13,6 +13,7 @@ import {
   unique,
   uniqueIndex,
   uuid,
+  vector,
 } from 'drizzle-orm/pg-core'
 
 export const user = pgTable('users', {
@@ -119,6 +120,19 @@ export const messageAttachmentKind = pgEnum('message_attachment_kind', [
 ])
 export const attachmentStorageState = pgEnum('attachment_storage_state', [
   'PENDING',
+  'READY',
+  'FAILED',
+])
+export const knowledgeDocumentSourceType = pgEnum('knowledge_document_source_type', [
+  'TEXT',
+  'PDF',
+  'DOCX',
+  'TXT',
+  'MARKDOWN',
+])
+export const knowledgeDocumentStatus = pgEnum('knowledge_document_status', [
+  'UPLOADED',
+  'PROCESSING',
   'READY',
   'FAILED',
 ])
@@ -525,5 +539,82 @@ export const facebookWebhookReceipt = pgTable(
   (table) => [
     unique().on(table.ingressId),
     index('facebook_webhook_receipt_received_idx').on(table.receivedAt),
+  ],
+)
+
+export const knowledgeBase = pgTable(
+  'knowledge_base',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('knowledge_base_workspace_idx').on(table.workspaceId)],
+)
+
+export const knowledgeDocument = pgTable(
+  'knowledge_document',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    knowledgeBaseId: uuid('knowledge_base_id')
+      .notNull()
+      .references(() => knowledgeBase.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    sourceType: knowledgeDocumentSourceType('source_type').notNull(),
+    sourceText: text('source_text'),
+    storageKey: text('storage_key'),
+    status: knowledgeDocumentStatus().default('UPLOADED').notNull(),
+    processingStartedAt: timestamp('processing_started_at', { withTimezone: true }),
+    contentSha256: text('content_sha256'),
+    failureCode: text('failure_code'),
+    failureMessage: text('failure_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('knowledge_document_base_created_idx').on(
+      table.knowledgeBaseId,
+      table.createdAt,
+      table.id,
+    ),
+    index('knowledge_document_processing_idx').on(
+      table.status,
+      table.processingStartedAt,
+      table.updatedAt,
+    ),
+  ],
+)
+
+export const knowledgeChunk = pgTable(
+  'knowledge_chunk',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    knowledgeDocumentId: uuid('knowledge_document_id')
+      .notNull()
+      .references(() => knowledgeDocument.id, { onDelete: 'cascade' }),
+    knowledgeBaseId: uuid('knowledge_base_id')
+      .notNull()
+      .references(() => knowledgeBase.id, { onDelete: 'cascade' }),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    ordinal: integer().notNull(),
+    text: text().notNull(),
+    embedding: vector('embedding', { dimensions: 1536 }).notNull(),
+  },
+  (table) => [
+    unique().on(table.knowledgeDocumentId, table.ordinal),
+    index('knowledge_chunk_scope_idx').on(table.workspaceId, table.knowledgeBaseId),
+    index('knowledge_chunk_embedding_hnsw_idx').using(
+      'hnsw',
+      table.embedding.op('vector_cosine_ops'),
+    ),
   ],
 )
