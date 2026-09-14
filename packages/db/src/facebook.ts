@@ -9,6 +9,8 @@ import {
   facebookChannelConfig,
   facebookMessagingWindow,
   facebookOauthState,
+  member,
+  memberChannelAccess,
   message,
   workspaceUserAccess,
 } from './schema'
@@ -321,6 +323,20 @@ export async function connectFacebookPages(
 
   return db.transaction(async (tx) => {
     await assertFacebookManager(tx, input.workspaceId, input.actingUserId)
+    const [actingMember] = await tx
+      .select({ id: member.id })
+      .from(member)
+      .innerJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
+      .where(
+        and(
+          eq(member.workspaceId, input.workspaceId),
+          eq(member.type, 'HUMAN'),
+          eq(workspaceUserAccess.userId, input.actingUserId),
+        ),
+      )
+      .limit(1)
+    if (!actingMember) throw new FacebookError('FORBIDDEN', 'Human member access required')
+
     const connected = []
     for (const page of pages) {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${page.pageId}, 0))`)
@@ -341,6 +357,7 @@ export async function connectFacebookPages(
       }
 
       const now = new Date()
+      let channelId: string
       if (existing) {
         await tx
           .update(channel)
@@ -365,35 +382,36 @@ export async function connectFacebookPages(
             updatedAt: now,
           })
           .where(eq(facebookChannelConfig.channelId, existing.channelId))
-        connected.push({
-          id: existing.channelId,
+        channelId = existing.channelId
+      } else {
+        const [createdChannel] = await tx
+          .insert(channel)
+          .values({
+            workspaceId: input.workspaceId,
+            provider: 'FACEBOOK_MESSENGER',
+            displayName: cleanPageName(page.displayName),
+            status: 'ACTIVE',
+          })
+          .returning({ id: channel.id })
+        if (!createdChannel) throw new FacebookError('INVALID_REQUEST', 'Channel was not created')
+        await tx.insert(facebookChannelConfig).values({
+          channelId: createdChannel.id,
           pageId: page.pageId,
-          displayName: page.displayName,
+          encryptedPageAccessToken: page.encryptedPageAccessToken,
+          tokenIv: page.tokenIv,
+          tokenKeyVersion: page.tokenKeyVersion,
+          connectionStatus: 'ACTIVE',
+          subscribedAt: page.subscribedAt ?? now,
+          lastCheckedAt: now,
         })
-        continue
+        channelId = createdChannel.id
       }
 
-      const [createdChannel] = await tx
-        .insert(channel)
-        .values({
-          workspaceId: input.workspaceId,
-          provider: 'FACEBOOK_MESSENGER',
-          displayName: cleanPageName(page.displayName),
-          status: 'ACTIVE',
-        })
-        .returning({ id: channel.id })
-      if (!createdChannel) throw new FacebookError('INVALID_REQUEST', 'Channel was not created')
-      await tx.insert(facebookChannelConfig).values({
-        channelId: createdChannel.id,
-        pageId: page.pageId,
-        encryptedPageAccessToken: page.encryptedPageAccessToken,
-        tokenIv: page.tokenIv,
-        tokenKeyVersion: page.tokenKeyVersion,
-        connectionStatus: 'ACTIVE',
-        subscribedAt: page.subscribedAt ?? now,
-        lastCheckedAt: now,
-      })
-      connected.push({ id: createdChannel.id, pageId: page.pageId, displayName: page.displayName })
+      await tx
+        .insert(memberChannelAccess)
+        .values({ memberId: actingMember.id, channelId })
+        .onConflictDoNothing()
+      connected.push({ id: channelId, pageId: page.pageId, displayName: page.displayName })
     }
     return connected
   })

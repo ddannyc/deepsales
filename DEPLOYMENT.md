@@ -154,6 +154,8 @@ Invoke-RestMethod "$APP_URL/ready"
 
 随后登录 `$APP_URL/settings/facebook`，连接 Facebook Page，发送 Messenger 测试消息，接管对话并验证回复状态从 `PENDING` 变为 `SENT`。也应验证 Meta 拒绝时消息显示为 `FAILED`。
 
+首次连接 Page 的成员会自动获得该 Page 的频道权限。若 Page 是本修复前已经连接的，首次接管提示频道权限时，进入“团队”，在对应人工成员的“渠道权限”中勾选该 Page 并保存；后续部署不需要重复设置。
+
 查看线上日志：
 
 ```powershell

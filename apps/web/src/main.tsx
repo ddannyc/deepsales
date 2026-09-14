@@ -109,8 +109,11 @@ type Invitation = {
 }
 
 class ApiError extends Error {
-  constructor(readonly code: string) {
-    super(code)
+  constructor(
+    readonly code: string,
+    message: string = code,
+  ) {
+    super(message)
   }
 }
 
@@ -1247,7 +1250,7 @@ function MemberEditor({
         `/api/workspaces/${workspaceId}/members/${member.id}`,
         {
           displayName: data.get('displayName'),
-          status: data.get('status'),
+          status: data.get('status') ?? undefined,
           autoAssignmentEnabled: data.get('autoAssignmentEnabled') === 'on',
           maxActiveConversations: Number(data.get('maxActiveConversations')),
           ...(member.type === 'HUMAN' && !owner
@@ -1445,7 +1448,7 @@ async function responseError(response: Response): Promise<ApiError> {
   const payload = (await response.json().catch(() => ({}))) as {
     error?: { code?: string; message?: string }
   }
-  return new ApiError(payload.error?.code ?? 'REQUEST_FAILED')
+  return new ApiError(payload.error?.code ?? 'REQUEST_FAILED', payload.error?.message)
 }
 
 function authenticationErrorMessage(cause: unknown): string {
@@ -1514,6 +1517,9 @@ function facebookErrorMessage(cause: unknown): string {
 
 function inboxErrorMessage(cause: unknown): string {
   if (!(cause instanceof ApiError)) return '收件箱加载失败，请稍后重试。'
+  if (cause.code === 'FORBIDDEN' && cause.message === 'Channel access is required') {
+    return '请到“团队”页面，为你的成员勾选此 Facebook Page 的频道权限。'
+  }
   return (
     {
       FORBIDDEN: '你没有查看此工作区收件箱的权限。',

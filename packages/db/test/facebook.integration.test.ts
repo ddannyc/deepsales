@@ -11,9 +11,12 @@ import {
   disableFacebookChannel,
   facebookChannelConfig,
   findActiveFacebookPage,
+  member,
+  memberChannelAccess,
   startFacebookOAuth,
   consumeFacebookOAuthState,
   user,
+  workspaceUserAccess,
 } from '../src'
 
 const connectionString = process.env.DATABASE_URL
@@ -109,6 +112,37 @@ describe.skipIf(!connectionString)('Facebook channel persistence', () => {
     ).rejects.toMatchObject({
       code: 'FACEBOOK_OAUTH_STATE_USED',
     })
+  })
+
+  it('gives the connecting manager access to the connected Page', async () => {
+    const ownerId = randomUUID()
+    const pageId = randomUUID()
+    await db.insert(user).values({ id: ownerId, name: 'Owner', email: `${ownerId}@example.com` })
+    const workspace = await bootstrapWorkspace(db, {
+      userId: ownerId,
+      userName: 'Owner',
+      name: 'Connection access',
+    })
+
+    const [connected] = await connectFacebookPages(db, {
+      workspaceId: workspace.id,
+      actingUserId: ownerId,
+      pages: [page('Support', pageId)],
+    })
+    if (!connected) throw new Error('Facebook channel was not created')
+
+    const [owner] = await db
+      .select({ id: member.id })
+      .from(member)
+      .innerJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
+      .where(eq(workspaceUserAccess.userId, ownerId))
+    expect(owner).toBeTruthy()
+    expect(
+      await db
+        .select()
+        .from(memberChannelAccess)
+        .where(eq(memberChannelAccess.memberId, owner?.id ?? '')),
+    ).toEqual([{ memberId: owner?.id, channelId: connected.id }])
   })
 })
 
