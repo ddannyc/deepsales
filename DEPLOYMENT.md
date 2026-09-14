@@ -2,6 +2,31 @@
 
 本文档适用于当前 T05 版本：React SPA、Cloudflare Worker、Neon PostgreSQL、Cloudflare Queues 和 Durable Object。应用部署不会自动执行数据库迁移。
 
+## 执行分类
+
+首次部署才需要执行：
+
+- `pnpm install --frozen-lockfile`
+- `wrangler login` / `wrangler whoami`
+- 创建 Hyperdrive、三个 Queues，并把 Hyperdrive ID 写入 `wrangler.jsonc`
+- 首次执行 `pnpm db:migrate`
+- 首次 `pnpm deploy`（创建 Worker）
+- 配置 Worker Secrets
+- 配置 Meta OAuth 回调、Webhook 和 Page 订阅
+
+后续发布通常只需要：
+
+```powershell
+pnpm install --frozen-lockfile   # 依赖或 lockfile 变更时执行
+pnpm typecheck
+pnpm lint
+pnpm test
+pnpm db:migrate                  # 有新的 migration 时执行
+pnpm deploy
+```
+
+后续发布不需要重复创建 Hyperdrive、Queues、Durable Object，也不需要重复配置 Secrets 或 Meta 回调。只有更换数据库、Cloudflare 账号、Meta App 或密钥时，才重新执行对应的首次部署步骤。
+
 ## 前置条件
 
 - Node.js、pnpm 已安装。
