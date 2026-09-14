@@ -111,6 +111,17 @@ export const messageDirection = pgEnum('message_direction', ['INBOUND', 'OUTBOUN
 export const messageSenderType = pgEnum('message_sender_type', ['CUSTOMER', 'MEMBER', 'EXTERNAL'])
 export const messageType = pgEnum('message_type', ['TEXT', 'ATTACHMENT'])
 export const messageDeliveryState = pgEnum('message_delivery_state', ['PENDING', 'SENT', 'FAILED'])
+export const messageAttachmentKind = pgEnum('message_attachment_kind', [
+  'IMAGE',
+  'FILE',
+  'AUDIO',
+  'VIDEO',
+])
+export const attachmentStorageState = pgEnum('attachment_storage_state', [
+  'PENDING',
+  'READY',
+  'FAILED',
+])
 
 export const workspace = pgTable('workspace', {
   id: uuid().defaultRandom().primaryKey(),
@@ -429,6 +440,51 @@ export const message = pgTable(
       .on(table.channelId, table.externalMessageId)
       .where(sql`${table.externalMessageId} is not null`),
   ],
+)
+
+export const messageAttachment = pgTable(
+  'message_attachment',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    messageId: uuid('message_id')
+      .notNull()
+      .references(() => message.id, { onDelete: 'cascade' }),
+    kind: messageAttachmentKind().notNull(),
+    filename: text(),
+    mimeType: text('mime_type'),
+    byteSize: integer('byte_size'),
+    storageKey: text('storage_key'),
+    storageState: attachmentStorageState('storage_state').default('PENDING').notNull(),
+    processingStartedAt: timestamp('processing_started_at', { withTimezone: true }),
+    failureCode: text('failure_code'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('message_attachment_message_idx').on(table.messageId),
+    index('message_attachment_processing_idx').on(
+      table.storageState,
+      table.processingStartedAt,
+      table.updatedAt,
+    ),
+    check('message_attachment_byte_size', sql`${table.byteSize} is null or ${table.byteSize} >= 0`),
+  ],
+)
+
+export const facebookAttachmentSource = pgTable(
+  'facebook_attachment_source',
+  {
+    attachmentId: uuid('attachment_id')
+      .primaryKey()
+      .references(() => messageAttachment.id, { onDelete: 'cascade' }),
+    encryptedSourceUrl: text('encrypted_source_url').notNull(),
+    urlIv: text('url_iv').notNull(),
+    tokenKeyVersion: text('token_key_version').default('v1').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('facebook_attachment_source_expires_idx').on(table.expiresAt)],
 )
 
 export const deliveryAttempt = pgTable(

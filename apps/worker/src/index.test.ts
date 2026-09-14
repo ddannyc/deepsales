@@ -96,6 +96,48 @@ describe('Facebook webhook', () => {
     )
   })
 
+  it('encrypts attachment source URLs before publishing the webhook job', async () => {
+    const body = JSON.stringify({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            {
+              sender: { id: 'customer-1' },
+              message: {
+                mid: 'mid-attachment-queued',
+                attachments: [
+                  {
+                    type: 'image',
+                    payload: { url: 'https://provider.example/image.jpg' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    })
+    const signature = await sign(body, bindings.META_APP_SECRET)
+    const send = vi.fn().mockResolvedValue(undefined)
+
+    const response = await deliver(body, signature, {
+      ...bindings,
+      WEBHOOKS_QUEUE: { send } as unknown as Queue,
+    })
+
+    expect(response.status).toBe(200)
+    expect(send).toHaveBeenCalledOnce()
+    const job = send.mock.calls[0]?.[0] as {
+      event: { attachments: Array<Record<string, unknown>> }
+    }
+    expect(JSON.stringify(job)).not.toContain('provider.example')
+    expect(job.event.attachments[0]).toEqual(
+      expect.objectContaining({ kind: 'IMAGE', tokenKeyVersion: 'v1' }),
+    )
+  })
+
   it('returns a retryable error when durable webhook publication fails', async () => {
     const body = JSON.stringify({
       object: 'page',

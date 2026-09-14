@@ -65,10 +65,12 @@ pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DATABASE
 ```powershell
 pnpm exec wrangler queues create deepsales-webhooks
 pnpm exec wrangler queues create deepsales-outbound
+pnpm exec wrangler queues create deepsales-documents
 pnpm exec wrangler queues create deepsales-dlq
+pnpm exec wrangler r2 bucket create deepsales-objects
 ```
 
-`WORKSPACE_REALTIME` Durable Object 和 `AUTH_RATE_LIMITER` 会由 Wrangler 配置管理。当前 T05 不需要 R2。
+`WORKSPACE_REALTIME` Durable Object 和 `AUTH_RATE_LIMITER` 会由 Wrangler 配置管理。T07 使用 `deepsales-objects` 保存私有附件。
 
 ## 3. 执行数据库迁移
 

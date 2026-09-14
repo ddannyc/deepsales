@@ -4,6 +4,7 @@ import {
   createFacebookAdapter,
   decryptFacebookToken,
   encryptFacebookToken,
+  encryptFacebookAttachmentSources,
   FacebookProviderError,
   facebookWebhookJobSchema,
   facebookOutboundJobSchema,
@@ -49,6 +50,79 @@ describe('Facebook adapter', () => {
     expect(normalizeFacebookWebhook({ object: 'page', entry: [] })).toEqual([])
   })
 
+  it('normalizes mixed and attachment-only messages without retaining provider URLs in diagnostics', () => {
+    const events = normalizeFacebookWebhook({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            {
+              sender: { id: 'customer-1' },
+              message: {
+                mid: 'mixed-1',
+                text: 'caption',
+                attachments: [
+                  {
+                    type: 'image',
+                    payload: { url: 'https://provider.example/image.jpg', title: 'photo.jpg' },
+                  },
+                ],
+              },
+            },
+            {
+              sender: { id: 'customer-1' },
+              message: {
+                mid: 'attachment-only-1',
+                attachments: [
+                  {
+                    type: 'file',
+                    payload: {
+                      url: 'https://provider.example/manual.pdf',
+                      filename: 'manual.pdf',
+                      mime_type: 'application/pdf',
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(events).toHaveLength(2)
+    expect(events[0]).toEqual(
+      expect.objectContaining({
+        externalMessageId: 'mixed-1',
+        text: 'caption',
+        attachments: [
+          {
+            kind: 'IMAGE',
+            sourceUrl: 'https://provider.example/image.jpg',
+            filename: 'photo.jpg',
+            mimeType: null,
+          },
+        ],
+      }),
+    )
+    expect(events[1]).toEqual(
+      expect.objectContaining({
+        externalMessageId: 'attachment-only-1',
+        text: null,
+        attachments: [
+          {
+            kind: 'FILE',
+            sourceUrl: 'https://provider.example/manual.pdf',
+            filename: 'manual.pdf',
+            mimeType: 'application/pdf',
+          },
+        ],
+      }),
+    )
+    expect(JSON.stringify(events[0]?.eventFragment)).not.toContain('provider.example')
+  })
+
   it('validates the versioned webhook queue contract', () => {
     expect(
       facebookWebhookJobSchema.parse({
@@ -67,6 +141,46 @@ describe('Facebook adapter', () => {
         },
       }),
     ).toEqual(expect.objectContaining({ v: 1, type: 'facebook.inbound' }))
+  })
+
+  it('encrypts attachment sources before they enter the webhook queue', async () => {
+    const [event] = normalizeFacebookWebhook({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            {
+              sender: { id: 'customer-1' },
+              message: {
+                mid: 'mid-attachment',
+                attachments: [
+                  { type: 'image', payload: { url: 'https://provider.example/a.jpg' } },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    })
+    if (!event) throw new Error('Attachment event was not normalized')
+
+    const queued = await encryptFacebookAttachmentSources(event, encryptionKey, new Date(0))
+    expect(queued.attachments[0]?.encryptedSourceUrl).not.toContain('provider.example')
+    expect(queued.attachments[0]?.expiresAt).toBe('1970-01-01T01:00:00.000Z')
+    expect(
+      facebookWebhookJobSchema.parse({
+        v: 1,
+        type: 'facebook.inbound',
+        ingressId: 'ingress-attachment',
+        payloadSha256: 'a'.repeat(64),
+        receivedAt: '1970-01-01T00:00:00.000Z',
+        event: {
+          ...queued,
+          providerSentAt: null,
+        },
+      }).event.attachments[0],
+    ).toEqual(expect.objectContaining({ kind: 'IMAGE', tokenKeyVersion: 'v1' }))
   })
 
   it('validates the versioned outbound queue contract', () => {

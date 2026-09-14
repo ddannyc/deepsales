@@ -98,6 +98,16 @@ type InboxMessage = {
   failureCode: string | null
   failureMessage: string | null
   createdAt: string
+  attachments: InboxAttachment[]
+}
+type InboxAttachment = {
+  id: string
+  kind: 'IMAGE' | 'FILE' | 'AUDIO' | 'VIDEO'
+  filename: string | null
+  mimeType: string | null
+  byteSize: number | null
+  storageState: 'PENDING' | 'READY' | 'FAILED'
+  failureCode: string | null
 }
 type InboxPageData = { conversations: InboxConversation[]; nextCursor: string | null }
 
@@ -893,6 +903,13 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                         key={message.id}
                       >
                         <p>{message.text ?? '附件消息'}</p>
+                        {message.attachments?.map((attachment) => (
+                          <AttachmentPreview
+                            attachment={attachment}
+                            key={attachment.id}
+                            workspaceId={workspace.id}
+                          />
+                        ))}
                         <footer>
                           <time dateTime={message.createdAt}>{formatDate(message.createdAt)}</time>
                           {message.deliveryState && (
@@ -965,6 +982,49 @@ function deliveryStateLabel(state: NonNullable<InboxMessage['deliveryState']>) {
 
 function deliveryFailureLabel(code: string | null) {
   return code === 'REPLY_WINDOW_CLOSED' ? '回复窗口已关闭' : '发送失败，请稍后重试'
+}
+
+function AttachmentPreview({
+  attachment,
+  workspaceId,
+}: {
+  attachment: InboxAttachment
+  workspaceId: string
+}) {
+  const label = attachment.filename ?? attachmentKindLabel(attachment.kind)
+  if (attachment.storageState === 'PENDING') {
+    return (
+      <span className="attachment-state" role="status" aria-busy="true">
+        附件加载中…
+      </span>
+    )
+  }
+  if (attachment.storageState === 'FAILED') {
+    return (
+      <span className="attachment-state attachment-state-failed" role="status">
+        附件加载失败
+      </span>
+    )
+  }
+
+  const href = `/api/workspaces/${workspaceId}/attachments/${attachment.id}`
+  if (attachment.kind === 'IMAGE') {
+    return (
+      <a className="attachment-image-link" href={href} aria-label={label}>
+        <img src={href} alt={label} />
+      </a>
+    )
+  }
+  return (
+    <a className="attachment-download" href={href} download={attachment.filename ?? true}>
+      <span>{label}</span>
+      <span>下载</span>
+    </a>
+  )
+}
+
+function attachmentKindLabel(kind: InboxAttachment['kind']) {
+  return { IMAGE: '图片', FILE: '文件', AUDIO: '音频', VIDEO: '视频' }[kind]
 }
 
 const facebookStatusLabels: Record<FacebookChannel['connectionStatus'], string> = {

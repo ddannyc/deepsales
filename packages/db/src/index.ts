@@ -1,5 +1,6 @@
 export * from './database'
 export * from './assignments'
+export * from './attachments'
 export * from './facebook'
 export * from './inbox'
 export * from './members'

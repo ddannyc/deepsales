@@ -1,14 +1,17 @@
-import { and, asc, desc, eq, gt, isNull, lt, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm'
+import type { FacebookInboundAttachmentInput } from './attachments'
 import type { Database } from './database'
 import {
   channel,
   channelIdentity,
   conversation,
   customer,
+  facebookAttachmentSource,
   facebookChannelConfig,
   facebookMessagingWindow,
   facebookWebhookReceipt,
   member,
+  messageAttachment,
   message,
   workspaceUserAccess,
 } from './schema'
@@ -32,7 +35,8 @@ export type FacebookInboundMessage = {
   pageId: string
   externalUserId: string
   externalMessageId: string
-  text: string
+  text: string | null
+  attachments?: FacebookInboundAttachmentInput[]
   providerSentAt: Date | null
   receivedAt: Date
   payloadSha256: string
@@ -40,6 +44,11 @@ export type FacebookInboundMessage = {
 }
 
 export async function processFacebookInbound(db: Database, input: FacebookInboundMessage) {
+  const attachments = input.attachments ?? []
+  if (!input.text && !attachments.length) {
+    throw new InboxError('INVALID_REQUEST', 'Message text or attachment is required')
+  }
+
   return db.transaction(async (tx) => {
     const [receipt] = await tx
       .insert(facebookWebhookReceipt)
@@ -92,6 +101,7 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
         workspaceId: activeChannel.workspaceId,
         conversationId: duplicate.conversationId,
         messageId: duplicate.id,
+        attachmentIds: await listAttachmentIds(tx, duplicate.id),
       }
     }
 
@@ -163,7 +173,7 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
         channelId: activeChannel.channelId,
         direction: 'INBOUND',
         senderType: 'CUSTOMER',
-        messageType: 'TEXT',
+        messageType: attachments.length ? 'ATTACHMENT' : 'TEXT',
         text: input.text,
         externalMessageId: input.externalMessageId,
         providerSentAt: input.providerSentAt,
@@ -188,7 +198,45 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
         workspaceId: activeChannel.workspaceId,
         conversationId: existing?.conversationId ?? openConversation.id,
         messageId: existing?.id ?? '',
+        attachmentIds: existing ? await listAttachmentIds(tx, existing.id) : [],
       }
+    }
+
+    let attachmentIds: string[] = []
+    if (attachments.length) {
+      const createdAttachments = await tx
+        .insert(messageAttachment)
+        .values(
+          attachments.map((attachment) => ({
+            messageId: createdMessage.id,
+            kind: attachment.kind,
+            filename: attachment.filename ?? null,
+            mimeType: attachment.mimeType ?? null,
+            storageState: 'PENDING' as const,
+            createdAt: now,
+            updatedAt: now,
+          })),
+        )
+        .returning({ id: messageAttachment.id })
+      if (createdAttachments.length !== attachments.length) {
+        throw new InboxError('INVALID_REQUEST', 'Attachments were not created')
+      }
+      attachmentIds = createdAttachments.map(({ id }) => id).sort()
+      await tx.insert(facebookAttachmentSource).values(
+        createdAttachments.map(({ id }, index) => {
+          const attachment = attachments[index]
+          if (!attachment) throw new InboxError('INVALID_REQUEST', 'Attachment is missing')
+          return {
+            attachmentId: id,
+            encryptedSourceUrl: attachment.encryptedSourceUrl,
+            urlIv: attachment.urlIv,
+            tokenKeyVersion: attachment.tokenKeyVersion ?? 'v1',
+            expiresAt: attachment.expiresAt,
+            createdAt: now,
+            updatedAt: now,
+          }
+        }),
+      )
     }
 
     const latestMessageAt = later(openConversation.latestMessageAt, eventAt)
@@ -232,6 +280,7 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
       workspaceId: activeChannel.workspaceId,
       conversationId: openConversation.id,
       messageId: createdMessage.id,
+      attachmentIds,
     }
   })
 }
@@ -349,9 +398,41 @@ export async function listMessages(
     .limit(limit + 1)
   const hasNext = rows.length > limit
   const messages = rows.slice(0, limit)
+  const attachments = messages.length
+    ? await db
+        .select({
+          id: messageAttachment.id,
+          messageId: messageAttachment.messageId,
+          kind: messageAttachment.kind,
+          filename: messageAttachment.filename,
+          mimeType: messageAttachment.mimeType,
+          byteSize: messageAttachment.byteSize,
+          storageState: messageAttachment.storageState,
+          failureCode: messageAttachment.failureCode,
+        })
+        .from(messageAttachment)
+        .where(
+          inArray(
+            messageAttachment.messageId,
+            messages.map(({ id }) => id),
+          ),
+        )
+        .orderBy(asc(messageAttachment.createdAt), asc(messageAttachment.id))
+    : []
+  const attachmentsByMessageId = new Map<string, typeof attachments>()
+  for (const attachment of attachments) {
+    const current = attachmentsByMessageId.get(attachment.messageId) ?? []
+    current.push(attachment)
+    attachmentsByMessageId.set(attachment.messageId, current)
+  }
   const last = messages.at(-1)
   return {
-    messages,
+    messages: messages.map((item) => ({
+      ...item,
+      attachments: (attachmentsByMessageId.get(item.id) ?? []).map(
+        ({ messageId: _messageId, ...attachment }) => attachment,
+      ),
+    })),
     nextCursor: hasNext && last ? { createdAt: last.createdAt, id: last.id } : null,
   }
 }
@@ -392,6 +473,15 @@ async function markReceiptProcessed(db: QueryHandle, receiptId: string, processe
     .update(facebookWebhookReceipt)
     .set({ processedAt })
     .where(eq(facebookWebhookReceipt.id, receiptId))
+}
+
+async function listAttachmentIds(db: QueryHandle, messageId: string) {
+  const rows = await db
+    .select({ id: messageAttachment.id })
+    .from(messageAttachment)
+    .where(eq(messageAttachment.messageId, messageId))
+    .orderBy(asc(messageAttachment.createdAt), asc(messageAttachment.id))
+  return rows.map(({ id }) => id)
 }
 
 function later(first: Date | null, second: Date) {

@@ -52,7 +52,21 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
               timestamp: Date.now(),
               sender: { id: 'e2e-customer-1' },
               recipient: { id: pageId },
-              message: { mid: `e2e-mid-${suffix}`, text: 'hello from Messenger' },
+              message: {
+                mid: `e2e-mid-${suffix}`,
+                text: 'hello from Messenger',
+                ...(process.env.E2E_FAKE_FACEBOOK_URL
+                  ? {
+                      attachments: ['image', 'file', 'audio', 'video'].map((kind) => ({
+                        type: kind === 'image' ? 'image' : kind,
+                        payload: {
+                          url: `${process.env.E2E_FAKE_FACEBOOK_URL}/attachments/${kind}`,
+                          filename: `${kind}.fixture`,
+                        },
+                      })),
+                    }
+                  : {}),
+              },
             },
           ],
         },
@@ -67,6 +81,14 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     await expect(page.getByText('hello from Messenger', { exact: true }).first()).toBeVisible({
       timeout: 10_000,
     })
+    if (process.env.E2E_FAKE_FACEBOOK_URL) {
+      await expect(page.locator('.attachment-image-link img')).toBeVisible({ timeout: 10_000 })
+      for (const kind of ['file', 'audio', 'video']) {
+        await expect(page.getByRole('link', { name: `${kind}.fixture` })).toBeVisible({
+          timeout: 10_000,
+        })
+      }
+    }
     expect(page.url()).toBe(currentUrl)
   } finally {
     await pool.end()

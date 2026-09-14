@@ -579,6 +579,52 @@ form {
   white-space: pre-wrap;
   line-height: 1.5;
 }
+.attachment-state,
+.attachment-download,
+.attachment-image-link {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+}
+.attachment-state {
+  padding: 10px 12px;
+  color: #63788a;
+  background: #edf3f7;
+  font-size: 13px;
+}
+.attachment-state-failed {
+  color: var(--coral);
+  background: #fff0ef;
+  font-weight: 700;
+}
+.attachment-image-link {
+  max-width: 360px;
+  overflow: hidden;
+  border: 1px solid #c8d7e0;
+  background: #edf3f7;
+}
+.attachment-image-link img {
+  display: block;
+  width: 100%;
+  max-height: 280px;
+  object-fit: cover;
+}
+.attachment-download {
+  justify-content: space-between;
+  min-width: 220px;
+  border: 1px solid #b6caff;
+  padding: 10px 12px;
+  color: var(--ink);
+  background: #f4f7ff;
+  font-size: 13px;
+  font-weight: 700;
+  text-decoration: none;
+}
+.attachment-download span:last-child {
+  color: var(--signal);
+  font-size: 11px;
+}
 .message-bubble footer {
   display: flex;
   gap: 10px;

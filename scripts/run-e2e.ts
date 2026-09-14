@@ -152,7 +152,24 @@ function startWorker(
 async function startFakeFacebook() {
   let messageNumber = 0
   const server = createHttpServer(async (request, response) => {
-    if (request.method !== 'POST' || !request.url?.endsWith('/messages')) {
+    const pathname = request.url ? new URL(request.url, 'http://fake-facebook').pathname : ''
+    if (request.method === 'GET' && pathname.startsWith('/attachments/')) {
+      const file = pathname.split('/').at(-1)
+      const attachment =
+        file === 'image'
+          ? { type: 'image/png', body: Buffer.from('fake-image') }
+          : file === 'file'
+            ? { type: 'application/pdf', body: Buffer.from('fake-pdf') }
+            : file === 'audio'
+              ? { type: 'audio/mpeg', body: Buffer.from('fake-audio') }
+              : { type: 'video/mp4', body: Buffer.from('fake-video') }
+      response.statusCode = 200
+      response.setHeader('content-type', attachment.type)
+      response.setHeader('content-length', attachment.body.length)
+      response.end(attachment.body)
+      return
+    }
+    if (request.method !== 'POST' || !pathname.endsWith('/messages')) {
       response.statusCode = 404
       response.end()
       return
@@ -259,6 +276,7 @@ async function main() {
       ...process.env,
       E2E_BASE_URL: baseUrl,
       E2E_DATABASE_URL: connectionString,
+      E2E_FAKE_FACEBOOK_URL: fakeFacebook.baseUrl,
     }
     delete testEnv.DATABASE_URL
     await run(['exec', 'playwright', 'test', ...process.argv.slice(2)], testEnv)

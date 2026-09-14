@@ -10,6 +10,8 @@ import {
   conversation,
   createDatabase,
   customer,
+  facebookAttachmentSource,
+  getFacebookAttachmentForDownload,
   disableFacebookChannel,
   facebookMessagingWindow,
   facebookWebhookReceipt,
@@ -17,6 +19,7 @@ import {
   listMessages,
   markFacebookChannelHealth,
   message,
+  messageAttachment,
   processFacebookInbound,
   user,
 } from '../src'
@@ -153,6 +156,132 @@ describe.skipIf(!connectionString)('durable Facebook inbox intake', () => {
     await expect(
       processFacebookInbound(db, inbound(pageId, 'disabled-mid', 'ignored', `${runId}-disabled`)),
     ).resolves.toMatchObject({ kind: 'ignored' })
+  })
+
+  it('persists mixed and attachment-only inbound messages with recoverable sources', async () => {
+    const ownerId = randomUUID()
+    const pageId = randomUUID()
+    await db
+      .insert(user)
+      .values({ id: ownerId, name: 'Attachment owner', email: `${ownerId}@example.com` })
+    const workspace = await bootstrapWorkspace(db, {
+      userId: ownerId,
+      userName: 'Attachment owner',
+      name: 'Attachment intake',
+    })
+    const [connected] = await connectFacebookPages(db, {
+      workspaceId: workspace.id,
+      actingUserId: ownerId,
+      pages: [
+        {
+          pageId,
+          displayName: 'Support',
+          encryptedPageAccessToken: 'cipher',
+          tokenIv: 'iv',
+          tokenKeyVersion: 'v1',
+        },
+      ],
+    })
+    if (!connected) throw new Error('Facebook channel was not created')
+
+    const receivedAt = new Date()
+    const input = {
+      ingressId: randomUUID(),
+      pageId,
+      externalUserId: 'attachment-customer',
+      externalMessageId: 'attachment-mid',
+      text: 'Here are the files',
+      attachments: [
+        {
+          kind: 'IMAGE' as const,
+          filename: 'photo.jpg',
+          mimeType: 'image/jpeg',
+          encryptedSourceUrl: 'encrypted-image-url',
+          urlIv: 'image-iv',
+          tokenKeyVersion: 'v1',
+          expiresAt: new Date(receivedAt.getTime() + 60_000),
+        },
+        {
+          kind: 'FILE' as const,
+          filename: 'manual.pdf',
+          mimeType: 'application/pdf',
+          encryptedSourceUrl: 'encrypted-file-url',
+          urlIv: 'file-iv',
+          tokenKeyVersion: 'v1',
+          expiresAt: new Date(receivedAt.getTime() + 60_000),
+        },
+      ],
+      providerSentAt: receivedAt,
+      receivedAt,
+      payloadSha256: 'c'.repeat(64),
+      eventFragment: { messageId: 'attachment-mid', attachmentKinds: ['IMAGE', 'FILE'] },
+    }
+    const created = await processFacebookInbound(db, input)
+    expect(created).toMatchObject({ kind: 'created', attachmentIds: expect.any(Array) })
+    if (created.kind !== 'created') throw new Error('Attachment message was not created')
+
+    const [storedMessage] = await db.select().from(message).where(eq(message.id, created.messageId))
+    expect(storedMessage).toEqual(
+      expect.objectContaining({ messageType: 'ATTACHMENT', text: 'Here are the files' }),
+    )
+    expect(
+      await db
+        .select()
+        .from(messageAttachment)
+        .where(eq(messageAttachment.messageId, created.messageId)),
+    ).toHaveLength(2)
+    expect(
+      await db
+        .select()
+        .from(facebookAttachmentSource)
+        .where(eq(facebookAttachmentSource.attachmentId, created.attachmentIds[0] ?? '')),
+    ).toHaveLength(1)
+
+    const thread = await listMessages(db, {
+      workspaceId: workspace.id,
+      userId: ownerId,
+      conversationId: created.conversationId,
+    })
+    expect(thread.messages[0]?.attachments).toHaveLength(2)
+
+    const duplicate = await processFacebookInbound(db, {
+      ...input,
+      ingressId: randomUUID(),
+    })
+    expect(duplicate).toMatchObject({
+      kind: 'duplicate-message',
+      attachmentIds: created.attachmentIds,
+    })
+
+    const attachmentOnly = await processFacebookInbound(db, {
+      ...input,
+      ingressId: randomUUID(),
+      externalMessageId: 'attachment-only-mid',
+      text: null,
+      attachments: [input.attachments[0]],
+    })
+    expect(attachmentOnly).toMatchObject({ kind: 'created' })
+
+    await db
+      .update(messageAttachment)
+      .set({ storageState: 'READY', storageKey: 'attachments/private', mimeType: 'image/jpeg' })
+      .where(eq(messageAttachment.id, created.attachmentIds[0] ?? ''))
+    await expect(
+      getFacebookAttachmentForDownload(db, {
+        workspaceId: workspace.id,
+        userId: ownerId,
+        attachmentId: created.attachmentIds[0] ?? '',
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ storageKey: 'attachments/private', mimeType: 'image/jpeg' }),
+    )
+    await expect(
+      getFacebookAttachmentForDownload(db, {
+        workspaceId: workspace.id,
+        userId: randomUUID(),
+        attachmentId: created.attachmentIds[0] ?? '',
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' })
   })
 
   it('keeps inbound messages when the Facebook connection needs attention', async () => {

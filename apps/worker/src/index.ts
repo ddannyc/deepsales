@@ -3,27 +3,36 @@ import {
   AssignmentError,
   bootstrapWorkspace,
   claimOutboundMessage,
+  claimFacebookInboundAttachment,
   closeConversation,
+  completeFacebookInboundAttachment,
   completeOutboundMessage,
   createDatabase,
   createAiMember,
   createInvitation,
   createFacebookHumanReply,
   disableFacebookChannel,
+  expireFacebookInboundAttachments,
   FacebookError,
+  getFacebookAttachmentForDownload,
   getFacebookOutboundDelivery,
   InboxError,
+  AttachmentError,
+  MAX_INBOUND_ATTACHMENT_BYTES,
   ReplyError,
   failOutboundMessage,
+  failFacebookInboundAttachment,
   listFacebookChannels,
   listFacebookChannelsPage,
   listFacebookConversations,
   listMessages,
+  listPendingFacebookInboundAttachmentIds,
   listUnclaimedOutboundMessageIds,
   deleteMember,
   listTeam,
   MemberError,
   processFacebookInbound,
+  releaseFacebookInboundAttachment,
   recoverStaleOutboundMessages,
   member,
   setMemberChannelAccess,
@@ -46,12 +55,15 @@ import type { Bindings } from './bindings'
 import {
   FacebookProviderError,
   facebookOutboundJobSchema,
+  facebookAttachmentJobSchema,
   facebookWebhookJobSchema,
   isFacebookReplyWindowOpen,
   normalizeFacebookWebhook,
   decryptFacebookToken,
   createFacebookAdapter,
   redactedFacebookFailure,
+  encryptFacebookAttachmentSources,
+  isHttpUrl,
 } from './facebook'
 import {
   beginFacebookOAuth,
@@ -63,6 +75,8 @@ import {
 } from './facebook-service'
 
 import { publishRealtime, WorkspaceRealtime } from './realtime'
+import { createObjectStorage } from './object-storage'
+import { createJobQueue, type JobQueue } from './queue'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
@@ -509,6 +523,41 @@ app.get('/api/workspaces/:workspaceId/conversations/:conversationId/messages', a
   })
 })
 
+app.get('/api/workspaces/:workspaceId/attachments/:attachmentId', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    if (!c.env.OBJECTS) {
+      return c.json(
+        { error: { code: 'STORAGE_UNAVAILABLE', message: 'Attachment storage is unavailable' } },
+        503,
+      )
+    }
+
+    try {
+      const storage = createObjectStorage(c.env.OBJECTS)
+      const attachment = await getFacebookAttachmentForDownload(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        attachmentId: c.req.param('attachmentId'),
+      })
+      const object = await storage.get(attachment.storageKey)
+      if (!object?.body) throw new AttachmentError('NOT_FOUND', 'Attachment not found')
+
+      const headers = new Headers({
+        'Cache-Control': 'private, no-store',
+        'Content-Disposition': contentDisposition(attachment.filename, attachment.kind),
+        'Content-Type': safeContentType(attachment.mimeType),
+        'X-Content-Type-Options': 'nosniff',
+      })
+      return new Response(object.body, { status: 200, headers })
+    } catch (error) {
+      return attachmentErrorResponse(c, error)
+    }
+  })
+})
+
 app.post('/api/workspaces/:workspaceId/conversations/:conversationId/takeover', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
@@ -658,7 +707,7 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/replies', a
         messageId: created.message.id,
       }
       try {
-        await c.env.OUTBOUND_QUEUE?.send(job)
+        if (c.env.OUTBOUND_QUEUE) await createJobQueue(c.env.OUTBOUND_QUEUE).send(job)
       } catch {
         console.warn(
           JSON.stringify({ event: 'outbound_queue_failed', messageId: created.message.id }),
@@ -888,6 +937,8 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.TOKEN_ENCRYPTION_KEY &&
       env.WEBHOOKS_QUEUE &&
       env.OUTBOUND_QUEUE &&
+      env.DOCUMENTS_QUEUE &&
+      env.OBJECTS &&
       env.WORKSPACE_REALTIME,
   )
 }
@@ -1076,6 +1127,33 @@ function inboxErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) 
   return c.json({ error: { code: error.code, message: error.message } }, status)
 }
 
+function attachmentErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (!(error instanceof AttachmentError)) throw error
+  return c.json(
+    { error: { code: error.code, message: error.message } },
+    error.code === 'FORBIDDEN' ? 403 : 404,
+  )
+}
+
+function contentDisposition(filename: string | null, kind: string) {
+  const fallback = `${kind.toLowerCase()}-attachment`
+  const safeName =
+    Array.from(filename ?? fallback, (character) =>
+      character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127 || '"\\/'.includes(character)
+        ? '_'
+        : character,
+    )
+      .join('')
+      .trim()
+      .slice(0, 180) || fallback
+  const disposition = kind === 'IMAGE' ? 'inline' : 'attachment'
+  return `${disposition}; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`
+}
+
+function safeContentType(value: string | null) {
+  return safeMimeType(value) ?? 'application/octet-stream'
+}
+
 function assignmentErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
   if (!(error instanceof AssignmentError)) throw error
   const status =
@@ -1172,7 +1250,7 @@ app.post('/webhooks/facebook', async (c) => {
   const events = normalizeFacebookWebhook(payload)
   if (!events.length) return c.text('EVENT_RECEIVED')
 
-  const queue = c.env.WEBHOOKS_QUEUE
+  const queue = c.env.WEBHOOKS_QUEUE ? createJobQueue(c.env.WEBHOOKS_QUEUE) : undefined
   if (!queue) {
     return c.json(
       { error: { code: 'QUEUE_UNAVAILABLE', message: 'Webhook queue is unavailable' } },
@@ -1182,7 +1260,21 @@ app.post('/webhooks/facebook', async (c) => {
 
   const receivedAt = new Date()
   const payloadSha256 = await sha256Hex(body)
-  const jobs = events.map((event) =>
+  let encryptedEvents: Awaited<ReturnType<typeof encryptFacebookAttachmentSources>>[]
+  try {
+    encryptedEvents = await Promise.all(
+      events.map((event) =>
+        encryptFacebookAttachmentSources(event, c.env.TOKEN_ENCRYPTION_KEY, receivedAt),
+      ),
+    )
+  } catch {
+    console.error(JSON.stringify({ event: 'attachment_source_encryption_failed' }))
+    return c.json(
+      { error: { code: 'ATTACHMENT_UNAVAILABLE', message: 'Attachment intake is unavailable' } },
+      503,
+    )
+  }
+  const jobs = encryptedEvents.map((event) =>
     facebookWebhookJobSchema.safeParse({
       v: 1,
       type: 'facebook.inbound',
@@ -1239,7 +1331,29 @@ async function sha256Hex(body: ArrayBuffer) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+async function enqueueAttachmentJobs(queue: JobQueue | undefined, attachmentIds: string[]) {
+  if (!attachmentIds.length) return
+  if (!queue) {
+    console.warn(
+      JSON.stringify({ event: 'attachment_queue_unavailable', attachments: attachmentIds.length }),
+    )
+    return
+  }
+  try {
+    await Promise.all(
+      attachmentIds.map((attachmentId) =>
+        queue.send({ v: 1, type: 'facebook.attachment', attachmentId }),
+      ),
+    )
+  } catch {
+    console.warn(
+      JSON.stringify({ event: 'attachment_queue_failed', attachments: attachmentIds.length }),
+    )
+  }
+}
+
 export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  const documentsQueue = env.DOCUMENTS_QUEUE ? createJobQueue(env.DOCUMENTS_QUEUE) : undefined
   for (const message of batch.messages) {
     const job = facebookWebhookJobSchema.safeParse(message.body)
     if (!job.success) {
@@ -1255,6 +1369,15 @@ export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bind
           externalUserId: job.data.event.externalUserId,
           externalMessageId: job.data.event.externalMessageId,
           text: job.data.event.text,
+          attachments: job.data.event.attachments.map((attachment) => ({
+            kind: attachment.kind,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            encryptedSourceUrl: attachment.encryptedSourceUrl,
+            urlIv: attachment.urlIv,
+            tokenKeyVersion: attachment.tokenKeyVersion,
+            expiresAt: new Date(attachment.expiresAt),
+          })),
           providerSentAt: job.data.event.providerSentAt
             ? new Date(job.data.event.providerSentAt)
             : null,
@@ -1263,6 +1386,9 @@ export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bind
           eventFragment: job.data.event.eventFragment,
         }),
       )
+      if (result.kind === 'created' || result.kind === 'duplicate-message') {
+        await enqueueAttachmentJobs(documentsQueue, result.attachmentIds)
+      }
       if (result.kind === 'created') {
         try {
           await publishRealtime(env.WORKSPACE_REALTIME, result.workspaceId, {
@@ -1279,6 +1405,229 @@ export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bind
       message.retry()
     }
   }
+}
+
+class AttachmentProcessingError extends Error {
+  constructor(readonly code: string) {
+    super(code)
+  }
+}
+
+class AttachmentRetryError extends Error {
+  constructor(readonly code: string) {
+    super(code)
+  }
+}
+
+export async function handleDocumentsBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  for (const queueMessage of batch.messages) {
+    const job = facebookAttachmentJobSchema.safeParse(queueMessage.body)
+    if (!job.success) {
+      queueMessage.ack()
+      continue
+    }
+
+    let claimed: Awaited<ReturnType<typeof claimFacebookInboundAttachment>>
+    try {
+      claimed = await withDatabase(env, (db) =>
+        claimFacebookInboundAttachment(db, { attachmentId: job.data.attachmentId }),
+      )
+    } catch {
+      queueMessage.retry()
+      continue
+    }
+    if (!claimed) {
+      queueMessage.ack()
+      continue
+    }
+
+    try {
+      if (!env.OBJECTS) throw new AttachmentRetryError('STORAGE_UNAVAILABLE')
+      const storage = createObjectStorage(env.OBJECTS)
+      if (!claimed.expiresAt || claimed.expiresAt.getTime() <= Date.now()) {
+        throw new AttachmentProcessingError('SOURCE_EXPIRED')
+      }
+      if (!claimed.encryptedSourceUrl || !claimed.urlIv || !claimed.tokenKeyVersion) {
+        throw new AttachmentProcessingError('SOURCE_MISSING')
+      }
+
+      const sourceUrl = await decryptFacebookToken(
+        {
+          ciphertext: claimed.encryptedSourceUrl,
+          iv: claimed.urlIv,
+          keyVersion: claimed.tokenKeyVersion,
+        },
+        env.TOKEN_ENCRYPTION_KEY,
+      )
+      if (!isHttpUrl(sourceUrl)) throw new AttachmentProcessingError('SOURCE_INVALID')
+
+      let response: Response
+      try {
+        response = await fetch(sourceUrl)
+      } catch {
+        throw new AttachmentRetryError('SOURCE_FETCH_FAILED')
+      }
+      if (!response.ok) {
+        if (response.status === 429 || response.status >= 500) {
+          throw new AttachmentRetryError('SOURCE_FETCH_FAILED')
+        }
+        throw new AttachmentProcessingError('SOURCE_FETCH_FAILED')
+      }
+
+      const declaredMimeType = safeMimeType(claimed.mimeType)
+      if (declaredMimeType && !isAllowedAttachmentType(claimed.kind, declaredMimeType)) {
+        throw new AttachmentProcessingError('UNSUPPORTED_TYPE')
+      }
+      const responseMimeType = safeMimeType(response.headers.get('content-type'))
+      if (
+        responseMimeType &&
+        responseMimeType !== 'application/octet-stream' &&
+        !isAllowedAttachmentType(claimed.kind, responseMimeType)
+      ) {
+        throw new AttachmentProcessingError('UNSUPPORTED_TYPE')
+      }
+      const mimeType = declaredMimeType ?? responseMimeType ?? defaultMimeType(claimed.kind)
+      if (!isAllowedAttachmentType(claimed.kind, mimeType)) {
+        throw new AttachmentProcessingError('UNSUPPORTED_TYPE')
+      }
+
+      const contentLength = Number(response.headers.get('content-length'))
+      if (Number.isFinite(contentLength) && contentLength > MAX_INBOUND_ATTACHMENT_BYTES) {
+        throw new AttachmentProcessingError('TOO_LARGE')
+      }
+      if (!response.body) throw new AttachmentProcessingError('SOURCE_EMPTY')
+
+      let byteSize = 0
+      let body: Uint8Array
+      try {
+        body = new Uint8Array(
+          await new Response(
+            limitAttachmentStream(response.body, MAX_INBOUND_ATTACHMENT_BYTES, (size) => {
+              byteSize = size
+            }),
+          ).arrayBuffer(),
+        )
+      } catch (error) {
+        if (error instanceof AttachmentProcessingError) throw error
+        throw new AttachmentRetryError('SOURCE_READ_FAILED')
+      }
+      const storageKey = `attachments/${claimed.id}/${crypto.randomUUID()}`
+      try {
+        await storage.put(storageKey, body, mimeType)
+      } catch (error) {
+        if (error instanceof AttachmentProcessingError) throw error
+        throw new AttachmentRetryError('STORAGE_FAILED')
+      }
+
+      const completed = await withDatabase(env, (db) =>
+        completeFacebookInboundAttachment(db, {
+          attachmentId: claimed.id,
+          storageKey,
+          byteSize,
+          mimeType,
+          processingStartedAt: claimed.processingStartedAt,
+        }),
+      )
+      if (completed) {
+        await publishInboxChange(env, claimed.workspaceId, claimed.messageId, 'message.changed')
+      }
+      queueMessage.ack()
+    } catch (error) {
+      const failureCode =
+        error instanceof AttachmentProcessingError ? error.code : 'ATTACHMENT_PROCESSING_FAILED'
+      if (error instanceof AttachmentRetryError) {
+        console.warn(
+          JSON.stringify({
+            event: 'attachment_processing_retry',
+            attachmentId: claimed.id,
+            failureCode: error.code,
+          }),
+        )
+        try {
+          await withDatabase(env, (db) =>
+            releaseFacebookInboundAttachment(db, {
+              attachmentId: claimed.id,
+              processingStartedAt: claimed.processingStartedAt,
+            }),
+          )
+        } catch {}
+        queueMessage.retry()
+        continue
+      }
+      console.warn(
+        JSON.stringify({
+          event: 'attachment_processing_failed',
+          attachmentId: claimed.id,
+          failureCode,
+        }),
+      )
+      try {
+        const failed = await withDatabase(env, (db) =>
+          failFacebookInboundAttachment(db, {
+            attachmentId: claimed.id,
+            failureCode,
+            processingStartedAt: claimed.processingStartedAt,
+          }),
+        )
+        if (failed[0]) {
+          await publishInboxChange(env, claimed.workspaceId, claimed.messageId, 'message.changed')
+        }
+        queueMessage.ack()
+      } catch {
+        queueMessage.retry()
+      }
+    }
+  }
+}
+
+function limitAttachmentStream(
+  body: ReadableStream<Uint8Array>,
+  maxBytes: number,
+  onComplete: (byteSize: number) => void,
+) {
+  const reader = body.getReader()
+  let byteSize = 0
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const result = await reader.read()
+      if (result.done) {
+        onComplete(byteSize)
+        controller.close()
+        return
+      }
+      byteSize += result.value.byteLength
+      if (byteSize > maxBytes) {
+        await reader.cancel()
+        controller.error(new AttachmentProcessingError('TOO_LARGE'))
+        return
+      }
+      controller.enqueue(result.value)
+    },
+    cancel(reason) {
+      return reader.cancel(reason)
+    },
+  })
+}
+
+function safeMimeType(value: string | null) {
+  const mimeType = value?.split(';', 1)[0]?.trim().toLowerCase()
+  return mimeType && /^[a-z0-9!#$&^_.+/-]+$/.test(mimeType) ? mimeType : null
+}
+
+function isAllowedAttachmentType(kind: 'IMAGE' | 'FILE' | 'AUDIO' | 'VIDEO', mimeType: string) {
+  if (kind === 'IMAGE') return /^image\/(jpeg|png|gif|webp|bmp|heic|heif)$/.test(mimeType)
+  if (kind === 'AUDIO') return mimeType.startsWith('audio/')
+  if (kind === 'VIDEO') return mimeType.startsWith('video/')
+  return mimeType.startsWith('application/') || mimeType.startsWith('text/')
+}
+
+function defaultMimeType(kind: 'IMAGE' | 'FILE' | 'AUDIO' | 'VIDEO') {
+  return {
+    IMAGE: 'image/jpeg',
+    FILE: 'application/octet-stream',
+    AUDIO: 'audio/mpeg',
+    VIDEO: 'video/mp4',
+  }[kind]
 }
 
 export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bindings) {
@@ -1399,14 +1748,34 @@ export async function handleScheduled(env: Bindings) {
         await publishInboxChange(env, item.workspaceId, item.id, 'message.changed')
       }
     }
-    if (!env.OUTBOUND_QUEUE) return
+    if (env.OUTBOUND_QUEUE) {
+      const pending = await withDatabase(env, (db) => listUnclaimedOutboundMessageIds(db))
+      const queue = createJobQueue(env.OUTBOUND_QUEUE)
+      for (const messageId of pending) {
+        try {
+          await queue.send({ v: 1, type: 'facebook.outbound', messageId })
+        } catch {
+          console.warn(JSON.stringify({ event: 'outbound_queue_failed', messageId }))
+        }
+      }
+    }
 
-    const pending = await withDatabase(env, (db) => listUnclaimedOutboundMessageIds(db))
-    for (const messageId of pending) {
-      try {
-        await env.OUTBOUND_QUEUE.send({ v: 1, type: 'facebook.outbound', messageId })
-      } catch {
-        console.warn(JSON.stringify({ event: 'outbound_queue_failed', messageId }))
+    const expiredAttachments = await withDatabase(env, (db) => expireFacebookInboundAttachments(db))
+    for (const item of expiredAttachments) {
+      await publishInboxChange(env, item.workspaceId, item.messageId, 'message.changed')
+    }
+
+    if (env.DOCUMENTS_QUEUE) {
+      const pendingAttachments = await withDatabase(env, (db) =>
+        listPendingFacebookInboundAttachmentIds(db),
+      )
+      const queue = createJobQueue(env.DOCUMENTS_QUEUE)
+      for (const attachmentId of pendingAttachments) {
+        try {
+          await queue.send({ v: 1, type: 'facebook.attachment', attachmentId })
+        } catch {
+          console.warn(JSON.stringify({ event: 'attachment_queue_failed', attachmentId }))
+        }
       }
     }
   } catch {
@@ -1422,7 +1791,9 @@ const worker = {
   queue: (batch: MessageBatch<unknown>, env: Bindings) =>
     batch.queue === 'deepsales-outbound'
       ? handleOutboundBatch(batch, env)
-      : handleWebhookBatch(batch, env),
+      : batch.queue === 'deepsales-documents'
+        ? handleDocumentsBatch(batch, env)
+        : handleWebhookBatch(batch, env),
   scheduled: (_controller: ScheduledController, env: Bindings) => handleScheduled(env),
 }
 

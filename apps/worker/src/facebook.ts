@@ -6,6 +6,7 @@ export const FACEBOOK_PERMISSIONS = [
   'pages_show_list',
 ] as const
 export const TOKEN_KEY_VERSION = 'v1'
+export const FACEBOOK_ATTACHMENT_SOURCE_TTL_MS = 60 * 60 * 1_000
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 type TokenKeyUsage = 'encrypt' | 'decrypt'
@@ -18,6 +19,15 @@ export type FacebookPage = {
 }
 
 export type FacebookPageSummary = Omit<FacebookPage, 'accessToken'>
+
+export type FacebookAttachmentKind = 'IMAGE' | 'FILE' | 'AUDIO' | 'VIDEO'
+
+export type FacebookInboundAttachment = {
+  kind: FacebookAttachmentKind
+  sourceUrl: string
+  filename: string | null
+  mimeType: string | null
+}
 
 export class FacebookProviderError extends Error {
   constructor(
@@ -225,16 +235,28 @@ export type FacebookInboundEvent = {
   pageId: string
   externalUserId: string
   externalMessageId: string
-  text: string
+  text: string | null
+  attachments: FacebookInboundAttachment[]
   providerSentAt: Date | null
   eventFragment: Record<string, unknown>
 }
 
+const facebookAttachmentKindSchema = z.enum(['IMAGE', 'FILE', 'AUDIO', 'VIDEO'])
+const facebookQueuedAttachmentSchema = z.object({
+  kind: facebookAttachmentKindSchema,
+  filename: z.string().max(500).nullable(),
+  mimeType: z.string().max(200).nullable(),
+  encryptedSourceUrl: z.string().min(1).max(10_000),
+  urlIv: z.string().min(1).max(200),
+  tokenKeyVersion: z.string().min(1).max(50),
+  expiresAt: z.string().datetime(),
+})
 const facebookInboundEventSchema = z.object({
   pageId: z.string().min(1).max(200),
   externalUserId: z.string().min(1).max(500),
   externalMessageId: z.string().min(1).max(500),
-  text: z.string().min(1).max(100_000),
+  text: z.string().max(100_000).nullable().default(null),
+  attachments: z.array(facebookQueuedAttachmentSchema).max(10).default([]),
   providerSentAt: z.string().datetime().nullable(),
   eventFragment: z.record(z.string(), z.unknown()),
 })
@@ -249,6 +271,14 @@ export const facebookWebhookJobSchema = z.object({
 })
 
 export type FacebookWebhookJob = z.infer<typeof facebookWebhookJobSchema>
+
+export const facebookAttachmentJobSchema = z.object({
+  v: z.literal(1),
+  type: z.literal('facebook.attachment'),
+  attachmentId: z.string().uuid(),
+})
+
+export type FacebookAttachmentJob = z.infer<typeof facebookAttachmentJobSchema>
 
 export const facebookOutboundJobSchema = z.object({
   v: z.literal(1),
@@ -274,34 +304,57 @@ export function normalizeFacebookWebhook(payload: unknown, expectedPageId?: stri
       const senderId = rawEvent.sender.id
       const messageId = rawEvent.message.mid
       const text = rawEvent.message.text
-      if (
-        typeof senderId !== 'string' ||
-        typeof messageId !== 'string' ||
-        typeof text !== 'string' ||
-        !text.length ||
-        rawEvent.message.is_echo === true
-      ) {
+      if (typeof senderId !== 'string' || typeof messageId !== 'string') continue
+      if (rawEvent.message.is_echo === true) {
         continue
       }
+
+      const attachments = normalizeFacebookAttachments(rawEvent.message.attachments)
+      const messageText = typeof text === 'string' && text.length ? text : null
+      if (!messageText && !attachments.length) continue
 
       const providerSentAt = providerTimestamp(rawEvent.timestamp)
       events.push({
         pageId: rawEntry.id,
         externalUserId: senderId,
         externalMessageId: messageId,
-        text,
+        text: messageText,
+        attachments,
         providerSentAt,
         eventFragment: {
           entryId: rawEntry.id,
           senderId,
           messageId,
-          text,
           providerTimestamp: providerSentAt?.toISOString() ?? null,
+          attachmentKinds: attachments.map(({ kind }) => kind),
         },
       })
     }
   }
   return events
+}
+
+export async function encryptFacebookAttachmentSources(
+  event: FacebookInboundEvent,
+  keyMaterial: string,
+  receivedAt = new Date(),
+) {
+  const expiresAt = new Date(receivedAt.getTime() + FACEBOOK_ATTACHMENT_SOURCE_TTL_MS)
+  const attachments = await Promise.all(
+    event.attachments.map(async (attachment) => {
+      const encrypted = await encryptFacebookToken(attachment.sourceUrl, keyMaterial)
+      return {
+        kind: attachment.kind,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        encryptedSourceUrl: encrypted.ciphertext,
+        urlIv: encrypted.iv,
+        tokenKeyVersion: encrypted.keyVersion,
+        expiresAt: expiresAt.toISOString(),
+      }
+    }),
+  )
+  return { ...event, attachments }
 }
 
 async function graphRequest(fetcher: Fetcher, url: URL, init: RequestInit): Promise<unknown> {
@@ -397,4 +450,47 @@ function providerTimestamp(value: unknown) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? null : date
+}
+
+function normalizeFacebookAttachments(value: unknown): FacebookInboundAttachment[] {
+  if (!Array.isArray(value)) return []
+  const attachments: FacebookInboundAttachment[] = []
+  for (const rawAttachment of value) {
+    if (!isRecord(rawAttachment) || typeof rawAttachment.type !== 'string') continue
+    const kind = {
+      image: 'IMAGE',
+      file: 'FILE',
+      audio: 'AUDIO',
+      video: 'VIDEO',
+    }[rawAttachment.type.toLowerCase()] as FacebookAttachmentKind | undefined
+    if (!kind) continue
+
+    const payload = isRecord(rawAttachment.payload) ? rawAttachment.payload : rawAttachment
+    const sourceUrl = stringValue(payload.url)
+    if (!sourceUrl || !isHttpUrl(sourceUrl)) continue
+    attachments.push({
+      kind,
+      sourceUrl,
+      filename:
+        stringValue(payload.filename) ??
+        stringValue(payload.name) ??
+        stringValue(payload.title) ??
+        null,
+      mimeType: stringValue(payload.mime_type) ?? stringValue(payload.mimeType) ?? null,
+    })
+  }
+  return attachments
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, 500) : null
+}
+
+export function isHttpUrl(value: string) {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' || url.protocol === 'http:'
+  } catch {
+    return false
+  }
 }
