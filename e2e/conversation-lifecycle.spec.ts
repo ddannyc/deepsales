@@ -104,6 +104,11 @@ test('human can transfer, unassign, close, and receive a later message in a new 
   await expect(page.getByText('first lifecycle message', { exact: true }).first()).toBeVisible({
     timeout: 10_000,
   })
+  const initialInbox = (await page.request
+    .get(`/api/workspaces/${me.workspace.id}/conversations?view=all-open`)
+    .then((response) => response.json())) as { conversations: Array<{ id: string }> }
+  const initialConversationId = initialInbox.conversations[0]?.id
+  if (!initialConversationId) throw new Error('Initial conversation was not listed')
   await page.getByRole('button', { name: '接管', exact: true }).click()
 
   await page.getByRole('button', { name: '转接', exact: true }).click()
@@ -129,6 +134,10 @@ test('human can transfer, unassign, close, and receive a later message in a new 
   await expect(page.getByText('later lifecycle message', { exact: true }).first()).toBeVisible({
     timeout: 10_000,
   })
+  const laterInbox = (await page.request
+    .get(`/api/workspaces/${me.workspace.id}/conversations?view=all-open`)
+    .then((response) => response.json())) as { conversations: Array<{ id: string }> }
+  expect(laterInbox.conversations[0]?.id).not.toBe(initialConversationId)
 })
 
 async function sendInbound(

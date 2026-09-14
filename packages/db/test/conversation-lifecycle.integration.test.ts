@@ -238,6 +238,27 @@ describe.skipIf(!connectionString)('conversation lifecycle', () => {
         .where(eq(conversationAssignment.conversationId, first.conversationId)),
     ).toEqual(expect.arrayContaining([{ reason: 'CLOSE' }]))
   })
+
+  it('serializes a concurrent close and inbound event into valid lifecycle rows', async () => {
+    const fixture = await createFixture(db)
+    const [closed, inboundResult] = await Promise.all([
+      closeConversation(db, {
+        workspaceId: fixture.workspaceId,
+        conversationId: fixture.conversationId,
+        actingUserId: fixture.ownerId,
+      }),
+      inbound(db, fixture, 'concurrent-close'),
+    ])
+
+    expect(closed.changed).toBe(true)
+    expect(inboundResult.kind).toBe('created')
+    const rows = await db
+      .select({ id: conversation.id, status: conversation.status })
+      .from(conversation)
+      .where(eq(conversation.channelIdentityId, fixture.channelIdentityId))
+    expect(rows.filter(({ status }) => status === 'CLOSED')).toHaveLength(1)
+    expect(rows.filter(({ status }) => status === 'OPEN')).toHaveLength(rows.length - 1)
+  })
 })
 
 async function createFixture(
