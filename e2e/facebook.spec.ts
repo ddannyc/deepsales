@@ -14,6 +14,7 @@ test('owner can open Facebook settings', async ({ page }) => {
   await page.getByRole('button', { name: '创建账户', exact: true }).click()
   await page.getByLabel('工作区名称').fill('Facebook acceptance')
   await page.getByRole('button', { name: '创建工作区' }).click()
+  await expect(page.getByRole('heading', { name: '收件箱已准备就绪' })).toBeVisible()
 
   await page.goto('/settings/facebook')
   await expect(page.getByRole('heading', { name: 'Facebook Page' })).toBeVisible()
