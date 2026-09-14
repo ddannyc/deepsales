@@ -81,6 +81,8 @@ type InboxConversation = {
   assigneeName: string | null
   assigneeType: 'HUMAN' | 'AI' | null
   latestPreview: string | null
+  replyWindowOpen: boolean
+  replyWindowEligibleUntil: string | null
   failedMessage: boolean
 }
 type InboxMessage = {
@@ -478,6 +480,8 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [messages, setMessages] = useState<InboxMessage[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [reply, setReply] = useState('')
+  const [actionLoading, setActionLoading] = useState(false)
   const selectedIdRef = useRef<string | null>(null)
 
   const refresh = useCallback(async () => {
@@ -506,6 +510,44 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     },
     [workspace.id],
   )
+
+  const takeOver = useCallback(async () => {
+    if (!selectedId) return
+    setActionLoading(true)
+    try {
+      await request(`/api/workspaces/${workspace.id}/conversations/${selectedId}/takeover`, {})
+      await refresh()
+      await refreshThread(selectedId)
+      setError('')
+    } catch (cause) {
+      setError(inboxErrorMessage(cause))
+    } finally {
+      setActionLoading(false)
+    }
+  }, [refresh, refreshThread, selectedId, workspace.id])
+
+  async function sendReply(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedId || !reply.trim()) return
+    setActionLoading(true)
+    try {
+      const result = (await request(
+        `/api/workspaces/${workspace.id}/conversations/${selectedId}/replies`,
+        { text: reply },
+      )) as { message: InboxMessage }
+      setMessages((current) =>
+        current.some(({ id }) => id === result.message.id) ? current : [...current, result.message],
+      )
+      setReply('')
+      await refresh()
+      await refreshThread(selectedId)
+      setError('')
+    } catch (cause) {
+      setError(inboxErrorMessage(cause))
+    } finally {
+      setActionLoading(false)
+    }
+  }
 
   useEffect(() => {
     setLoading(true)
@@ -648,10 +690,27 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                   <div>
                     <p className="eyebrow">{selected.channelName}</p>
                     <h2>{selected.customerName ?? '新客户'}</h2>
+                    <p className="reply-window" role="status">
+                      {selected.replyWindowOpen
+                        ? 'Messenger 回复窗口开放'
+                        : 'Messenger 回复窗口已关闭'}
+                    </p>
                   </div>
-                  <div className="thread-state">
-                    <strong>{selected.assigneeName ?? '未分配'}</strong>
-                    <span>{queueReasonLabel(selected.queueReason)}</span>
+                  <div className="thread-actions">
+                    <div className="thread-state">
+                      <strong>{selected.assigneeName ?? '未分配'}</strong>
+                      <span>{queueReasonLabel(selected.queueReason)}</span>
+                    </div>
+                    {(selected.assigneeMemberId === null || selected.assigneeType === 'AI') && (
+                      <button
+                        className="secondary"
+                        type="button"
+                        disabled={actionLoading}
+                        onClick={() => void takeOver()}
+                      >
+                        接管
+                      </button>
+                    )}
                   </div>
                 </header>
                 <div className="message-list" aria-live="polite">
@@ -667,6 +726,11 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                           {message.deliveryState && (
                             <span>{deliveryStateLabel(message.deliveryState)}</span>
                           )}
+                          {message.deliveryState === 'FAILED' && (
+                            <span className="delivery-failure">
+                              {deliveryFailureLabel(message.failureCode)}
+                            </span>
+                          )}
                         </footer>
                       </article>
                     ))
@@ -674,6 +738,29 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                     <p className="inbox-placeholder">暂无消息。</p>
                   )}
                 </div>
+                {selected.assigneeMemberId === workspace.memberId &&
+                selected.assigneeType === 'HUMAN' ? (
+                  <form className="reply-composer" onSubmit={sendReply}>
+                    <label htmlFor="reply-text">回复客户</label>
+                    <textarea
+                      id="reply-text"
+                      value={reply}
+                      maxLength={2_000}
+                      onChange={(event) => setReply(event.target.value)}
+                      placeholder="输入文字回复"
+                      disabled={!selected.replyWindowOpen || actionLoading}
+                    />
+                    <button
+                      className="primary"
+                      type="submit"
+                      disabled={!selected.replyWindowOpen || actionLoading || !reply.trim()}
+                    >
+                      {actionLoading ? '发送中…' : '发送回复'}
+                    </button>
+                  </form>
+                ) : (
+                  <p className="reply-hint">接管对话后即可回复客户。</p>
+                )}
               </>
             )
           })()
@@ -702,6 +789,10 @@ function queueReasonLabel(reason: string | null) {
 
 function deliveryStateLabel(state: NonNullable<InboxMessage['deliveryState']>) {
   return { PENDING: '发送中', SENT: '已发送', FAILED: '发送失败' }[state]
+}
+
+function deliveryFailureLabel(code: string | null) {
+  return code === 'REPLY_WINDOW_CLOSED' ? '回复窗口已关闭' : '发送失败，请稍后重试'
 }
 
 const facebookStatusLabels: Record<FacebookChannel['connectionStatus'], string> = {
@@ -1411,6 +1502,9 @@ function inboxErrorMessage(cause: unknown): string {
       FORBIDDEN: '你没有查看此工作区收件箱的权限。',
       NOT_FOUND: '该对话已不存在。',
       INVALID_REQUEST: '收件箱请求无效，请刷新后重试。',
+      ALREADY_ASSIGNED: '该对话已被其他成员接管。',
+      CONVERSATION_CLOSED: '该对话已关闭。',
+      REPLY_WINDOW_CLOSED: 'Messenger 回复窗口已关闭。',
     }[cause.code] ?? '收件箱加载失败，请稍后重试。'
   )
 }

@@ -1,12 +1,18 @@
 import {
   acceptInvitation,
+  AssignmentError,
   bootstrapWorkspace,
+  claimOutboundMessage,
+  completeOutboundMessage,
   createDatabase,
   createAiMember,
   createInvitation,
+  createHumanReply,
   disableFacebookChannel,
   FacebookError,
   InboxError,
+  ReplyError,
+  failOutboundMessage,
   listFacebookChannels,
   listFacebookChannelsPage,
   listConversations,
@@ -17,10 +23,12 @@ import {
   processFacebookInbound,
   member,
   setMemberChannelAccess,
+  takeOverConversation,
   updateMember,
   workspace,
   workspaceUserAccess,
   type Database,
+  MAX_OUTBOUND_TEXT_LENGTH,
   type FacebookChannelCursor,
 } from '@deepsales/db'
 import { and, eq, sql } from 'drizzle-orm'
@@ -31,8 +39,13 @@ import { createAuth } from './auth'
 import type { Bindings } from './bindings'
 import {
   FacebookProviderError,
+  facebookOutboundJobSchema,
   facebookWebhookJobSchema,
+  isFacebookReplyWindowOpen,
   normalizeFacebookWebhook,
+  decryptFacebookToken,
+  createFacebookAdapter,
+  redactedFacebookFailure,
 } from './facebook'
 import {
   beginFacebookOAuth,
@@ -101,6 +114,9 @@ const conversationCursorInput = z.object({
   id: z.string().uuid(),
 })
 const messageCursorInput = z.object({ createdAt: z.string().datetime(), id: z.string().uuid() })
+const replyInput = z
+  .object({ text: z.string().trim().min(1).max(MAX_OUTBOUND_TEXT_LENGTH) })
+  .strict()
 
 app.onError((_error, c) => {
   if (c.req.path.startsWith('/api/')) {
@@ -484,6 +500,86 @@ app.get('/api/workspaces/:workspaceId/conversations/:conversationId/messages', a
   })
 })
 
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/takeover', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+
+    try {
+      const result = await takeOverConversation(db, {
+        workspaceId: c.req.param('workspaceId'),
+        conversationId: c.req.param('conversationId'),
+        actingUserId: session.user.id,
+      })
+      await publishInboxChange(
+        c.env,
+        c.req.param('workspaceId'),
+        result.conversationId,
+        'conversation.changed',
+      )
+      const page = await listConversations(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        view: 'all-open',
+        conversationId: result.conversationId,
+      })
+      return c.json({ conversation: page.conversations[0], changed: result.changed })
+    } catch (error) {
+      return assignmentErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/replies', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `outbound-reply:${session.user.id}`)
+    if (limited) return limited
+
+    const input = replyInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json({ error: { code: 'INVALID_REQUEST', message: 'Enter a text reply' } }, 400)
+    }
+
+    try {
+      const created = await createHumanReply(
+        db,
+        {
+          workspaceId: c.req.param('workspaceId'),
+          conversationId: c.req.param('conversationId'),
+          actingUserId: session.user.id,
+          text: input.data.text,
+        },
+        isFacebookReplyWindowOpen,
+      )
+      const job = {
+        v: 1 as const,
+        type: 'facebook.outbound' as const,
+        messageId: created.message.id,
+      }
+      try {
+        await c.env.OUTBOUND_QUEUE?.send(job)
+      } catch {
+        console.warn(
+          JSON.stringify({ event: 'outbound_queue_failed', messageId: created.message.id }),
+        )
+      }
+      await publishInboxChange(
+        c.env,
+        c.req.param('workspaceId'),
+        created.message.id,
+        'message.changed',
+      )
+      return c.json({ message: created.message }, 201)
+    } catch (error) {
+      return replyErrorResponse(c, error)
+    }
+  })
+})
+
 app.get('/api/workspaces/:workspaceId/realtime', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
   if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') {
@@ -686,6 +782,7 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.META_GRAPH_API_VERSION &&
       env.TOKEN_ENCRYPTION_KEY &&
       env.WEBHOOKS_QUEUE &&
+      env.OUTBOUND_QUEUE &&
       env.WORKSPACE_REALTIME,
   )
 }
@@ -874,6 +971,45 @@ function inboxErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) 
   return c.json({ error: { code: error.code, message: error.message } }, status)
 }
 
+function assignmentErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (!(error instanceof AssignmentError)) throw error
+  const status =
+    error.code === 'FORBIDDEN'
+      ? 403
+      : error.code === 'NOT_FOUND'
+        ? 404
+        : error.code === 'ALREADY_ASSIGNED' || error.code === 'CONVERSATION_CLOSED'
+          ? 409
+          : 400
+  return c.json({ error: { code: error.code, message: error.message } }, status)
+}
+
+function replyErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (!(error instanceof ReplyError)) throw error
+  const status =
+    error.code === 'FORBIDDEN'
+      ? 403
+      : error.code === 'NOT_FOUND'
+        ? 404
+        : error.code === 'REPLY_WINDOW_CLOSED' || error.code === 'CONVERSATION_CLOSED'
+          ? 409
+          : 400
+  return c.json({ error: { code: error.code, message: error.message } }, status)
+}
+
+async function publishInboxChange(
+  env: Bindings,
+  workspaceId: string,
+  entityId: string,
+  type: 'conversation.changed' | 'message.changed',
+) {
+  try {
+    await publishRealtime(env.WORKSPACE_REALTIME, workspaceId, { type, entityId })
+  } catch {
+    console.warn(JSON.stringify({ event: 'realtime_publish_failed', type }))
+  }
+}
+
 function notReady(c: Context<{ Bindings: Bindings }>) {
   return c.json(
     { ok: false, error: { code: 'NOT_READY', message: 'Database is unavailable' } },
@@ -1038,12 +1174,113 @@ export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bind
   }
 }
 
+export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  for (const queueMessage of batch.messages) {
+    const job = facebookOutboundJobSchema.safeParse(queueMessage.body)
+    if (!job.success) {
+      queueMessage.ack()
+      continue
+    }
+
+    let claimed: Awaited<ReturnType<typeof claimOutboundMessage>>
+    try {
+      claimed = await withDatabase(env, (db) =>
+        claimOutboundMessage(db, { messageId: job.data.messageId }),
+      )
+    } catch {
+      queueMessage.retry()
+      continue
+    }
+    if (!claimed) {
+      queueMessage.ack()
+      continue
+    }
+
+    let pageAccessToken = ''
+    try {
+      if (!isFacebookReplyWindowOpen(claimed.eligibleUntil)) {
+        await withDatabase(env, (db) =>
+          failOutboundMessage(db, {
+            messageId: claimed.id,
+            attemptId: claimed.attemptId,
+            failureCode: 'REPLY_WINDOW_CLOSED',
+            failureMessage: 'Messenger reply window is closed',
+            attempt: { message: 'Messenger reply window is closed' },
+          }),
+        )
+        await publishInboxChange(env, claimed.workspaceId, job.data.messageId, 'message.changed')
+        queueMessage.ack()
+        continue
+      }
+      if (!claimed.text) throw new Error('Outbound text is missing')
+
+      pageAccessToken = await decryptFacebookToken(
+        {
+          ciphertext: claimed.encryptedPageAccessToken,
+          iv: claimed.tokenIv,
+          keyVersion: claimed.tokenKeyVersion,
+        },
+        env.TOKEN_ENCRYPTION_KEY,
+      )
+      const sent = await createFacebookAdapter({
+        appId: env.META_APP_ID,
+        appSecret: env.META_APP_SECRET,
+        graphApiVersion: env.META_GRAPH_API_VERSION,
+        graphBaseUrl: env.FACEBOOK_GRAPH_BASE_URL,
+      }).sendText(claimed.pageId, claimed.externalUserId, claimed.text, pageAccessToken)
+      await withDatabase(env, (db) =>
+        completeOutboundMessage(db, {
+          messageId: claimed.id,
+          attemptId: claimed.attemptId,
+          externalMessageId: sent.externalMessageId,
+        }),
+      )
+      await publishInboxChange(env, claimed.workspaceId, job.data.messageId, 'message.changed')
+      queueMessage.ack()
+    } catch (error) {
+      const providerFailure = redactedFacebookFailure(error, [
+        pageAccessToken,
+        env.META_APP_SECRET,
+        env.TOKEN_ENCRYPTION_KEY,
+      ])
+      const ambiguous = error instanceof FacebookProviderError && error.status === 0
+      try {
+        await withDatabase(env, (db) =>
+          failOutboundMessage(db, {
+            messageId: claimed.id,
+            attemptId: claimed.attemptId,
+            failureCode: ambiguous ? 'AMBIGUOUS_DELIVERY' : 'FACEBOOK_DELIVERY_FAILED',
+            failureMessage: ambiguous
+              ? 'Delivery result was ambiguous'
+              : 'Facebook delivery failed',
+            attempt: {
+              httpStatus:
+                error instanceof FacebookProviderError && error.status > 0 ? error.status : null,
+              code: error instanceof FacebookProviderError ? error.providerCode : null,
+              subcode: error instanceof FacebookProviderError ? error.providerSubcode : null,
+              type: error instanceof FacebookProviderError ? error.providerType : null,
+              message: providerFailure.message,
+            },
+          }),
+        )
+        await publishInboxChange(env, claimed.workspaceId, job.data.messageId, 'message.changed')
+        queueMessage.ack()
+      } catch {
+        queueMessage.retry()
+      }
+    }
+  }
+}
+
 export { app, hasValidSignature, WorkspaceRealtime }
 
 const worker = {
   fetch: (request: Request, env: Bindings, executionContext: ExecutionContext) =>
     app.fetch(request, env, executionContext),
-  queue: handleWebhookBatch,
+  queue: (batch: MessageBatch<unknown>, env: Bindings) =>
+    batch.queue === 'deepsales-outbound'
+      ? handleOutboundBatch(batch, env)
+      : handleWebhookBatch(batch, env),
 }
 
 export default worker

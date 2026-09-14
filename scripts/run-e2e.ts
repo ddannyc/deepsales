@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
 import { dirname, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -99,7 +100,7 @@ async function freePort() {
   return port
 }
 
-function workerBindings(baseUrl: string) {
+function workerBindings(baseUrl: string, facebookGraphBaseUrl: string) {
   return {
     APP_URL: baseUrl,
     BETTER_AUTH_SECRET: 'e2e-only-better-auth-secret-32-characters',
@@ -107,11 +108,17 @@ function workerBindings(baseUrl: string) {
     META_APP_SECRET: 'e2e-meta-app-secret',
     META_VERIFY_TOKEN: 'e2e-meta-verify-token',
     META_GRAPH_API_VERSION: 'v26.0',
+    FACEBOOK_GRAPH_BASE_URL: facebookGraphBaseUrl,
     TOKEN_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
   }
 }
 
-function startWorker(port: number, connectionString: string, baseUrl: string) {
+function startWorker(
+  port: number,
+  connectionString: string,
+  baseUrl: string,
+  facebookGraphBaseUrl: string,
+) {
   const args = [
     'exec',
     'wrangler',
@@ -125,7 +132,7 @@ function startWorker(port: number, connectionString: string, baseUrl: string) {
     String(port),
     '--show-interactive-dev-session=false',
   ]
-  for (const [key, value] of Object.entries(workerBindings(baseUrl))) {
+  for (const [key, value] of Object.entries(workerBindings(baseUrl, facebookGraphBaseUrl))) {
     args.push('--var', `${key}:${value}`)
   }
 
@@ -140,6 +147,50 @@ function startWorker(port: number, connectionString: string, baseUrl: string) {
     stdio: 'inherit',
     windowsHide: true,
   })
+}
+
+async function startFakeFacebook() {
+  let messageNumber = 0
+  const server = createHttpServer(async (request, response) => {
+    if (request.method !== 'POST' || !request.url?.endsWith('/messages')) {
+      response.statusCode = 404
+      response.end()
+      return
+    }
+
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
+      message?: { text?: string }
+    }
+    response.setHeader('content-type', 'application/json')
+    if (body.message?.text === 'force failure') {
+      response.statusCode = 400
+      response.end(
+        JSON.stringify({
+          error: {
+            code: 100,
+            error_subcode: 10,
+            type: 'OAuthException',
+            message: 'Fake Facebook rejection',
+          },
+        }),
+      )
+      return
+    }
+
+    response.end(JSON.stringify({ message_id: `fake-message-${++messageNumber}` }))
+  })
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('Could not start fake Facebook')
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  }
 }
 
 async function waitForReady(baseUrl: string, worker: ChildProcess) {
@@ -199,7 +250,8 @@ async function main() {
 
   const port = await freePort()
   const baseUrl = `http://127.0.0.1:${port}`
-  const worker = startWorker(port, connectionString, baseUrl)
+  const fakeFacebook = await startFakeFacebook()
+  const worker = startWorker(port, connectionString, baseUrl, fakeFacebook.baseUrl)
 
   try {
     await waitForReady(baseUrl, worker)
@@ -212,6 +264,7 @@ async function main() {
     await run(['exec', 'playwright', 'test', ...process.argv.slice(2)], testEnv)
   } finally {
     await stopWorker(worker)
+    await fakeFacebook.close()
   }
 }
 

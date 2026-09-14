@@ -36,10 +36,13 @@ export function createFacebookAdapter(
     appId: string
     appSecret: string
     graphApiVersion: string
+    graphBaseUrl?: string
   },
   fetcher: Fetcher = globalThis.fetch,
 ) {
-  const graphBase = `https://graph.facebook.com/${config.graphApiVersion}`
+  const graphBase =
+    config.graphBaseUrl?.replace(/\/$/, '') ??
+    `https://graph.facebook.com/${config.graphApiVersion}`
 
   return {
     async exchangeCode(code: string, redirectUri: string) {
@@ -118,6 +121,30 @@ export function createFacebookAdapter(
         throw invalidProviderResponse()
       }
     },
+
+    async sendText(
+      pageId: string,
+      externalUserId: string,
+      text: string,
+      pageAccessToken: string,
+    ): Promise<{ externalMessageId: string }> {
+      const url = new URL(`${graphBase}/${encodeURIComponent(pageId)}/messages`)
+      const result = await graphRequest(fetcher, url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${pageAccessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          recipient: { id: externalUserId },
+          messaging_type: 'RESPONSE',
+          message: { text },
+        }),
+      })
+      const sent = z.object({ message_id: z.string().min(1) }).safeParse(result)
+      if (!sent.success) throw invalidProviderResponse()
+      return { externalMessageId: sent.data.message_id }
+    },
   }
 }
 
@@ -190,6 +217,10 @@ export function redactedFacebookFailure(
   }
 }
 
+export function isFacebookReplyWindowOpen(eligibleUntil: Date | null, now = new Date()) {
+  return Boolean(eligibleUntil && eligibleUntil.getTime() > now.getTime())
+}
+
 export type FacebookInboundEvent = {
   pageId: string
   externalUserId: string
@@ -218,6 +249,14 @@ export const facebookWebhookJobSchema = z.object({
 })
 
 export type FacebookWebhookJob = z.infer<typeof facebookWebhookJobSchema>
+
+export const facebookOutboundJobSchema = z.object({
+  v: z.literal(1),
+  type: z.literal('facebook.outbound'),
+  messageId: z.string().uuid(),
+})
+
+export type FacebookOutboundJob = z.infer<typeof facebookOutboundJobSchema>
 
 export function normalizeFacebookWebhook(payload: unknown, expectedPageId?: string) {
   if (!isRecord(payload) || payload.object !== 'page' || !Array.isArray(payload.entry)) return []

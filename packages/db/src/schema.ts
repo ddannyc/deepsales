@@ -431,6 +431,29 @@ export const message = pgTable(
   ],
 )
 
+export const facebookDeliveryAttempt = pgTable(
+  'facebook_delivery_attempt',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    messageId: uuid('message_id')
+      .notNull()
+      .references(() => message.id, { onDelete: 'cascade' }),
+    attemptNumber: integer('attempt_number').notNull(),
+    httpStatus: integer('http_status'),
+    code: integer(),
+    subcode: integer(),
+    type: text(),
+    message: text(),
+    startedAt: timestamp('started_at', { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [
+    unique().on(table.messageId, table.attemptNumber),
+    index('facebook_delivery_attempt_message_idx').on(table.messageId),
+    check('facebook_delivery_attempt_number', sql`${table.attemptNumber} > 0`),
+  ],
+)
+
 export const facebookWebhookReceipt = pgTable(
   'facebook_webhook_receipt',
   {

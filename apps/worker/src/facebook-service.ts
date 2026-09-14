@@ -28,6 +28,7 @@ export type FacebookServiceConfig = {
   appId: string
   appSecret: string
   graphApiVersion: string
+  graphBaseUrl?: string
   tokenEncryptionKey: string
 }
 
@@ -37,6 +38,7 @@ export function facebookServiceConfig(env: Bindings): FacebookServiceConfig {
     appId: env.META_APP_ID,
     appSecret: env.META_APP_SECRET,
     graphApiVersion: env.META_GRAPH_API_VERSION,
+    graphBaseUrl: env.FACEBOOK_GRAPH_BASE_URL,
     tokenEncryptionKey: env.TOKEN_ENCRYPTION_KEY,
   }
 }

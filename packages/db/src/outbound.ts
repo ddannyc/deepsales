@@ -1,0 +1,350 @@
+import { and, eq, isNull, sql } from 'drizzle-orm'
+import type { Database } from './database'
+import {
+  channelIdentity,
+  channel,
+  conversation,
+  facebookDeliveryAttempt,
+  facebookChannelConfig,
+  facebookMessagingWindow,
+  message,
+  member,
+  workspaceUserAccess,
+} from './schema'
+
+export const MAX_OUTBOUND_TEXT_LENGTH = 2_000
+export const OUTBOUND_CLAIM_TIMEOUT_MS = 5 * 60 * 1_000
+
+export type ReplyErrorCode =
+  | 'FORBIDDEN'
+  | 'NOT_FOUND'
+  | 'INVALID_REQUEST'
+  | 'CONVERSATION_CLOSED'
+  | 'REPLY_WINDOW_CLOSED'
+
+export class ReplyError extends Error {
+  constructor(
+    readonly code: ReplyErrorCode,
+    message: string = code,
+  ) {
+    super(message)
+  }
+}
+
+type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
+type ReplyWindowCheck = (eligibleUntil: Date | null, now: Date) => boolean
+
+export async function createHumanReply(
+  db: Database,
+  input: {
+    workspaceId: string
+    conversationId: string
+    actingUserId: string
+    text: string
+    now?: Date
+  },
+  isReplyWindowOpen: ReplyWindowCheck = defaultReplyWindowCheck,
+) {
+  if (typeof input.text !== 'string') throw new ReplyError('INVALID_REQUEST', 'Text is required')
+  const text = input.text.trim()
+  if (!text) throw new ReplyError('INVALID_REQUEST', 'Text is required')
+  if (text.length > MAX_OUTBOUND_TEXT_LENGTH) {
+    throw new ReplyError('INVALID_REQUEST', 'Text is too long')
+  }
+
+  const now = input.now ?? new Date()
+  return db.transaction(async (tx) => {
+    const conversationLock = await tx.execute(
+      sql`select id
+          from ${conversation}
+          where id = ${input.conversationId} and workspace_id = ${input.workspaceId}
+          for update`,
+    )
+    if (!conversationLock.rows.length) throw new ReplyError('NOT_FOUND', 'Conversation not found')
+
+    const [viewer] = await tx
+      .select({ memberId: member.id, type: member.type, status: member.status })
+      .from(member)
+      .innerJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
+      .where(
+        and(
+          eq(member.workspaceId, input.workspaceId),
+          eq(workspaceUserAccess.userId, input.actingUserId),
+        ),
+      )
+      .limit(1)
+    if (viewer?.type !== 'HUMAN' || viewer.status !== 'ACTIVE') {
+      throw new ReplyError('FORBIDDEN', 'An active human member is required')
+    }
+
+    const [current] = await tx
+      .select({
+        id: conversation.id,
+        status: conversation.status,
+        assigneeMemberId: conversation.assigneeMemberId,
+        channelIdentityId: conversation.channelIdentityId,
+        channelId: channelIdentity.channelId,
+        latestMessageAt: conversation.latestMessageAt,
+      })
+      .from(conversation)
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+      .where(eq(conversation.id, input.conversationId))
+      .limit(1)
+    if (!current) throw new ReplyError('NOT_FOUND', 'Conversation not found')
+    if (current.status !== 'OPEN') {
+      throw new ReplyError('CONVERSATION_CLOSED', 'Conversation is closed')
+    }
+    if (current.assigneeMemberId !== viewer.memberId) {
+      throw new ReplyError('FORBIDDEN', 'Only the current human assignee may reply')
+    }
+
+    const [replyWindow] = await tx
+      .select({ eligibleUntil: facebookMessagingWindow.eligibleUntil })
+      .from(facebookMessagingWindow)
+      .where(eq(facebookMessagingWindow.channelIdentityId, current.channelIdentityId))
+      .limit(1)
+    if (!isReplyWindowOpen(replyWindow?.eligibleUntil ?? null, now)) {
+      throw new ReplyError('REPLY_WINDOW_CLOSED', 'Messenger reply window is closed')
+    }
+
+    const [created] = await tx
+      .insert(message)
+      .values({
+        conversationId: current.id,
+        channelId: current.channelId,
+        direction: 'OUTBOUND',
+        senderType: 'MEMBER',
+        senderMemberId: viewer.memberId,
+        messageType: 'TEXT',
+        text,
+        deliveryState: 'PENDING',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning()
+    if (!created) throw new ReplyError('INVALID_REQUEST', 'Message was not created')
+
+    await tx
+      .update(conversation)
+      .set({
+        latestMessageAt: later(current.latestMessageAt, now),
+        lastOutboundMessageAt: now,
+        updatedAt: now,
+      })
+      .where(eq(conversation.id, current.id))
+
+    return { message: created }
+  })
+}
+
+export async function claimOutboundMessage(
+  db: Database,
+  input: { messageId: string; now?: Date; claimTimeoutMs?: number },
+) {
+  const now = input.now ?? new Date()
+  const timeout = input.claimTimeoutMs ?? OUTBOUND_CLAIM_TIMEOUT_MS
+  return db.transaction(async (tx) => {
+    const [current] = await tx
+      .select({
+        id: message.id,
+        deliveryState: message.deliveryState,
+        deliveryStartedAt: message.deliveryStartedAt,
+      })
+      .from(message)
+      .where(and(eq(message.id, input.messageId), eq(message.direction, 'OUTBOUND')))
+      .for('update')
+      .limit(1)
+    if (!current) return null
+
+    if (current.deliveryState !== 'PENDING' || current.deliveryStartedAt) {
+      if (
+        current.deliveryState === 'PENDING' &&
+        current.deliveryStartedAt &&
+        current.deliveryStartedAt.getTime() <= now.getTime() - timeout
+      ) {
+        await failClaimedMessage(
+          tx,
+          current.id,
+          now,
+          'AMBIGUOUS_DELIVERY',
+          'Delivery result was ambiguous',
+        )
+      }
+      return null
+    }
+
+    const [claimed] = await tx
+      .update(message)
+      .set({ deliveryStartedAt: now, updatedAt: now })
+      .where(
+        and(
+          eq(message.id, current.id),
+          eq(message.deliveryState, 'PENDING'),
+          isNull(message.deliveryStartedAt),
+        ),
+      )
+      .returning({ id: message.id })
+    if (!claimed) return null
+
+    const [attempt] = await tx
+      .insert(facebookDeliveryAttempt)
+      .values({ messageId: current.id, attemptNumber: 1, startedAt: now })
+      .returning({
+        id: facebookDeliveryAttempt.id,
+        attemptNumber: facebookDeliveryAttempt.attemptNumber,
+      })
+    if (!attempt) throw new ReplyError('INVALID_REQUEST', 'Delivery attempt was not created')
+
+    const [delivery] = await tx
+      .select({
+        id: message.id,
+        conversationId: message.conversationId,
+        workspaceId: conversation.workspaceId,
+        channelId: message.channelId,
+        text: message.text,
+        deliveryStartedAt: message.deliveryStartedAt,
+        channelIdentityId: channelIdentity.id,
+        externalUserId: channelIdentity.externalUserId,
+        eligibleUntil: facebookMessagingWindow.eligibleUntil,
+        pageId: facebookChannelConfig.pageId,
+        encryptedPageAccessToken: facebookChannelConfig.encryptedPageAccessToken,
+        tokenIv: facebookChannelConfig.tokenIv,
+        tokenKeyVersion: facebookChannelConfig.tokenKeyVersion,
+      })
+      .from(message)
+      .innerJoin(conversation, eq(conversation.id, message.conversationId))
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+      .innerJoin(channel, eq(channel.id, message.channelId))
+      .innerJoin(facebookChannelConfig, eq(facebookChannelConfig.channelId, channel.id))
+      .leftJoin(
+        facebookMessagingWindow,
+        eq(facebookMessagingWindow.channelIdentityId, channelIdentity.id),
+      )
+      .where(eq(message.id, current.id))
+      .limit(1)
+    if (!delivery) throw new ReplyError('NOT_FOUND', 'Message was not found')
+    return { ...delivery, attemptId: attempt.id, attemptNumber: attempt.attemptNumber }
+  })
+}
+
+export async function completeOutboundMessage(
+  db: Database,
+  input: { messageId: string; attemptId: string; externalMessageId: string; now?: Date },
+) {
+  const now = input.now ?? new Date()
+  return db.transaction(async (tx) => {
+    const [updated] = await tx
+      .update(message)
+      .set({
+        deliveryState: 'SENT',
+        externalMessageId: input.externalMessageId,
+        providerSentAt: now,
+        deliveryCompletedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(message.id, input.messageId),
+          eq(message.direction, 'OUTBOUND'),
+          eq(message.deliveryState, 'PENDING'),
+          sql`${message.deliveryStartedAt} is not null`,
+        ),
+      )
+      .returning()
+    if (!updated) return null
+    await tx
+      .update(facebookDeliveryAttempt)
+      .set({ completedAt: now })
+      .where(eq(facebookDeliveryAttempt.id, input.attemptId))
+    return updated
+  })
+}
+
+export async function failOutboundMessage(
+  db: Database,
+  input: {
+    messageId: string
+    attemptId: string
+    failureCode: string
+    failureMessage: string
+    attempt?: {
+      httpStatus?: number | null
+      code?: number | null
+      subcode?: number | null
+      type?: string | null
+      message?: string | null
+    }
+    now?: Date
+  },
+) {
+  const now = input.now ?? new Date()
+  return db.transaction(async (tx) => {
+    const [updated] = await tx
+      .update(message)
+      .set({
+        deliveryState: 'FAILED',
+        deliveryCompletedAt: now,
+        failureCode: input.failureCode,
+        failureMessage: input.failureMessage.slice(0, 500),
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(message.id, input.messageId),
+          eq(message.direction, 'OUTBOUND'),
+          eq(message.deliveryState, 'PENDING'),
+          sql`${message.deliveryStartedAt} is not null`,
+        ),
+      )
+      .returning()
+    if (!updated) return null
+    await tx
+      .update(facebookDeliveryAttempt)
+      .set({
+        httpStatus: input.attempt?.httpStatus ?? null,
+        code: input.attempt?.code ?? null,
+        subcode: input.attempt?.subcode ?? null,
+        type: input.attempt?.type ?? null,
+        message: input.attempt?.message?.slice(0, 500) ?? null,
+        completedAt: now,
+      })
+      .where(eq(facebookDeliveryAttempt.id, input.attemptId))
+    return updated
+  })
+}
+
+async function failClaimedMessage(
+  tx: Transaction,
+  messageId: string,
+  now: Date,
+  failureCode: string,
+  failureMessage: string,
+) {
+  await tx
+    .update(message)
+    .set({
+      deliveryState: 'FAILED',
+      deliveryCompletedAt: now,
+      failureCode,
+      failureMessage,
+      updatedAt: now,
+    })
+    .where(and(eq(message.id, messageId), eq(message.deliveryState, 'PENDING')))
+  await tx
+    .update(facebookDeliveryAttempt)
+    .set({ message: failureMessage, completedAt: now })
+    .where(
+      and(
+        eq(facebookDeliveryAttempt.messageId, messageId),
+        isNull(facebookDeliveryAttempt.completedAt),
+      ),
+    )
+}
+
+function defaultReplyWindowCheck(eligibleUntil: Date | null, now: Date) {
+  return Boolean(eligibleUntil && eligibleUntil.getTime() > now.getTime())
+}
+
+function later(first: Date | null, second: Date) {
+  return !first || second.getTime() > first.getTime() ? second : first
+}

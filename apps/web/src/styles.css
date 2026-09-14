@@ -523,6 +523,16 @@ form {
 .thread-state strong {
   color: var(--ink);
 }
+.thread-actions {
+  display: grid;
+  justify-items: end;
+  gap: 12px;
+}
+.reply-window {
+  margin: 8px 0 0;
+  color: #708495;
+  font-size: 12px;
+}
 .message-list {
   display: flex;
   flex-direction: column;
@@ -553,6 +563,47 @@ form {
   margin-top: 10px;
   color: #708495;
   font-size: 11px;
+}
+.delivery-failure {
+  color: var(--coral);
+  font-weight: 700;
+}
+.reply-composer {
+  gap: 10px;
+  border-top: 1px solid #c8d7e0;
+  padding: 16px 22px 20px;
+  background: white;
+}
+.reply-composer label {
+  color: #41596b;
+  font-size: 13px;
+  font-weight: 700;
+}
+.reply-composer textarea {
+  min-height: 76px;
+  resize: vertical;
+  border: 1px solid #b9cbd7;
+  padding: 10px;
+  color: var(--ink);
+  background: #f9fbfc;
+}
+.reply-composer .primary {
+  justify-self: end;
+  min-height: 40px;
+  margin-top: 0;
+  padding: 9px 14px;
+}
+.reply-composer textarea:disabled,
+.reply-composer .primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.reply-hint {
+  margin: 0;
+  border-top: 1px solid #c8d7e0;
+  padding: 16px 22px 20px;
+  color: #708495;
+  font-size: 13px;
 }
 .thread-empty {
   align-self: center;

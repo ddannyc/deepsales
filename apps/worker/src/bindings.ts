@@ -4,10 +4,12 @@ export type Bindings = {
   BETTER_AUTH_SECRET: string
   HYPERDRIVE: Hyperdrive
   WEBHOOKS_QUEUE?: Queue
+  OUTBOUND_QUEUE?: Queue
   WORKSPACE_REALTIME?: DurableObjectNamespace
   META_APP_ID: string
   META_APP_SECRET: string
   META_VERIFY_TOKEN: string
   META_GRAPH_API_VERSION: string
+  FACEBOOK_GRAPH_BASE_URL?: string
   TOKEN_ENCRYPTION_KEY: string
 }

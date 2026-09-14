@@ -16,10 +16,20 @@
     }
   ],
   "queues": {
-    "producers": [{ "binding": "WEBHOOKS_QUEUE", "queue": "deepsales-webhooks" }],
+    "producers": [
+      { "binding": "WEBHOOKS_QUEUE", "queue": "deepsales-webhooks" },
+      { "binding": "OUTBOUND_QUEUE", "queue": "deepsales-outbound" }
+    ],
     "consumers": [
       {
         "queue": "deepsales-webhooks",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "deepsales-dlq"
+      },
+      {
+        "queue": "deepsales-outbound",
         "max_batch_size": 10,
         "max_batch_timeout": 5,
         "max_retries": 3,

@@ -6,6 +6,8 @@ import {
   encryptFacebookToken,
   FacebookProviderError,
   facebookWebhookJobSchema,
+  facebookOutboundJobSchema,
+  isFacebookReplyWindowOpen,
   normalizeFacebookWebhook,
   redactedFacebookFailure,
 } from './facebook'
@@ -65,6 +67,20 @@ describe('Facebook adapter', () => {
         },
       }),
     ).toEqual(expect.objectContaining({ v: 1, type: 'facebook.inbound' }))
+  })
+
+  it('validates the versioned outbound queue contract', () => {
+    expect(
+      facebookOutboundJobSchema.parse({
+        v: 1,
+        type: 'facebook.outbound',
+        messageId: '00000000-0000-4000-8000-000000000001',
+      }),
+    ).toEqual({
+      v: 1,
+      type: 'facebook.outbound',
+      messageId: '00000000-0000-4000-8000-000000000001',
+    })
   })
 
   it('builds OAuth with only the approved permissions', () => {
@@ -184,5 +200,39 @@ describe('Facebook adapter', () => {
       providerCode: 190,
       providerSubcode: 463,
     })
+  })
+
+  it('sends a response text to the recipient with Messenger response semantics', async () => {
+    const fetcher = vi.fn().mockResolvedValue(Response.json({ message_id: 'outbound-1' }))
+    const adapter = createFacebookAdapter(
+      { appId: 'app-1', appSecret: 'app-secret', graphApiVersion: 'v26.0' },
+      fetcher,
+    )
+
+    await expect(adapter.sendText('page-1', 'customer-1', 'hello', 'page-token')).resolves.toEqual({
+      externalMessageId: 'outbound-1',
+    })
+
+    expect(fetcher).toHaveBeenCalledOnce()
+    const [url, init] = fetcher.mock.calls[0] ?? []
+    expect(url).toEqual(new URL('https://graph.facebook.com/v26.0/page-1/messages'))
+    expect(init).toEqual(
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer page-token' }),
+        body: JSON.stringify({
+          recipient: { id: 'customer-1' },
+          messaging_type: 'RESPONSE',
+          message: { text: 'hello' },
+        }),
+      }),
+    )
+  })
+
+  it('only permits a response while the stored Messenger window is open', () => {
+    const now = new Date('2026-09-14T00:00:00.000Z')
+    expect(isFacebookReplyWindowOpen(new Date('2026-09-14T00:00:01.000Z'), now)).toBe(true)
+    expect(isFacebookReplyWindowOpen(new Date('2026-09-14T00:00:00.000Z'), now)).toBe(false)
+    expect(isFacebookReplyWindowOpen(null, now)).toBe(false)
   })
 })
