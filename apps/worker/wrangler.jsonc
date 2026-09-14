@@ -12,7 +12,7 @@
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "00000000000000000000000000000000"
+      "id": "REDACTED_HYPERDRIVE_ID"
     }
   ],
   "ratelimits": [
@@ -26,7 +26,7 @@
     "enabled": true
   },
   "vars": {
-    "META_APP_ID": "your-meta-app-id",
+    "META_APP_ID": "REDACTED_META_APP_ID",
     "META_GRAPH_API_VERSION": "v26.0",
     "M0_FIXED_REPLY": "M0 received your message."
   }
