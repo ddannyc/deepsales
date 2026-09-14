@@ -10,6 +10,8 @@ import {
   createFileKnowledgeDocument,
   createInlineKnowledgeDocument,
   createKnowledgeBase,
+  deleteKnowledgeDocument,
+  getKnowledgeDocumentStorageKey,
   knowledgeChunk,
   knowledgeDocument,
   user,
@@ -18,6 +20,7 @@ import type { Bindings } from './bindings'
 import { AlibabaEmbeddingProvider } from './ai'
 import { retrieveKnowledgeChunks } from './knowledge'
 import { handleDocumentsBatch } from './index'
+import { createObjectStorage } from './object-storage'
 
 const connectionString = process.env.DATABASE_URL
 const migrationsFolder = resolve(
@@ -150,6 +153,10 @@ describe.skipIf(!connectionString)('knowledge Worker consumer', () => {
     await handleDocumentsBatch(batch(queued), environment(objects))
 
     expect(queued.ack).toHaveBeenCalledOnce()
+    const duplicate = queueMessage(fixture.documentId)
+    await handleDocumentsBatch(batch(duplicate), environment(objects))
+    expect(duplicate.ack).toHaveBeenCalledOnce()
+    expect(objects.values.size).toBe(1)
     const [storedDocument] = await db
       .select({ status: knowledgeDocument.status })
       .from(knowledgeDocument)
@@ -202,6 +209,68 @@ describe.skipIf(!connectionString)('knowledge Worker consumer', () => {
       .where(eq(knowledgeDocument.id, fixture.documentId))
     expect(pending).toEqual({ status: 'UPLOADED', processingStartedAt: null })
   })
+
+  it('deletes a file object and document without affecting another document', async () => {
+    const fixture = await createFileFixture(db, 'TXT')
+    const otherStorageKey = `knowledge/${crypto.randomUUID()}`
+    const other = await createFileKnowledgeDocument(db, {
+      workspaceId: fixture.workspaceId,
+      knowledgeBaseId: fixture.knowledgeBaseId,
+      createdByUserId: fixture.ownerId,
+      name: 'other.txt',
+      sourceType: 'TXT',
+      storageKey: otherStorageKey,
+    })
+    await db.insert(knowledgeChunk).values([
+      {
+        knowledgeDocumentId: fixture.documentId,
+        knowledgeBaseId: fixture.knowledgeBaseId,
+        workspaceId: fixture.workspaceId,
+        ordinal: 0,
+        text: 'target',
+        embedding: vector(0),
+      },
+      {
+        knowledgeDocumentId: other.id,
+        knowledgeBaseId: fixture.knowledgeBaseId,
+        workspaceId: fixture.workspaceId,
+        ordinal: 0,
+        text: 'other',
+        embedding: vector(1),
+      },
+    ])
+    const objects = memoryBucket(fixture.storageKey, new TextEncoder().encode('target'))
+    objects.values.set(otherStorageKey, new TextEncoder().encode('other'))
+    const storage = createObjectStorage(objects)
+    const document = await getKnowledgeDocumentStorageKey(db, {
+      workspaceId: fixture.workspaceId,
+      knowledgeBaseId: fixture.knowledgeBaseId,
+      documentId: fixture.documentId,
+      actingUserId: fixture.ownerId,
+    })
+    await storage.delete(document.storageKey!)
+    await deleteKnowledgeDocument(db, {
+      workspaceId: fixture.workspaceId,
+      knowledgeBaseId: fixture.knowledgeBaseId,
+      documentId: fixture.documentId,
+      actingUserId: fixture.ownerId,
+    })
+
+    expect(objects.values.has(fixture.storageKey)).toBe(false)
+    expect(objects.values.has(otherStorageKey)).toBe(true)
+    expect(
+      await db
+        .select()
+        .from(knowledgeChunk)
+        .where(eq(knowledgeChunk.knowledgeDocumentId, fixture.documentId)),
+    ).toHaveLength(0)
+    expect(
+      await db
+        .select()
+        .from(knowledgeChunk)
+        .where(eq(knowledgeChunk.knowledgeDocumentId, other.id)),
+    ).toHaveLength(1)
+  })
 })
 
 async function createFixture(db: ReturnType<typeof createDatabase>) {
@@ -252,7 +321,13 @@ async function createFileFixture(
     sourceType,
     storageKey,
   })
-  return { documentId: document.id, storageKey }
+  return {
+    ownerId,
+    workspaceId: workspace.id,
+    knowledgeBaseId: base.id,
+    documentId: document.id,
+    storageKey,
+  }
 }
 
 function environment(objects?: R2Bucket): Bindings {

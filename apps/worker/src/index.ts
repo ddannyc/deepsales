@@ -604,10 +604,13 @@ app.post(
           userId: session.user.id,
         })
         const form = await c.req.raw.formData().catch(() => null)
-        const value = form?.get('file')
-        if (!(value instanceof File)) {
+        const fileInput = z.object({ file: z.instanceof(File) }).safeParse({
+          file: form?.get('file'),
+        })
+        if (!fileInput.success) {
           return c.json({ error: { code: 'INVALID_REQUEST', message: 'Choose a file' } }, 400)
         }
+        const value = fileInput.data.file
         const fileType = knowledgeFileTypeForName(value.name)
         if (!fileType) {
           return c.json(
@@ -618,15 +621,15 @@ app.post(
           )
         }
 
+        const documentInput = {
+          workspaceId: c.req.param('workspaceId'),
+          knowledgeBaseId: c.req.param('knowledgeBaseId'),
+          createdByUserId: session.user.id,
+          name: displayFileName(value.name),
+          sourceType: fileType.sourceType,
+        }
         const createFailure = async (failureCode: string) => {
-          const document = await createFileKnowledgeDocument(db, {
-            workspaceId: c.req.param('workspaceId'),
-            knowledgeBaseId: c.req.param('knowledgeBaseId'),
-            createdByUserId: session.user.id,
-            name: displayFileName(value.name),
-            sourceType: fileType.sourceType,
-            failureCode,
-          })
+          const document = await createFileKnowledgeDocument(db, { ...documentInput, failureCode })
           await publishKnowledgeChange(c.env, c.req.param('workspaceId'), document.id)
           return c.json({ document }, 201)
         }
@@ -655,10 +658,7 @@ app.post(
           let document: Awaited<ReturnType<typeof createFileKnowledgeDocument>>
           try {
             document = await createFileKnowledgeDocument(db, {
-              workspaceId: c.req.param('workspaceId'),
-              knowledgeBaseId: c.req.param('knowledgeBaseId'),
-              createdByUserId: session.user.id,
-              name: displayFileName(value.name),
+              ...documentInput,
               sourceType: validated.sourceType,
               storageKey,
             })

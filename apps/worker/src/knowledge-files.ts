@@ -1,9 +1,8 @@
 import mammoth from 'mammoth'
+import type { KnowledgeFileSourceType } from '@deepsales/db'
 import { extractText, getDocumentProxy } from 'unpdf'
 
 export const MAX_KNOWLEDGE_FILE_BYTES = 10 * 1024 * 1024
-
-export type KnowledgeFileSourceType = 'PDF' | 'DOCX' | 'TXT' | 'MARKDOWN'
 
 export type KnowledgeFileDescriptor = {
   extension: 'pdf' | 'docx' | 'txt' | 'md' | 'markdown'
@@ -105,10 +104,11 @@ export async function extractKnowledgeText(
       return (await extractText(pdf, { mergePages: true })).text
     }
 
-    const result = await (mammoth as unknown as MammothRawText).extractRawText(
-      { arrayBuffer: bytes.slice().buffer, buffer: bytes },
-      { externalFileAccess: false },
-    )
+    // Mammoth raw-text extraction does not resolve external parts; unlike HTML conversion it has no external file option.
+    const result = await (mammoth as unknown as MammothRawText).extractRawText({
+      arrayBuffer: bytes.slice().buffer,
+      buffer: bytes,
+    })
     if (result.messages.some(({ type }) => type === 'error')) {
       throw new Error('Mammoth reported an extraction error')
     }
@@ -131,10 +131,7 @@ function hasPrefix(bytes: Uint8Array, prefix: number[]) {
 }
 
 type MammothRawText = {
-  extractRawText(
-    input: { arrayBuffer: ArrayBuffer; buffer: Uint8Array },
-    options?: { externalFileAccess?: boolean },
-  ): Promise<{
+  extractRawText(input: { arrayBuffer: ArrayBuffer; buffer: Uint8Array }): Promise<{
     value: string
     messages: Array<{ type: string }>
   }>

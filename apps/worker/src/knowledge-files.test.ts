@@ -91,10 +91,10 @@ describe('knowledge file extraction', () => {
     await expect(
       extractKnowledgeText('DOCX', new Uint8Array([0x50, 0x4b, 0x03, 0x04])),
     ).resolves.toBe('Docx text')
-    expect(extractRawText).toHaveBeenCalledWith(
-      { arrayBuffer: expect.any(ArrayBuffer), buffer: expect.any(Uint8Array) },
-      { externalFileAccess: false },
-    )
+    expect(extractRawText).toHaveBeenCalledWith({
+      arrayBuffer: expect.any(ArrayBuffer),
+      buffer: expect.any(Uint8Array),
+    })
   })
 
   it('turns extractor errors into a safe permanent failure', async () => {
