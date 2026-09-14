@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   createFacebookAdapter: vi.fn(),
   decryptFacebookToken: vi.fn(),
+  getFacebookChannelForManager: vi.fn(),
   getFacebookOAuthToken: vi.fn(),
+  markFacebookChannelHealth: vi.fn(),
 }))
 
 vi.mock('@deepsales/db', () => ({
@@ -12,9 +14,9 @@ vi.mock('@deepsales/db', () => ({
   connectFacebookPages: vi.fn(),
   consumeFacebookOAuthState: vi.fn(),
   FacebookError: class FacebookError extends Error {},
-  getFacebookChannelForManager: vi.fn(),
+  getFacebookChannelForManager: mocks.getFacebookChannelForManager,
   getFacebookOAuthToken: mocks.getFacebookOAuthToken,
-  markFacebookChannelHealth: vi.fn(),
+  markFacebookChannelHealth: mocks.markFacebookChannelHealth,
   recordFacebookConnectionFailure: vi.fn(),
   startFacebookOAuth: vi.fn(),
   storeFacebookOAuthToken: vi.fn(),
@@ -29,7 +31,8 @@ vi.mock('./facebook', async () => {
   }
 })
 
-import { listFacebookOAuthPages } from './facebook-service'
+import { FacebookProviderError } from './facebook'
+import { listFacebookOAuthPages, recheckFacebookPage } from './facebook-service'
 
 describe('Facebook service provider contract', () => {
   beforeEach(() => {
@@ -40,6 +43,13 @@ describe('Facebook service provider contract', () => {
       userTokenKeyVersion: 'v1',
     })
     mocks.decryptFacebookToken.mockResolvedValue('user-token')
+    mocks.getFacebookChannelForManager.mockResolvedValue({
+      channelStatus: 'ACTIVE',
+      pageId: 'page-1',
+      encryptedPageAccessToken: 'ciphertext',
+      tokenIv: 'iv',
+      tokenKeyVersion: 'v1',
+    })
   })
 
   it('keeps Pages whose Meta task names grant messaging access', async () => {
@@ -94,5 +104,46 @@ describe('Facebook service provider contract', () => {
         tasks: ['PROFILE_PLUS_MODERATE', 'PROFILE_PLUS_MESSAGING'],
       },
     ])
+  })
+
+  it('rechecks subscription without requiring Page metadata permission', async () => {
+    const checkPage = vi
+      .fn()
+      .mockRejectedValue(
+        new FacebookProviderError(
+          400,
+          100,
+          null,
+          'OAuthException',
+          'pages_read_engagement permission required',
+        ),
+      )
+    const checkPageSubscription = vi.fn().mockResolvedValue(undefined)
+    mocks.createFacebookAdapter.mockReturnValue({ checkPage, checkPageSubscription })
+    mocks.decryptFacebookToken.mockResolvedValue('page-token')
+
+    await recheckFacebookPage(
+      {} as Parameters<typeof recheckFacebookPage>[0],
+      {
+        appUrl: 'https://example.com',
+        appId: 'app-1',
+        appSecret: 'app-secret',
+        graphApiVersion: 'v26.0',
+        tokenEncryptionKey: 'encryption-key',
+      },
+      { workspaceId: 'workspace-1', channelId: 'channel-1', userId: 'user-1' },
+    )
+
+    expect(checkPage).not.toHaveBeenCalled()
+    expect(checkPageSubscription).toHaveBeenCalledWith('page-1', 'page-token')
+    expect(mocks.markFacebookChannelHealth).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        workspaceId: 'workspace-1',
+        channelId: 'channel-1',
+        userId: 'user-1',
+        active: true,
+      }),
+    )
   })
 })

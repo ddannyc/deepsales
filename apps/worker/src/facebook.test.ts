@@ -110,7 +110,6 @@ describe('Facebook adapter', () => {
         }),
       )
       .mockResolvedValueOnce(Response.json({ success: true }))
-      .mockResolvedValueOnce(Response.json({ id: 'page-1', name: 'Support' }))
       .mockResolvedValueOnce(Response.json({ data: [{ id: 'app-1' }] }))
     const adapter = createFacebookAdapter(
       { appId: 'app-1', appSecret: 'app-secret', graphApiVersion: 'v26.0' },
@@ -130,10 +129,6 @@ describe('Facebook adapter', () => {
       },
     ])
     await adapter.subscribePage('page-1', 'page-token')
-    await expect(adapter.checkPage('page-1', 'page-token')).resolves.toEqual({
-      id: 'page-1',
-      name: 'Support',
-    })
     await expect(adapter.checkPageSubscription('page-1', 'page-token')).resolves.toBeUndefined()
 
     expect(fetcher.mock.calls[1]?.[1]).toEqual(

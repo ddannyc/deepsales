@@ -195,7 +195,6 @@ export async function recheckFacebookPage(
       },
       config.tokenEncryptionKey,
     )
-    await adapter.checkPage(channel.pageId, pageAccessToken)
     await adapter.checkPageSubscription(channel.pageId, pageAccessToken)
   } catch (error) {
     await markFacebookChannelHealth(db, {

@@ -102,18 +102,6 @@ export function createFacebookAdapter(
       }
     },
 
-    async checkPage(pageId: string, pageAccessToken: string) {
-      const url = new URL(`${graphBase}/${encodeURIComponent(pageId)}`)
-      url.searchParams.set('fields', 'id,name')
-      const result = await graphRequest(fetcher, url, {
-        method: 'GET',
-        headers: { Authorization: `Bearer ${pageAccessToken}` },
-      })
-      const page = z.object({ id: z.string().min(1), name: z.string().min(1) }).safeParse(result)
-      if (!page.success) throw invalidProviderResponse()
-      return page.data
-    },
-
     async checkPageSubscription(pageId: string, pageAccessToken: string) {
       const url = new URL(`${graphBase}/${encodeURIComponent(pageId)}/subscribed_apps`)
       const result = await graphRequest(fetcher, url, {
