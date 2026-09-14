@@ -533,6 +533,28 @@ form {
   color: #708495;
   font-size: 12px;
 }
+.conversation-actions,
+.transfer-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid #c8d7e0;
+  padding: 10px 22px;
+  background: white;
+}
+.transfer-controls label {
+  color: #41596b;
+  font-size: 13px;
+  font-weight: 700;
+}
+.transfer-controls select {
+  min-width: 180px;
+  border: 1px solid #b9cbd7;
+  padding: 8px;
+  color: var(--ink);
+  background: #f9fbfc;
+}
 .message-list {
   display: flex;
   flex-direction: column;

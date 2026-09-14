@@ -479,15 +479,29 @@ const inboxViews: Array<{ id: InboxView; label: string }> = [
 function InboxPage({ workspace }: { workspace: Workspace }) {
   const [view, setView] = useState<InboxView>('all-open')
   const [conversations, setConversations] = useState<InboxConversation[]>([])
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<InboxMessage[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [reply, setReply] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
+  const [transferOpen, setTransferOpen] = useState(false)
+  const [transferTargetId, setTransferTargetId] = useState('')
   const [clock, setClock] = useState(() => Date.now())
   const selectedIdRef = useRef<string | null>(null)
   const selectedConversation = conversations.find(({ id }) => id === selectedId)
+  const transferTargets = teamMembers.filter(
+    (member) =>
+      member.id !== selectedConversation?.assigneeMemberId &&
+      member.type === 'HUMAN' &&
+      member.status === 'ACTIVE' &&
+      member.channelIds.includes(selectedConversation?.channelId ?? ''),
+  )
+  const canManageSelected = Boolean(
+    selectedConversation &&
+      (workspace.role !== 'AGENT' || selectedConversation.assigneeMemberId === workspace.memberId),
+  )
   const replyWindowEligibleUntil = selectedConversation?.replyWindowEligibleUntil ?? null
 
   const refresh = useCallback(async () => {
@@ -517,6 +531,15 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     [workspace.id],
   )
 
+  useEffect(() => {
+    void fetch(`/api/workspaces/${workspace.id}/team`)
+      .then(async (response) => {
+        if (!response.ok) throw await responseError(response)
+        setTeamMembers(((await response.json()) as Team).members)
+      })
+      .catch((cause) => setError(inboxErrorMessage(cause)))
+  }, [workspace.id])
+
   const takeOver = useCallback(async () => {
     if (!selectedId) return
     setActionLoading(true)
@@ -531,6 +554,74 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       setActionLoading(false)
     }
   }, [refresh, refreshThread, selectedId, workspace.id])
+
+  const transfer = useCallback(async () => {
+    if (!selectedId || !transferTargetId) return
+    setActionLoading(true)
+    let confirmOverride = false
+    try {
+      for (;;) {
+        try {
+          await request(`/api/workspaces/${workspace.id}/conversations/${selectedId}/transfer`, {
+            targetMemberId: transferTargetId,
+            ...(confirmOverride ? { confirmOverride: true } : {}),
+          })
+          break
+        } catch (cause) {
+          if (
+            !confirmOverride &&
+            cause instanceof ApiError &&
+            cause.code === 'TRANSFER_CONFIRMATION_REQUIRED' &&
+            window.confirm('目标成员当前不可自动接收，是否仍然转接？')
+          ) {
+            confirmOverride = true
+            continue
+          }
+          throw cause
+        }
+      }
+      setTransferOpen(false)
+      setTransferTargetId('')
+      await refresh()
+      await refreshThread(selectedId)
+      setError('')
+    } catch (cause) {
+      setError(inboxErrorMessage(cause))
+    } finally {
+      setActionLoading(false)
+    }
+  }, [refresh, refreshThread, selectedId, transferTargetId, workspace.id])
+
+  const unassign = useCallback(async () => {
+    if (!selectedId) return
+    setActionLoading(true)
+    try {
+      await request(`/api/workspaces/${workspace.id}/conversations/${selectedId}/unassign`, {})
+      await refresh()
+      await refreshThread(selectedId)
+      setError('')
+    } catch (cause) {
+      setError(inboxErrorMessage(cause))
+    } finally {
+      setActionLoading(false)
+    }
+  }, [refresh, refreshThread, selectedId, workspace.id])
+
+  const close = useCallback(async () => {
+    if (!selectedId || !window.confirm('确定关闭这段对话吗？')) return
+    setActionLoading(true)
+    try {
+      await request(`/api/workspaces/${workspace.id}/conversations/${selectedId}/close`, {})
+      setTransferOpen(false)
+      setTransferTargetId('')
+      await refresh()
+      setError('')
+    } catch (cause) {
+      setError(inboxErrorMessage(cause))
+    } finally {
+      setActionLoading(false)
+    }
+  }, [refresh, selectedId, workspace.id])
 
   async function sendReply(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -577,6 +668,8 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
 
   useEffect(() => {
     selectedIdRef.current = selectedId
+    setTransferOpen(false)
+    setTransferTargetId('')
     if (!selectedId) {
       setMessages([])
       return
@@ -733,6 +826,65 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                     )}
                   </div>
                 </header>
+                {canManageSelected && (
+                  <div className="conversation-actions">
+                    {transferTargets.length > 0 && (
+                      <button
+                        className="secondary"
+                        type="button"
+                        disabled={actionLoading}
+                        onClick={() => setTransferOpen((open) => !open)}
+                      >
+                        转接
+                      </button>
+                    )}
+                    {selected.assigneeMemberId && (
+                      <button
+                        className="secondary"
+                        type="button"
+                        disabled={actionLoading}
+                        onClick={() => void unassign()}
+                      >
+                        取消分配
+                      </button>
+                    )}
+                    <button
+                      className="danger-button"
+                      type="button"
+                      disabled={actionLoading}
+                      onClick={() => void close()}
+                    >
+                      关闭对话
+                    </button>
+                  </div>
+                )}
+                {transferOpen && canManageSelected && (
+                  <div className="transfer-controls">
+                    <label htmlFor="transfer-target">转接给</label>
+                    <select
+                      id="transfer-target"
+                      aria-label="选择转接成员"
+                      value={transferTargetId}
+                      onChange={(event) => setTransferTargetId(event.currentTarget.value)}
+                      disabled={actionLoading}
+                    >
+                      <option value="">选择人工成员</option>
+                      {transferTargets.map((member) => (
+                        <option key={member.id} value={member.id}>
+                          {member.displayName ?? '未命名成员'}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className="secondary"
+                      type="button"
+                      disabled={!transferTargetId || actionLoading}
+                      onClick={() => void transfer()}
+                    >
+                      确认转接
+                    </button>
+                  </div>
+                )}
                 <div className="message-list" aria-live="polite">
                   {messages.length ? (
                     messages.map((message) => (
@@ -1516,6 +1668,12 @@ function facebookErrorMessage(cause: unknown): string {
 }
 
 function inboxErrorMessage(cause: unknown): string {
+  if (cause instanceof ApiError && cause.code === 'TRANSFER_CONFIRMATION_REQUIRED') {
+    return '目标成员暂不可用，请确认是否继续转接。'
+  }
+  if (cause instanceof ApiError && cause.code === 'INVALID_TARGET') {
+    return '请选择有效的人工成员。'
+  }
   if (!(cause instanceof ApiError)) return '收件箱加载失败，请稍后重试。'
   if (cause.code === 'FORBIDDEN' && cause.message === 'Channel access is required') {
     return '请到“团队”页面，为你的成员勾选此 Facebook Page 的频道权限。'

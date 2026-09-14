@@ -1,11 +1,14 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
+import { requeueMemberConversation } from './assignments'
 import type { Database } from './database'
 import {
   channel,
+  conversation,
   humanMemberAvailability,
   member,
   memberChannelAccess,
   user,
+  workspace,
   workspaceInvitation,
   workspaceUserAccess,
 } from './schema'
@@ -325,10 +328,12 @@ export async function updateMember(db: Database, input: UpdateMemberInput) {
 
   return db.transaction(async (tx) => {
     await assertManager(tx, input.workspaceId, input.actingUserId)
+    await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
     const [target] = await tx
       .select({
         id: member.id,
         type: member.type,
+        status: member.status,
         workspaceUserAccessId: member.workspaceUserAccessId,
         role: workspaceUserAccess.role,
       })
@@ -352,6 +357,31 @@ export async function updateMember(db: Database, input: UpdateMemberInput) {
     const accessId = target.workspaceUserAccessId
     if (input.role !== undefined && !accessId) {
       throw new MemberError('INVALID_REQUEST', 'Human member access is missing')
+    }
+
+    const requeuedConversationIds: string[] = []
+    if (input.status === 'DISABLED' && target.status !== 'DISABLED') {
+      const ownedConversations = await tx
+        .select({ id: conversation.id })
+        .from(conversation)
+        .where(
+          and(
+            eq(conversation.workspaceId, input.workspaceId),
+            eq(conversation.status, 'OPEN'),
+            eq(conversation.assigneeMemberId, input.memberId),
+          ),
+        )
+        .orderBy(asc(conversation.id))
+
+      for (const owned of ownedConversations) {
+        const result = await requeueMemberConversation(tx, {
+          workspaceId: input.workspaceId,
+          conversationId: owned.id,
+          memberId: input.memberId,
+          actingUserId: input.actingUserId,
+        })
+        if (result.changed) requeuedConversationIds.push(owned.id)
+      }
     }
 
     const values: Partial<typeof member.$inferInsert> = { updatedAt: new Date() }
@@ -385,7 +415,7 @@ export async function updateMember(db: Database, input: UpdateMemberInput) {
       await replaceChannelAccess(tx, input.memberId, unique(input.channelIds))
     }
 
-    return { id: input.memberId }
+    return { id: input.memberId, requeuedConversationIds }
   })
 }
 

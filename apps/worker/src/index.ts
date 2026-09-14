@@ -3,6 +3,7 @@ import {
   AssignmentError,
   bootstrapWorkspace,
   claimOutboundMessage,
+  closeConversation,
   completeOutboundMessage,
   createDatabase,
   createAiMember,
@@ -27,6 +28,8 @@ import {
   member,
   setMemberChannelAccess,
   takeOverConversation,
+  transferConversation,
+  unassignConversation,
   updateMember,
   workspace,
   workspaceUserAccess,
@@ -119,6 +122,9 @@ const conversationCursorInput = z.object({
 const messageCursorInput = z.object({ createdAt: z.string().datetime(), id: z.string().uuid() })
 const replyInput = z
   .object({ text: z.string().trim().min(1).max(MAX_OUTBOUND_TEXT_LENGTH) })
+  .strict()
+const transferInput = z
+  .object({ targetMemberId: z.string().uuid(), confirmOverride: z.boolean().optional() })
   .strict()
 
 app.onError((_error, c) => {
@@ -534,6 +540,98 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/takeover', 
   })
 })
 
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/transfer', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const input = transferInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json({ error: { code: 'INVALID_REQUEST', message: 'Choose a human member' } }, 400)
+    }
+
+    try {
+      const result = await transferConversation(db, {
+        workspaceId: c.req.param('workspaceId'),
+        conversationId: c.req.param('conversationId'),
+        actingUserId: session.user.id,
+        ...input.data,
+      })
+      await publishInboxChange(
+        c.env,
+        c.req.param('workspaceId'),
+        result.conversationId,
+        'conversation.changed',
+      )
+      const page = await listFacebookConversations(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        view: 'all-open',
+        conversationId: result.conversationId,
+      })
+      return c.json({ conversation: page.conversations[0], changed: result.changed })
+    } catch (error) {
+      return assignmentErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/unassign', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+
+    try {
+      const result = await unassignConversation(db, {
+        workspaceId: c.req.param('workspaceId'),
+        conversationId: c.req.param('conversationId'),
+        actingUserId: session.user.id,
+      })
+      await publishInboxChange(
+        c.env,
+        c.req.param('workspaceId'),
+        result.conversationId,
+        'conversation.changed',
+      )
+      const page = await listFacebookConversations(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        view: 'all-open',
+        conversationId: result.conversationId,
+      })
+      return c.json({ conversation: page.conversations[0], changed: result.changed })
+    } catch (error) {
+      return assignmentErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/close', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+
+    try {
+      const result = await closeConversation(db, {
+        workspaceId: c.req.param('workspaceId'),
+        conversationId: c.req.param('conversationId'),
+        actingUserId: session.user.id,
+      })
+      await publishInboxChange(
+        c.env,
+        c.req.param('workspaceId'),
+        result.conversationId,
+        'conversation.changed',
+      )
+      return c.json({ conversation: null, changed: result.changed, closed: true })
+    } catch (error) {
+      return assignmentErrorResponse(c, error)
+    }
+  })
+})
+
 app.post('/api/workspaces/:workspaceId/conversations/:conversationId/replies', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
@@ -713,12 +811,20 @@ app.patch('/api/workspaces/:workspaceId/members/:memberId', async (c) => {
     }
 
     try {
-      await updateMember(db, {
+      const updated = await updateMember(db, {
         workspaceId: c.req.param('workspaceId'),
         memberId: c.req.param('memberId'),
         actingUserId: session.user.id,
         ...input.data,
       })
+      for (const conversationId of updated.requeuedConversationIds) {
+        await publishInboxChange(
+          c.env,
+          c.req.param('workspaceId'),
+          conversationId,
+          'conversation.changed',
+        )
+      }
       const team = await listTeam(db, c.req.param('workspaceId'))
       return c.json({ member: team.members.find(({ id }) => id === c.req.param('memberId')) })
     } catch (error) {
@@ -977,7 +1083,9 @@ function assignmentErrorResponse(c: Context<{ Bindings: Bindings }>, error: unkn
       ? 403
       : error.code === 'NOT_FOUND'
         ? 404
-        : error.code === 'ALREADY_ASSIGNED' || error.code === 'CONVERSATION_CLOSED'
+        : error.code === 'ALREADY_ASSIGNED' ||
+            error.code === 'CONVERSATION_CLOSED' ||
+            error.code === 'TRANSFER_CONFIRMATION_REQUIRED'
           ? 409
           : 400
   return c.json({ error: { code: error.code, message: error.message } }, status)

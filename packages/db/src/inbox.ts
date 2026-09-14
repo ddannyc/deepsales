@@ -126,6 +126,7 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
     }
     if (!identity) throw new InboxError('INVALID_REQUEST', 'Channel identity was not created')
 
+    await tx.execute(sql`select id from channel_identity where id = ${identity.id} for update`)
     await tx.execute(
       sql`select id from conversation where channel_identity_id = ${identity.id} and status = 'OPEN' for update`,
     )
