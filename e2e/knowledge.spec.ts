@@ -14,6 +14,7 @@ test('owner indexes inline and uploaded knowledge and shows failed documents', a
   await page.getByRole('button', { name: '创建账户', exact: true }).click()
   await page.getByLabel('工作区名称').fill('Knowledge acceptance')
   await page.getByRole('button', { name: '创建工作区', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '收件箱已准备就绪' })).toBeVisible()
 
   await page.goto('/knowledge')
   await expect(page.getByRole('heading', { name: '知识库', exact: true })).toBeVisible()
@@ -57,8 +58,7 @@ test('owner indexes inline and uploaded knowledge and shows failed documents', a
   await documentForm.getByLabel('文档名称').fill('Empty')
   await documentForm.getByLabel('文本内容').fill('   ')
   await documentForm.getByRole('button', { name: '添加文本', exact: true }).click()
-  await expect(page.locator('.knowledge-document').filter({ hasText: 'Empty' })).toContainText(
-    '文本 · 失败',
-    { timeout: 10_000 },
-  )
+  await expect(
+    page.locator('.knowledge-document[data-source-type="TEXT"]').filter({ hasText: 'Empty' }),
+  ).toContainText('文本 · 失败', { timeout: 10_000 })
 })
