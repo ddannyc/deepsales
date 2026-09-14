@@ -22,7 +22,7 @@ describe('Facebook adapter', () => {
     )
 
     expect(url.searchParams.get('scope')).toBe(
-      'pages_messaging,pages_manage_metadata,pages_read_engagement,pages_show_list',
+      'pages_messaging,pages_manage_metadata,pages_show_list',
     )
     expect(url.searchParams.get('state')).toBe('one-time-state')
     expect(url.searchParams.get('client_secret')).toBeNull()

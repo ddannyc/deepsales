@@ -3,7 +3,6 @@ import { z } from 'zod'
 export const FACEBOOK_PERMISSIONS = [
   'pages_messaging',
   'pages_manage_metadata',
-  'pages_read_engagement',
   'pages_show_list',
 ] as const
 export const TOKEN_KEY_VERSION = 'v1'
