@@ -7,15 +7,16 @@ import {
   createDatabase,
   createAiMember,
   createInvitation,
-  createHumanReply,
+  createFacebookHumanReply,
   disableFacebookChannel,
   FacebookError,
+  getFacebookOutboundDelivery,
   InboxError,
   ReplyError,
   failOutboundMessage,
   listFacebookChannels,
   listFacebookChannelsPage,
-  listConversations,
+  listFacebookConversations,
   listMessages,
   listUnclaimedOutboundMessageIds,
   deleteMember,
@@ -431,7 +432,7 @@ app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
     try {
       const viewResult = conversationViewInput.safeParse(c.req.query('view') ?? 'all-open')
       if (!viewResult.success) throw new InboxError('INVALID_REQUEST', 'Invalid conversation view')
-      const page = await listConversations(db, {
+      const page = await listFacebookConversations(db, {
         workspaceId: c.req.param('workspaceId'),
         userId: session.user.id,
         view: viewResult.data,
@@ -459,7 +460,7 @@ app.get('/api/workspaces/:workspaceId/conversations/:conversationId', async (c) 
     if (!session) return unauthorized(c)
 
     try {
-      const page = await listConversations(db, {
+      const page = await listFacebookConversations(db, {
         workspaceId: c.req.param('workspaceId'),
         userId: session.user.id,
         view: 'all-open',
@@ -520,7 +521,7 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/takeover', 
         result.conversationId,
         'conversation.changed',
       )
-      const page = await listConversations(db, {
+      const page = await listFacebookConversations(db, {
         workspaceId: c.req.param('workspaceId'),
         userId: session.user.id,
         view: 'all-open',
@@ -547,16 +548,12 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/replies', a
     }
 
     try {
-      const created = await createHumanReply(
-        db,
-        {
-          workspaceId: c.req.param('workspaceId'),
-          conversationId: c.req.param('conversationId'),
-          actingUserId: session.user.id,
-          text: input.data.text,
-        },
-        isFacebookReplyWindowOpen,
-      )
+      const created = await createFacebookHumanReply(db, {
+        workspaceId: c.req.param('workspaceId'),
+        conversationId: c.req.param('conversationId'),
+        actingUserId: session.user.id,
+        text: input.data.text,
+      })
       const job = {
         v: 1 as const,
         type: 'facebook.outbound' as const,
@@ -1200,7 +1197,11 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
 
     let pageAccessToken = ''
     try {
-      if (!isFacebookReplyWindowOpen(claimed.eligibleUntil)) {
+      const facebookDelivery = await withDatabase(env, (db) =>
+        getFacebookOutboundDelivery(db, claimed.id),
+      )
+      if (!facebookDelivery) throw new Error('Facebook delivery context is missing')
+      if (!isFacebookReplyWindowOpen(facebookDelivery.eligibleUntil)) {
         await withDatabase(env, (db) =>
           failOutboundMessage(db, {
             messageId: claimed.id,
@@ -1218,9 +1219,9 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
 
       pageAccessToken = await decryptFacebookToken(
         {
-          ciphertext: claimed.encryptedPageAccessToken,
-          iv: claimed.tokenIv,
-          keyVersion: claimed.tokenKeyVersion,
+          ciphertext: facebookDelivery.encryptedPageAccessToken,
+          iv: facebookDelivery.tokenIv,
+          keyVersion: facebookDelivery.tokenKeyVersion,
         },
         env.TOKEN_ENCRYPTION_KEY,
       )
@@ -1229,7 +1230,12 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
         appSecret: env.META_APP_SECRET,
         graphApiVersion: env.META_GRAPH_API_VERSION,
         graphBaseUrl: env.FACEBOOK_GRAPH_BASE_URL,
-      }).sendText(claimed.pageId, claimed.externalUserId, claimed.text, pageAccessToken)
+      }).sendText(
+        facebookDelivery.pageId,
+        facebookDelivery.externalUserId,
+        claimed.text,
+        pageAccessToken,
+      )
       await withDatabase(env, (db) =>
         completeOutboundMessage(db, {
           messageId: claimed.id,
@@ -1281,6 +1287,9 @@ export async function handleScheduled(env: Bindings) {
     const stale = await withDatabase(env, (db) => recoverStaleOutboundMessages(db))
     if (stale.length) {
       console.warn(JSON.stringify({ event: 'outbound_claims_recovered', messages: stale.length }))
+      for (const item of stale) {
+        await publishInboxChange(env, item.workspaceId, item.id, 'message.changed')
+      }
     }
     if (!env.OUTBOUND_QUEUE) return
 

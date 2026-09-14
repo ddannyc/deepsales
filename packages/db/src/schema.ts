@@ -431,7 +431,7 @@ export const message = pgTable(
   ],
 )
 
-export const facebookDeliveryAttempt = pgTable(
+export const deliveryAttempt = pgTable(
   'facebook_delivery_attempt',
   {
     id: uuid().defaultRandom().primaryKey(),

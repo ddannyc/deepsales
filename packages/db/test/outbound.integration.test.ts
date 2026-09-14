@@ -10,11 +10,11 @@ import {
   conversationAssignment,
   createAiMember,
   createDatabase,
-  createHumanReply,
+  createFacebookHumanReply as createHumanReply,
   claimOutboundMessage,
   completeOutboundMessage,
   channelIdentity,
-  facebookDeliveryAttempt,
+  deliveryAttempt,
   facebookMessagingWindow,
   member,
   message,
@@ -255,7 +255,6 @@ describe.skipIf(!connectionString)('human reply delivery', () => {
     expect(first).toEqual(
       expect.objectContaining({
         id: created.message.id,
-        externalUserId: expect.any(String),
         attemptId: expect.any(String),
       }),
     )
@@ -272,8 +271,8 @@ describe.skipIf(!connectionString)('human reply delivery', () => {
     expect(
       await db
         .select()
-        .from(facebookDeliveryAttempt)
-        .where(eq(facebookDeliveryAttempt.messageId, created.message.id)),
+        .from(deliveryAttempt)
+        .where(eq(deliveryAttempt.messageId, created.message.id)),
     ).toHaveLength(1)
   })
 
@@ -332,7 +331,7 @@ describe.skipIf(!connectionString)('human reply delivery', () => {
       recoverStaleOutboundMessages(db, {
         now: new Date(claimedAt.getTime() + 5 * 60 * 1_000),
       }),
-    ).resolves.toEqual([created.message.id])
+    ).resolves.toEqual([{ id: created.message.id, workspaceId: fixture.workspaceId }])
 
     const [failed] = await db.select().from(message).where(eq(message.id, created.message.id))
     expect(failed).toEqual(

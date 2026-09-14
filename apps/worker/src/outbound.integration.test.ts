@@ -9,7 +9,7 @@ import {
   bootstrapWorkspace,
   connectFacebookPages,
   createDatabase,
-  createHumanReply,
+  createFacebookHumanReply as createHumanReply,
   message,
   processFacebookInbound,
   setMemberChannelAccess,

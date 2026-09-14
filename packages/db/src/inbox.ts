@@ -291,11 +291,6 @@ export async function listConversations(
       assigneeName: member.displayName,
       assigneeType: member.type,
       latestPreview: message.text,
-      replyWindowOpen: sql<boolean>`coalesce(
-        ${facebookMessagingWindow.eligibleUntil} > now(),
-        false
-      )`,
-      replyWindowEligibleUntil: facebookMessagingWindow.eligibleUntil,
       failedMessage: sql<boolean>`exists (
         select 1 from message failed_message
         where failed_message.conversation_id = ${conversation.id}
@@ -304,10 +299,6 @@ export async function listConversations(
     })
     .from(conversation)
     .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
-    .leftJoin(
-      facebookMessagingWindow,
-      eq(facebookMessagingWindow.channelIdentityId, channelIdentity.id),
-    )
     .innerJoin(customer, eq(customer.id, channelIdentity.customerId))
     .innerJoin(channel, eq(channel.id, channelIdentity.channelId))
     .leftJoin(member, eq(member.id, conversation.assigneeMemberId))

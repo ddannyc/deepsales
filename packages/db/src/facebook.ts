@@ -1,6 +1,17 @@
-import { and, asc, eq, gt, or, sql } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
-import { channel, facebookChannelConfig, facebookOauthState, workspaceUserAccess } from './schema'
+import { listConversations, type ConversationView, type ConversationCursor } from './inbox'
+import { createHumanReply, type HumanReplyInput } from './outbound'
+import {
+  channel,
+  channelIdentity,
+  conversation,
+  facebookChannelConfig,
+  facebookMessagingWindow,
+  facebookOauthState,
+  message,
+  workspaceUserAccess,
+} from './schema'
 
 export const FACEBOOK_OAUTH_TTL_MS = 10 * 60 * 1_000
 
@@ -25,6 +36,92 @@ export class FacebookError extends Error {
 
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 type QueryHandle = Database | Transaction
+
+export function createFacebookHumanReply(db: Database, input: HumanReplyInput) {
+  return createHumanReply(db, input, facebookReplyWindowOpen)
+}
+
+async function facebookReplyWindowOpen(tx: Transaction, channelIdentityId: string, now: Date) {
+  const [window] = await tx
+    .select({ eligibleUntil: facebookMessagingWindow.eligibleUntil })
+    .from(facebookMessagingWindow)
+    .where(eq(facebookMessagingWindow.channelIdentityId, channelIdentityId))
+    .limit(1)
+  return Boolean(window?.eligibleUntil && window.eligibleUntil.getTime() > now.getTime())
+}
+
+export async function getFacebookOutboundDelivery(db: Database, messageId: string) {
+  const [delivery] = await db
+    .select({
+      externalUserId: channelIdentity.externalUserId,
+      eligibleUntil: facebookMessagingWindow.eligibleUntil,
+      pageId: facebookChannelConfig.pageId,
+      encryptedPageAccessToken: facebookChannelConfig.encryptedPageAccessToken,
+      tokenIv: facebookChannelConfig.tokenIv,
+      tokenKeyVersion: facebookChannelConfig.tokenKeyVersion,
+    })
+    .from(message)
+    .innerJoin(conversation, eq(conversation.id, message.conversationId))
+    .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+    .innerJoin(channel, eq(channel.id, message.channelId))
+    .innerJoin(facebookChannelConfig, eq(facebookChannelConfig.channelId, channel.id))
+    .leftJoin(
+      facebookMessagingWindow,
+      eq(facebookMessagingWindow.channelIdentityId, channelIdentity.id),
+    )
+    .where(and(eq(message.id, messageId), eq(message.direction, 'OUTBOUND')))
+    .limit(1)
+  return delivery ?? null
+}
+
+export async function listFacebookConversations(
+  db: Database,
+  input: {
+    workspaceId: string
+    userId: string
+    view: ConversationView
+    after?: ConversationCursor
+    limit?: number
+    conversationId?: string
+  },
+) {
+  const page = await listConversations(db, input)
+  const ids = page.conversations.map(({ id }) => id)
+  if (!ids.length) return page
+  const now = new Date()
+
+  const windows = await db
+    .select({
+      conversationId: conversation.id,
+      eligibleUntil: facebookMessagingWindow.eligibleUntil,
+    })
+    .from(conversation)
+    .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+    .leftJoin(
+      facebookMessagingWindow,
+      eq(facebookMessagingWindow.channelIdentityId, channelIdentity.id),
+    )
+    .where(and(eq(conversation.workspaceId, input.workspaceId), inArray(conversation.id, ids)))
+  const byConversationId = new Map(windows.map((window) => [window.conversationId, window]))
+  return {
+    ...page,
+    conversations: page.conversations.map((item) =>
+      enrichConversation(item, byConversationId.get(item.id)?.eligibleUntil ?? null, now),
+    ),
+  }
+}
+
+function enrichConversation<T extends { id: string }>(
+  conversation: T,
+  eligibleUntil: Date | null,
+  now: Date,
+) {
+  return {
+    ...conversation,
+    replyWindowOpen: Boolean(eligibleUntil && eligibleUntil.getTime() > now.getTime()),
+    replyWindowEligibleUntil: eligibleUntil,
+  }
+}
 
 export type StartFacebookOAuthInput = {
   workspaceId: string
