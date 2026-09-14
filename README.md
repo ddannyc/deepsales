@@ -51,7 +51,7 @@ as Worker variables, then:
 
 ```powershell
 pnpm db:migrate
-pnpm deploy
+pnpm run deploy
 ```
 
 Migrations always use the direct database URL and are never run by application deploys.

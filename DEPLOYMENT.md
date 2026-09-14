@@ -10,7 +10,7 @@
 - `wrangler login` / `wrangler whoami`
 - 创建 Hyperdrive、三个 Queues，并把 Hyperdrive ID 写入 `wrangler.jsonc`
 - 首次执行 `pnpm db:migrate`
-- 首次 `pnpm deploy`（创建 Worker）
+- 首次 `pnpm run deploy`（创建 Worker）
 - 配置 Worker Secrets
 - 配置 Meta OAuth 回调、Webhook 和 Page 订阅
 
@@ -22,7 +22,7 @@ pnpm typecheck
 pnpm lint
 pnpm test
 pnpm db:migrate                  # 有新的 migration 时执行
-pnpm deploy
+pnpm run deploy
 ```
 
 后续发布不需要重复创建 Hyperdrive、Queues、Durable Object，也不需要重复配置 Secrets 或 Meta 回调。只有更换数据库、Cloudflare 账号、Meta App 或密钥时，才重新执行对应的首次部署步骤。
@@ -85,7 +85,7 @@ pnpm db:migrate
 部署会同时构建 Web 静态资源和 Worker：
 
 ```powershell
-pnpm deploy
+pnpm run deploy
 ```
 
 记录 Wrangler 输出的 Worker URL，例如：
@@ -118,7 +118,7 @@ pnpm --filter @deepsales/worker exec wrangler secret put TOKEN_ENCRYPTION_KEY
 设置完 Secret 后重新部署：
 
 ```powershell
-pnpm deploy
+pnpm run deploy
 ```
 
 ## 6. 配置 Meta App
