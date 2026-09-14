@@ -1,16 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { app, hasValidSignature } from './index'
+import type { Bindings } from './bindings'
+import { app } from './index'
 
 const bindings = {
   META_APP_ID: 'test-app-id',
   META_APP_SECRET: 'test-app-secret',
   META_VERIFY_TOKEN: 'test-verify-token',
-  META_PAGE_ID: 'page-1',
-  META_PAGE_ACCESS_TOKEN: 'test-page-token',
   META_GRAPH_API_VERSION: 'v26.0',
   TOKEN_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-  M0_FIXED_REPLY: 'fixed reply',
-}
+} as unknown as Bindings
 
 const applicationBindings = {
   ...bindings,
@@ -24,7 +22,7 @@ const applicationBindings = {
 
 afterEach(() => vi.unstubAllGlobals())
 
-describe('M0 Facebook webhook', () => {
+describe('Facebook webhook', () => {
   it('answers Meta verification only for the configured token', async () => {
     const response = await app.request(
       '/webhooks/facebook?hub.mode=subscribe&hub.verify_token=test-verify-token&hub.challenge=12345',
@@ -49,7 +47,15 @@ describe('M0 Facebook webhook', () => {
     expect(missingConfiguration.status).toBe(403)
   })
 
-  it('validates signatures, parses one inbound text, and replies once', async () => {
+  it('rejects an invalid signature before parsing or sending', async () => {
+    const send = vi.fn()
+    vi.stubGlobal('fetch', send)
+    const response = await deliver('{}', `sha256=${'0'.repeat(64)}`)
+    expect(response.status).toBe(401)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('publishes one versioned durable job per normalized message before acknowledging', async () => {
     const body = JSON.stringify({
       object: 'page',
       entry: [
@@ -57,52 +63,64 @@ describe('M0 Facebook webhook', () => {
           id: 'page-1',
           messaging: [
             {
-              sender: { id: 'psid-1' },
-              recipient: { id: 'page-1' },
-              message: { mid: 'mid-once', text: 'hello' },
+              timestamp: 1_700_000_000_000,
+              sender: { id: 'customer-1' },
+              message: { mid: 'mid-queued', text: 'hello queue' },
             },
           ],
         },
       ],
     })
     const signature = await sign(body, bindings.META_APP_SECRET)
-    expect(
-      await hasValidSignature(
-        new TextEncoder().encode(body).buffer as ArrayBuffer,
-        signature,
-        bindings.META_APP_SECRET,
-      ),
-    ).toBe(true)
+    const send = vi.fn().mockResolvedValue(undefined)
 
-    const send = vi
-      .fn()
-      .mockResolvedValue(Response.json({ recipient_id: 'psid-1', message_id: 'outbound-1' }))
-    vi.stubGlobal('fetch', send)
+    const response = await deliver(body, signature, {
+      ...bindings,
+      APP_URL: 'http://localhost:8787',
+      WEBHOOKS_QUEUE: { send } as unknown as Queue,
+    })
 
-    await deliver(body, signature)
-    await deliver(body, signature)
-
+    expect(response.status).toBe(200)
     expect(send).toHaveBeenCalledOnce()
-    expect(send).toHaveBeenCalledWith(
-      'https://graph.facebook.com/v26.0/page-1/messages',
+    expect(send.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({ Authorization: 'Bearer test-page-token' }),
+        v: 1,
+        type: 'facebook.inbound',
+        event: expect.objectContaining({
+          pageId: 'page-1',
+          externalUserId: 'customer-1',
+          externalMessageId: 'mid-queued',
+          text: 'hello queue',
+        }),
       }),
     )
-    expect(JSON.parse(send.mock.calls[0][1].body)).toEqual({
-      recipient: { id: 'psid-1' },
-      messaging_type: 'RESPONSE',
-      message: { text: 'fixed reply' },
-    })
   })
 
-  it('rejects an invalid signature before parsing or sending', async () => {
-    const send = vi.fn()
-    vi.stubGlobal('fetch', send)
-    const response = await deliver('{}', `sha256=${'0'.repeat(64)}`)
-    expect(response.status).toBe(401)
-    expect(send).not.toHaveBeenCalled()
+  it('returns a retryable error when durable webhook publication fails', async () => {
+    const body = JSON.stringify({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            { sender: { id: 'customer-1' }, message: { mid: 'mid-failed', text: 'hello' } },
+          ],
+        },
+      ],
+    })
+    const signature = await sign(body, bindings.META_APP_SECRET)
+    const response = await deliver(body, signature, {
+      ...bindings,
+      APP_URL: 'http://localhost:8787',
+      WEBHOOKS_QUEUE: {
+        send: vi.fn().mockRejectedValue(new Error('queue down')),
+      } as unknown as Queue,
+    })
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toEqual({
+      error: { code: 'QUEUE_UNAVAILABLE', message: 'Webhook queue is unavailable' },
+    })
   })
 })
 
@@ -194,7 +212,7 @@ describe('application readiness', () => {
   })
 })
 
-async function deliver(body: string, signature: string): Promise<Response> {
+async function deliver(body: string, signature: string, env = bindings): Promise<Response> {
   const pending: Promise<unknown>[] = []
   const executionContext = {
     waitUntil(promise: Promise<unknown>) {
@@ -208,7 +226,7 @@ async function deliver(body: string, signature: string): Promise<Response> {
       headers: { 'x-hub-signature-256': signature },
       body,
     }),
-    bindings,
+    env,
     executionContext,
   )
   await Promise.all(pending)

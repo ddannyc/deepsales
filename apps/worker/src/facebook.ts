@@ -202,6 +202,81 @@ export function redactedFacebookFailure(
   }
 }
 
+export type FacebookInboundEvent = {
+  pageId: string
+  externalUserId: string
+  externalMessageId: string
+  text: string
+  providerSentAt: Date | null
+  eventFragment: Record<string, unknown>
+}
+
+const facebookInboundEventSchema = z.object({
+  pageId: z.string().min(1).max(200),
+  externalUserId: z.string().min(1).max(500),
+  externalMessageId: z.string().min(1).max(500),
+  text: z.string().min(1).max(100_000),
+  providerSentAt: z.string().datetime().nullable(),
+  eventFragment: z.record(z.string(), z.unknown()),
+})
+
+export const facebookWebhookJobSchema = z.object({
+  v: z.literal(1),
+  type: z.literal('facebook.inbound'),
+  ingressId: z.string().min(1).max(200),
+  payloadSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+  receivedAt: z.string().datetime(),
+  event: facebookInboundEventSchema,
+})
+
+export type FacebookWebhookJob = z.infer<typeof facebookWebhookJobSchema>
+
+export function normalizeFacebookWebhook(payload: unknown, expectedPageId?: string) {
+  if (!isRecord(payload) || payload.object !== 'page' || !Array.isArray(payload.entry)) return []
+
+  const events: FacebookInboundEvent[] = []
+  for (const rawEntry of payload.entry) {
+    if (!isRecord(rawEntry) || typeof rawEntry.id !== 'string') continue
+    if (expectedPageId && rawEntry.id !== expectedPageId) continue
+    if (!Array.isArray(rawEntry.messaging)) continue
+
+    for (const rawEvent of rawEntry.messaging) {
+      if (!isRecord(rawEvent) || !isRecord(rawEvent.sender) || !isRecord(rawEvent.message)) {
+        continue
+      }
+      const senderId = rawEvent.sender.id
+      const messageId = rawEvent.message.mid
+      const text = rawEvent.message.text
+      if (
+        typeof senderId !== 'string' ||
+        typeof messageId !== 'string' ||
+        typeof text !== 'string' ||
+        !text.length ||
+        rawEvent.message.is_echo === true
+      ) {
+        continue
+      }
+
+      const providerSentAt = providerTimestamp(rawEvent.timestamp)
+      events.push({
+        pageId: rawEntry.id,
+        externalUserId: senderId,
+        externalMessageId: messageId,
+        text,
+        providerSentAt,
+        eventFragment: {
+          entryId: rawEntry.id,
+          senderId,
+          messageId,
+          text,
+          providerTimestamp: providerSentAt?.toISOString() ?? null,
+        },
+      })
+    }
+  }
+  return events
+}
+
 async function graphRequest(fetcher: Fetcher, url: URL, init: RequestInit): Promise<unknown> {
   let response: Response
   try {
@@ -285,4 +360,14 @@ function numberOrNull(value: unknown) {
 
 function stringOrNull(value: unknown) {
   return typeof value === 'string' ? value : null
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function providerTimestamp(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? null : date
 }

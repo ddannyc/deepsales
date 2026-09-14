@@ -4,12 +4,14 @@ import {
   check,
   index,
   integer,
+  jsonb,
   pgEnum,
   pgTable,
   primaryKey,
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core'
 
@@ -88,6 +90,27 @@ export const facebookConnectionStatus = pgEnum('facebook_connection_status', [
   'ACTION_REQUIRED',
   'DISABLED',
 ])
+export const conversationStatus = pgEnum('conversation_status', ['OPEN', 'CLOSED'])
+export const queueReason = pgEnum('queue_reason', [
+  'NEW_CONVERSATION',
+  'AI_HANDOFF',
+  'MANUAL_UNASSIGN',
+  'MEMBER_DISABLED',
+])
+export const routingConstraint = pgEnum('routing_constraint', ['ANY_MEMBER', 'HUMAN_ONLY'])
+export const assignmentReason = pgEnum('assignment_reason', [
+  'AUTO_ROUTE',
+  'TAKEOVER',
+  'MANUAL_TRANSFER',
+  'MANUAL_UNASSIGN',
+  'AI_HANDOFF',
+  'MEMBER_DISABLED',
+  'CLOSE',
+])
+export const messageDirection = pgEnum('message_direction', ['INBOUND', 'OUTBOUND'])
+export const messageSenderType = pgEnum('message_sender_type', ['CUSTOMER', 'MEMBER', 'EXTERNAL'])
+export const messageType = pgEnum('message_type', ['TEXT', 'ATTACHMENT'])
+export const messageDeliveryState = pgEnum('message_delivery_state', ['PENDING', 'SENT', 'FAILED'])
 
 export const workspace = pgTable('workspace', {
   id: uuid().defaultRandom().primaryKey(),
@@ -248,4 +271,180 @@ export const facebookOauthState = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [index('facebook_oauth_state_workspace_id_idx').on(table.workspaceId)],
+)
+
+export const customer = pgTable(
+  'customer',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    displayName: text('display_name'),
+    avatarUrl: text('avatar_url'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('customer_workspace_id_idx').on(table.workspaceId)],
+)
+
+export const channelIdentity = pgTable(
+  'channel_identity',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    customerId: uuid('customer_id')
+      .notNull()
+      .references(() => customer.id, { onDelete: 'cascade' }),
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => channel.id, { onDelete: 'cascade' }),
+    externalUserId: text('external_user_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    unique().on(table.channelId, table.externalUserId),
+    index('channel_identity_workspace_id_idx').on(table.workspaceId),
+  ],
+)
+
+export const facebookMessagingWindow = pgTable('facebook_messaging_window', {
+  channelIdentityId: uuid('channel_identity_id')
+    .primaryKey()
+    .references(() => channelIdentity.id, { onDelete: 'cascade' }),
+  lastCustomerMessageAt: timestamp('last_customer_message_at', { withTimezone: true }).notNull(),
+  eligibleUntil: timestamp('eligible_until', { withTimezone: true }).notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+})
+
+export const conversation = pgTable(
+  'conversation',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    channelIdentityId: uuid('channel_identity_id')
+      .notNull()
+      .references(() => channelIdentity.id, { onDelete: 'cascade' }),
+    status: conversationStatus().default('OPEN').notNull(),
+    assigneeMemberId: uuid('assignee_member_id').references(() => member.id, {
+      onDelete: 'set null',
+    }),
+    queueReason: queueReason('queue_reason'),
+    routingConstraint: routingConstraint('routing_constraint').default('ANY_MEMBER').notNull(),
+    routingQueuedAt: timestamp('routing_queued_at', { withTimezone: true }),
+    latestMessageAt: timestamp('latest_message_at', { withTimezone: true }),
+    lastCustomerMessageAt: timestamp('last_customer_message_at', { withTimezone: true }),
+    lastOutboundMessageAt: timestamp('last_outbound_message_at', { withTimezone: true }),
+    lastCustomerMessageId: uuid('last_customer_message_id'),
+    closedAt: timestamp('closed_at', { withTimezone: true }),
+    closedByMemberId: uuid('closed_by_member_id').references(() => member.id, {
+      onDelete: 'set null',
+    }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('conversation_workspace_updated_idx').on(table.workspaceId, table.updatedAt, table.id),
+    index('conversation_identity_status_idx').on(table.channelIdentityId, table.status),
+    check(
+      'conversation_lifecycle_fields',
+      sql`(
+        (${table.status} = 'OPEN' and ${table.closedAt} is null and ${table.closedByMemberId} is null and
+          ((${table.assigneeMemberId} is not null and ${table.queueReason} is null and ${table.routingQueuedAt} is null) or
+           (${table.assigneeMemberId} is null and ${table.queueReason} is not null and ${table.routingQueuedAt} is not null)))
+        or
+        (${table.status} = 'CLOSED' and ${table.assigneeMemberId} is null and ${table.queueReason} is null and
+          ${table.routingQueuedAt} is null and ${table.routingConstraint} = 'ANY_MEMBER' and
+          ${table.closedAt} is not null and ${table.closedByMemberId} is not null)
+      )`,
+    ),
+    uniqueIndex('conversation_one_open_identity_idx')
+      .on(table.channelIdentityId)
+      .where(sql`${table.status} = 'OPEN'`),
+  ],
+)
+
+export const conversationAssignment = pgTable(
+  'conversation_assignment',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    fromMemberId: uuid('from_member_id').references(() => member.id, { onDelete: 'set null' }),
+    toMemberId: uuid('to_member_id').references(() => member.id, { onDelete: 'set null' }),
+    reason: assignmentReason().notNull(),
+    actingMemberId: uuid('acting_member_id').references(() => member.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('conversation_assignment_conversation_idx').on(table.conversationId)],
+)
+
+export const message = pgTable(
+  'message',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => channel.id, { onDelete: 'cascade' }),
+    direction: messageDirection().notNull(),
+    senderType: messageSenderType('sender_type').notNull(),
+    senderMemberId: uuid('sender_member_id').references(() => member.id, { onDelete: 'set null' }),
+    messageType: messageType('message_type').default('TEXT').notNull(),
+    text: text(),
+    externalMessageId: text('external_message_id'),
+    providerSentAt: timestamp('provider_sent_at', { withTimezone: true }),
+    deliveryState: messageDeliveryState('delivery_state'),
+    deliveryStartedAt: timestamp('delivery_started_at', { withTimezone: true }),
+    deliveryCompletedAt: timestamp('delivery_completed_at', { withTimezone: true }),
+    failureCode: text('failure_code'),
+    failureMessage: text('failure_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('message_conversation_created_idx').on(table.conversationId, table.createdAt, table.id),
+    check(
+      'message_sender_member_consistency',
+      sql`(${table.senderType} = 'MEMBER') = (${table.senderMemberId} is not null)`,
+    ),
+    check(
+      'message_delivery_consistency',
+      sql`(${table.direction} = 'OUTBOUND') = (${table.deliveryState} is not null)`,
+    ),
+    check(
+      'message_text_required',
+      sql`${table.messageType} <> 'TEXT' or ${table.text} is not null`,
+    ),
+    uniqueIndex('message_channel_external_id_idx')
+      .on(table.channelId, table.externalMessageId)
+      .where(sql`${table.externalMessageId} is not null`),
+  ],
+)
+
+export const facebookWebhookReceipt = pgTable(
+  'facebook_webhook_receipt',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    ingressId: text('ingress_id').notNull(),
+    pageId: text('page_id').notNull(),
+    externalMessageId: text('external_message_id'),
+    eventFragment: jsonb('event_fragment').$type<Record<string, unknown>>().notNull(),
+    payloadSha256: text('payload_sha256').notNull(),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull(),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+  },
+  (table) => [
+    unique().on(table.ingressId),
+    index('facebook_webhook_receipt_received_idx').on(table.receivedAt),
+  ],
 )

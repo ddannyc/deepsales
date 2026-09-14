@@ -6,11 +6,15 @@ import {
   createInvitation,
   disableFacebookChannel,
   FacebookError,
+  InboxError,
   listFacebookChannels,
   listFacebookChannelsPage,
+  listConversations,
+  listMessages,
   deleteMember,
   listTeam,
   MemberError,
+  processFacebookInbound,
   member,
   setMemberChannelAccess,
   updateMember,
@@ -25,7 +29,11 @@ import { Pool } from 'pg'
 import { z } from 'zod'
 import { createAuth } from './auth'
 import type { Bindings } from './bindings'
-import { FacebookProviderError } from './facebook'
+import {
+  FacebookProviderError,
+  facebookWebhookJobSchema,
+  normalizeFacebookWebhook,
+} from './facebook'
 import {
   beginFacebookOAuth,
   completeFacebookOAuth,
@@ -35,20 +43,7 @@ import {
   selectFacebookPages,
 } from './facebook-service'
 
-type WebhookPayload = {
-  object?: unknown
-  entry?: Array<{
-    id?: unknown
-    messaging?: Array<{
-      sender?: { id?: unknown }
-      message?: { mid?: unknown; text?: unknown; is_echo?: unknown }
-    }>
-  }>
-}
-
-type InboundText = { pageId: string; senderId: string; messageId: string }
-
-const recentMessageIds = new Set<string>()
+import { publishRealtime, WorkspaceRealtime } from './realtime'
 
 const app = new Hono<{ Bindings: Bindings }>()
 
@@ -94,6 +89,18 @@ const facebookPageSelectionInput = z.object({
   pageIds: z.array(z.string().trim().min(1).max(200)).min(1).max(100),
 })
 const facebookCursorInput = z.object({ displayName: z.string().max(200), id: z.string().uuid() })
+const conversationViewInput = z.enum([
+  'my',
+  'waiting-human',
+  'ai-handling',
+  'unassigned',
+  'all-open',
+])
+const conversationCursorInput = z.object({
+  updatedAt: z.string().datetime(),
+  id: z.string().uuid(),
+})
+const messageCursorInput = z.object({ createdAt: z.string().datetime(), id: z.string().uuid() })
 
 app.onError((_error, c) => {
   if (c.req.path.startsWith('/api/')) {
@@ -397,6 +404,112 @@ app.get('/api/workspaces/:workspaceId/team', async (c) => {
   })
 })
 
+app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+
+    try {
+      const viewResult = conversationViewInput.safeParse(c.req.query('view') ?? 'all-open')
+      if (!viewResult.success) throw new InboxError('INVALID_REQUEST', 'Invalid conversation view')
+      const page = await listConversations(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        view: viewResult.data,
+        after: decodeConversationCursor(c.req.query('cursor')),
+      })
+      return c.json({
+        conversations: page.conversations,
+        nextCursor: page.nextCursor
+          ? encodeCursor({
+              updatedAt: page.nextCursor.updatedAt.toISOString(),
+              id: page.nextCursor.id,
+            })
+          : null,
+      })
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.get('/api/workspaces/:workspaceId/conversations/:conversationId', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+
+    try {
+      const page = await listConversations(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        view: 'all-open',
+        conversationId: c.req.param('conversationId'),
+      })
+      const conversation = page.conversations[0]
+      if (!conversation) throw new InboxError('NOT_FOUND', 'Conversation not found')
+      return c.json({ conversation })
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.get('/api/workspaces/:workspaceId/conversations/:conversationId/messages', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+
+    try {
+      const page = await listMessages(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        conversationId: c.req.param('conversationId'),
+        after: decodeMessageCursor(c.req.query('cursor')),
+      })
+      return c.json({
+        messages: page.messages,
+        nextCursor: page.nextCursor
+          ? encodeCursor({
+              createdAt: page.nextCursor.createdAt.toISOString(),
+              id: page.nextCursor.id,
+            })
+          : null,
+      })
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.get('/api/workspaces/:workspaceId/realtime', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  if (c.req.header('upgrade')?.toLowerCase() !== 'websocket') {
+    return c.text('WebSocket upgrade required', 426)
+  }
+  const realtime = c.env.WORKSPACE_REALTIME
+  if (!realtime) return notReady(c)
+
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    if (!(await findWorkspaceAccess(db, session.user.id, c.req.param('workspaceId')))) {
+      return forbidden(c)
+    }
+
+    const request = new Request('https://realtime/connect', {
+      headers: {
+        Upgrade: 'websocket',
+        'x-user-id': session.user.id,
+        'x-workspace-id': c.req.param('workspaceId'),
+      },
+    })
+    return realtime.get(realtime.idFromName(c.req.param('workspaceId'))).fetch(request)
+  })
+})
+
 app.post('/api/workspaces/:workspaceId/invitations', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
@@ -571,7 +684,9 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.META_APP_SECRET &&
       env.META_VERIFY_TOKEN &&
       env.META_GRAPH_API_VERSION &&
-      env.TOKEN_ENCRYPTION_KEY,
+      env.TOKEN_ENCRYPTION_KEY &&
+      env.WEBHOOKS_QUEUE &&
+      env.WORKSPACE_REALTIME,
   )
 }
 
@@ -660,6 +775,13 @@ function encodeFacebookCursor(cursor: FacebookChannelCursor) {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
 }
 
+function encodeCursor(cursor: object) {
+  const bytes = new TextEncoder().encode(JSON.stringify(cursor))
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '')
+}
+
 function decodeFacebookCursor(value: string | undefined): FacebookChannelCursor | undefined {
   if (!value) return undefined
   try {
@@ -672,6 +794,35 @@ function decodeFacebookCursor(value: string | undefined): FacebookChannelCursor 
   } catch {
     throw new FacebookError('INVALID_REQUEST', 'Invalid channel cursor')
   }
+}
+
+function decodeConversationCursor(value: string | undefined) {
+  if (!value) return undefined
+  try {
+    const cursor = conversationCursorInput.safeParse(JSON.parse(decodeCursorValue(value)))
+    if (!cursor.success) throw new Error('invalid cursor')
+    return { updatedAt: new Date(cursor.data.updatedAt), id: cursor.data.id }
+  } catch {
+    throw new InboxError('INVALID_REQUEST', 'Invalid conversation cursor')
+  }
+}
+
+function decodeMessageCursor(value: string | undefined) {
+  if (!value) return undefined
+  try {
+    const cursor = messageCursorInput.safeParse(JSON.parse(decodeCursorValue(value)))
+    if (!cursor.success) throw new Error('invalid cursor')
+    return { createdAt: new Date(cursor.data.createdAt), id: cursor.data.id }
+  } catch {
+    throw new InboxError('INVALID_REQUEST', 'Invalid message cursor')
+  }
+}
+
+function decodeCursorValue(value: string) {
+  const normalized = value.replaceAll('-', '+').replaceAll('_', '/')
+  const binary = atob(normalized.padEnd(Math.ceil(normalized.length / 4) * 4, '='))
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+  return new TextDecoder().decode(bytes)
 }
 
 function memberErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
@@ -717,6 +868,12 @@ function facebookProviderResponse(
   throw error
 }
 
+function inboxErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (!(error instanceof InboxError)) throw error
+  const status = error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : 400
+  return c.json({ error: { code: error.code, message: error.message } }, status)
+}
+
 function notReady(c: Context<{ Bindings: Bindings }>) {
   return c.json(
     { ok: false, error: { code: 'NOT_READY', message: 'Database is unavailable' } },
@@ -743,12 +900,14 @@ async function normalizeAuthError(response: Response): Promise<Response> {
 }
 
 app.get('/webhooks/facebook', (c) => {
+  const challenge = c.req.query('hub.challenge')
   const verified =
     Boolean(c.env.META_VERIFY_TOKEN) &&
     c.req.query('hub.mode') === 'subscribe' &&
-    c.req.query('hub.verify_token') === c.env.META_VERIFY_TOKEN
+    c.req.query('hub.verify_token') === c.env.META_VERIFY_TOKEN &&
+    Boolean(challenge)
 
-  return verified ? c.text(c.req.query('hub.challenge') ?? '') : c.text('Forbidden', 403)
+  return verified && challenge ? c.text(challenge) : c.text('Forbidden', 403)
 })
 
 app.post('/webhooks/facebook', async (c) => {
@@ -760,62 +919,55 @@ app.post('/webhooks/facebook', async (c) => {
     return c.text('Unauthorized', 401)
   }
 
-  let payload: WebhookPayload
+  let payload: unknown
   try {
-    payload = JSON.parse(new TextDecoder().decode(body)) as WebhookPayload
+    payload = JSON.parse(new TextDecoder().decode(body)) as unknown
   } catch {
     return c.text('Bad Request', 400)
   }
 
-  let messages = inboundTexts(payload, c.env.META_PAGE_ID)
-  messages = messages.filter(
-    (message) => message.pageId === c.env.META_PAGE_ID && Boolean(c.env.META_PAGE_ACCESS_TOKEN),
+  const events = normalizeFacebookWebhook(payload)
+  if (!events.length) return c.text('EVENT_RECEIVED')
+
+  const queue = c.env.WEBHOOKS_QUEUE
+  if (!queue) {
+    return c.json(
+      { error: { code: 'QUEUE_UNAVAILABLE', message: 'Webhook queue is unavailable' } },
+      503,
+    )
+  }
+
+  const receivedAt = new Date()
+  const payloadSha256 = await sha256Hex(body)
+  const jobs = events.map((event) =>
+    facebookWebhookJobSchema.safeParse({
+      v: 1,
+      type: 'facebook.inbound',
+      ingressId: crypto.randomUUID(),
+      payloadSha256,
+      receivedAt: receivedAt.toISOString(),
+      event: {
+        ...event,
+        providerSentAt: event.providerSentAt?.toISOString() ?? null,
+      },
+    }),
   )
-  console.log(JSON.stringify({ event: 'webhook_received', messages: messages.length }))
-  c.executionCtx.waitUntil(
-    Promise.all(messages.map((message) => sendFixedReply(message, c.env))).then(() => undefined),
-  )
+  if (jobs.some((job) => !job.success)) return c.text('Bad Request', 400)
+
+  try {
+    await Promise.all(jobs.map((job) => queue.send(job.data)))
+  } catch {
+    console.error(JSON.stringify({ event: 'webhook_queue_failed', messages: events.length }))
+    return c.json(
+      { error: { code: 'QUEUE_UNAVAILABLE', message: 'Webhook queue is unavailable' } },
+      503,
+    )
+  }
+
+  console.log(JSON.stringify({ event: 'webhook_queued', messages: events.length }))
 
   return c.text('EVENT_RECEIVED')
 })
-
-function inboundTexts(payload: WebhookPayload, expectedPageId?: string): InboundText[] {
-  if (payload.object !== 'page' || !Array.isArray(payload.entry)) return []
-
-  const messages: InboundText[] = []
-  for (const entry of payload.entry) {
-    if (
-      typeof entry.id !== 'string' ||
-      (expectedPageId && entry.id !== expectedPageId) ||
-      !Array.isArray(entry.messaging)
-    ) {
-      continue
-    }
-    for (const event of entry.messaging) {
-      const { id: senderId } = event.sender ?? {}
-      const { mid: messageId, text, is_echo: isEcho } = event.message ?? {}
-      if (
-        typeof senderId !== 'string' ||
-        typeof messageId !== 'string' ||
-        typeof text !== 'string' ||
-        isEcho === true ||
-        !remember(messageId)
-      ) {
-        continue
-      }
-      messages.push({ pageId: entry.id, senderId, messageId })
-    }
-  }
-  return messages
-}
-
-function remember(messageId: string): boolean {
-  if (recentMessageIds.has(messageId)) return false
-  // ponytail: isolate-local M0 dedupe only; replace with PostgreSQL uniqueness for V1.
-  if (recentMessageIds.size >= 1_000) recentMessageIds.clear()
-  recentMessageIds.add(messageId)
-  return true
-}
 
 async function hasValidSignature(
   body: ArrayBuffer,
@@ -839,75 +991,59 @@ async function hasValidSignature(
   return crypto.subtle.verify('HMAC', key, signature, body)
 }
 
-async function sendFixedReply(message: InboundText, env: Bindings): Promise<void> {
-  console.log(
-    JSON.stringify({
-      event: 'send_attempt',
-      pageId: message.pageId,
-      messageId: message.messageId,
-      inboundType: 'text',
-    }),
-  )
-
-  let response: Response
-  try {
-    response = await fetch(
-      `https://graph.facebook.com/${env.META_GRAPH_API_VERSION}/${env.META_PAGE_ID}/messages`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${env.META_PAGE_ACCESS_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          recipient: { id: message.senderId },
-          messaging_type: 'RESPONSE',
-          message: { text: env.M0_FIXED_REPLY },
-        }),
-      },
-    )
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        event: 'send_failed',
-        messageId: message.messageId,
-        reason: 'network_error',
-        error: error instanceof Error ? error.message : 'unknown',
-      }),
-    )
-    return
-  }
-
-  const result = (await response.json().catch(() => ({}))) as {
-    message_id?: unknown
-    error?: { code?: unknown; error_subcode?: unknown; message?: unknown; type?: unknown }
-  }
-  if (!response.ok) {
-    console.error(
-      JSON.stringify({
-        event: 'send_failed',
-        messageId: message.messageId,
-        status: response.status,
-        metaCode: result.error?.code,
-        metaSubcode: result.error?.error_subcode,
-        metaType: result.error?.type,
-        metaMessage:
-          typeof result.error?.message === 'string' && env.META_PAGE_ACCESS_TOKEN
-            ? result.error.message.replaceAll(env.META_PAGE_ACCESS_TOKEN, '[redacted]')
-            : result.error?.message,
-      }),
-    )
-    return
-  }
-
-  console.log(
-    JSON.stringify({
-      event: 'send_succeeded',
-      messageId: message.messageId,
-      outboundMessageId: result.message_id,
-    }),
-  )
+async function sha256Hex(body: ArrayBuffer) {
+  const digest = await crypto.subtle.digest('SHA-256', body)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
-export { app, hasValidSignature, inboundTexts }
-export default app
+export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  for (const message of batch.messages) {
+    const job = facebookWebhookJobSchema.safeParse(message.body)
+    if (!job.success) {
+      message.ack()
+      continue
+    }
+
+    try {
+      const result = await withDatabase(env, (db) =>
+        processFacebookInbound(db, {
+          ingressId: job.data.ingressId,
+          pageId: job.data.event.pageId,
+          externalUserId: job.data.event.externalUserId,
+          externalMessageId: job.data.event.externalMessageId,
+          text: job.data.event.text,
+          providerSentAt: job.data.event.providerSentAt
+            ? new Date(job.data.event.providerSentAt)
+            : null,
+          receivedAt: new Date(job.data.receivedAt),
+          payloadSha256: job.data.payloadSha256,
+          eventFragment: job.data.event.eventFragment,
+        }),
+      )
+      if (result.kind === 'created') {
+        try {
+          await publishRealtime(env.WORKSPACE_REALTIME, result.workspaceId, {
+            type: 'conversation.changed',
+            entityId: result.conversationId,
+          })
+        } catch {
+          console.warn(JSON.stringify({ event: 'realtime_publish_failed' }))
+        }
+      }
+      message.ack()
+    } catch {
+      console.error(JSON.stringify({ event: 'webhook_processing_failed' }))
+      message.retry()
+    }
+  }
+}
+
+export { app, hasValidSignature, WorkspaceRealtime }
+
+const worker = {
+  fetch: (request: Request, env: Bindings, executionContext: ExecutionContext) =>
+    app.fetch(request, env, executionContext),
+  queue: handleWebhookBatch,
+}
+
+export default worker

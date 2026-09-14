@@ -8,7 +8,3 @@ META_APP_SECRET=your-meta-app-secret
 META_VERIFY_TOKEN=choose-a-long-random-value
 # Generate a base64-encoded 32-byte AES key for Page-token encryption.
 TOKEN_ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-
-# M0 fixed-reply compatibility; T04 replaces this path with durable intake.
-META_PAGE_ID=your-facebook-page-id
-META_PAGE_ACCESS_TOKEN=your-page-access-token

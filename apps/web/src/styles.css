@@ -383,6 +383,191 @@ form {
   margin: 0;
   font-weight: 700;
 }
+.inbox-page {
+  min-height: calc(100vh - 79px);
+  display: grid;
+  grid-template-columns: 220px minmax(280px, 360px) minmax(0, 1fr);
+  background: #edf3f7;
+}
+.inbox-views {
+  padding: 42px 22px;
+  color: white;
+  background: var(--ink);
+}
+.inbox-views h1 {
+  margin: 0 0 34px;
+  font:
+    800 42px / 1 "Arial Narrow",
+    sans-serif;
+  letter-spacing: -0.04em;
+}
+.inbox-views .eyebrow {
+  color: #81a9ff;
+}
+.inbox-views nav {
+  display: grid;
+  gap: 6px;
+}
+.inbox-view {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border: 0;
+  padding: 12px 10px;
+  color: #bbcad8;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.inbox-view:hover,
+.inbox-view.active {
+  color: white;
+  background: #263b58;
+}
+.conversation-list,
+.inbox-thread {
+  min-width: 0;
+  background: white;
+}
+.conversation-list {
+  border-right: 1px solid #c8d7e0;
+}
+.inbox-section-heading,
+.thread-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid #c8d7e0;
+  padding: 28px 22px 20px;
+}
+.inbox-section-heading .eyebrow,
+.thread-heading .eyebrow {
+  margin-bottom: 8px;
+}
+.inbox-section-heading h2,
+.thread-heading h2 {
+  margin: 0;
+  font-size: 24px;
+}
+.conversation-items {
+  display: grid;
+}
+.conversation-item {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #dce7ee;
+  padding: 18px 22px;
+  color: var(--ink);
+  background: white;
+  text-align: left;
+  cursor: pointer;
+}
+.conversation-item:hover,
+.conversation-item.selected {
+  background: #edf3f7;
+}
+.conversation-item-topline,
+.conversation-item-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.conversation-item-topline strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-item-topline time,
+.conversation-item-meta {
+  color: #708495;
+  font-size: 11px;
+}
+.conversation-item-preview {
+  overflow: hidden;
+  color: #53687a;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conversation-item-meta em {
+  color: var(--coral);
+  font-style: normal;
+  font-weight: 700;
+}
+.inbox-placeholder {
+  margin: 0;
+  padding: 34px 22px;
+  color: #708495;
+  line-height: 1.5;
+}
+.inbox-thread {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  background: #f9fbfc;
+}
+.thread-heading {
+  align-items: center;
+  background: white;
+}
+.thread-state {
+  display: grid;
+  gap: 5px;
+  color: #708495;
+  font-size: 12px;
+  text-align: right;
+}
+.thread-state strong {
+  color: var(--ink);
+}
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  align-items: flex-start;
+  overflow: auto;
+  padding: 28px clamp(22px, 6vw, 80px);
+}
+.message-bubble {
+  max-width: min(620px, 85%);
+  border: 1px solid #c8d7e0;
+  padding: 14px 16px;
+  background: white;
+}
+.message-bubble.outbound {
+  align-self: flex-end;
+  border-color: #b6caff;
+  background: #e4edff;
+}
+.message-bubble p {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+.message-bubble footer {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  color: #708495;
+  font-size: 11px;
+}
+.thread-empty {
+  align-self: center;
+  padding: 34px;
+  color: #63788a;
+  text-align: center;
+}
+.thread-empty h2 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-size: 30px;
+}
+.thread-empty p:last-child {
+  margin-bottom: 0;
+}
 .team-page {
   width: min(1120px, calc(100% - 48px));
   margin: 0 auto;
@@ -651,6 +836,11 @@ form {
 .secondary:hover {
   border-color: var(--signal);
 }
+.inbox-section-heading .secondary {
+  min-height: 34px;
+  padding: 7px 10px;
+  font-size: 12px;
+}
 .danger-button {
   border-color: #e2b8b8;
   color: var(--coral);
@@ -741,6 +931,30 @@ form {
   }
   .inbox-empty {
     padding-top: 80px;
+  }
+  .inbox-page {
+    grid-template-columns: 1fr;
+  }
+  .inbox-views {
+    padding: 24px 18px 18px;
+  }
+  .inbox-views h1 {
+    margin-bottom: 18px;
+  }
+  .inbox-views nav {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+  }
+  .inbox-view {
+    flex: 0 0 auto;
+    white-space: nowrap;
+  }
+  .conversation-list {
+    border-right: 0;
+  }
+  .inbox-thread {
+    min-height: 420px;
   }
   .inbox-empty dl {
     flex-direction: column;

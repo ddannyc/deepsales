@@ -108,9 +108,6 @@ function workerBindings(baseUrl: string) {
     META_VERIFY_TOKEN: 'e2e-meta-verify-token',
     META_GRAPH_API_VERSION: 'v26.0',
     TOKEN_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-    META_PAGE_ID: 'e2e-page-id',
-    META_PAGE_ACCESS_TOKEN: 'e2e-page-access-token',
-    M0_FIXED_REPLY: 'E2E fixed reply',
   }
 }
 
@@ -206,8 +203,11 @@ async function main() {
 
   try {
     await waitForReady(baseUrl, worker)
-    const testEnv: NodeJS.ProcessEnv = { ...process.env, E2E_BASE_URL: baseUrl }
-    delete testEnv.E2E_DATABASE_URL
+    const testEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      E2E_BASE_URL: baseUrl,
+      E2E_DATABASE_URL: connectionString,
+    }
     delete testEnv.DATABASE_URL
     await run(['exec', 'playwright', 'test', ...process.argv.slice(2)], testEnv)
   } finally {

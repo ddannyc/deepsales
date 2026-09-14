@@ -15,6 +15,22 @@
       "id": "REDACTED_HYPERDRIVE_ID"
     }
   ],
+  "queues": {
+    "producers": [{ "binding": "WEBHOOKS_QUEUE", "queue": "deepsales-webhooks" }],
+    "consumers": [
+      {
+        "queue": "deepsales-webhooks",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "deepsales-dlq"
+      }
+    ]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "WORKSPACE_REALTIME", "class_name": "WorkspaceRealtime" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["WorkspaceRealtime"] }],
   "ratelimits": [
     {
       "name": "AUTH_RATE_LIMITER",
@@ -27,7 +43,6 @@
   },
   "vars": {
     "META_APP_ID": "REDACTED_META_APP_ID",
-    "META_GRAPH_API_VERSION": "v26.0",
-    "M0_FIXED_REPLY": "M0 received your message."
+    "META_GRAPH_API_VERSION": "v26.0"
   }
 }

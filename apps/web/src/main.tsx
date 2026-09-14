@@ -63,6 +63,42 @@ type FacebookChannel = {
 
 type FacebookPageOption = { id: string; name: string; tasks: string[] }
 
+type InboxView = 'my' | 'waiting-human' | 'ai-handling' | 'unassigned' | 'all-open'
+type InboxConversation = {
+  id: string
+  status: 'OPEN' | 'CLOSED'
+  routingConstraint: 'ANY_MEMBER' | 'HUMAN_ONLY'
+  queueReason: string | null
+  routingQueuedAt: string | null
+  latestMessageAt: string | null
+  lastCustomerMessageAt: string | null
+  updatedAt: string
+  customerId: string
+  customerName: string | null
+  channelId: string
+  channelName: string
+  assigneeMemberId: string | null
+  assigneeName: string | null
+  assigneeType: 'HUMAN' | 'AI' | null
+  latestPreview: string | null
+  failedMessage: boolean
+}
+type InboxMessage = {
+  id: string
+  direction: 'INBOUND' | 'OUTBOUND'
+  senderType: 'CUSTOMER' | 'MEMBER' | 'EXTERNAL'
+  senderMemberId: string | null
+  messageType: 'TEXT' | 'ATTACHMENT'
+  text: string | null
+  externalMessageId: string | null
+  providerSentAt: string | null
+  deliveryState: 'PENDING' | 'SENT' | 'FAILED' | null
+  failureCode: string | null
+  failureMessage: string | null
+  createdAt: string
+}
+type InboxPageData = { conversations: InboxConversation[]; nextCursor: string | null }
+
 type Invitation = {
   url: string
   email: string
@@ -421,29 +457,251 @@ function Shell({
       ) : facebookPage ? (
         <FacebookSettingsPage workspace={me.workspace} />
       ) : (
-        <main className="inbox-empty">
-          <div className="pulse" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </div>
-          <p className="eyebrow">共享收件箱 · 在线</p>
-          <h1>收件箱已准备就绪</h1>
-          <p>接下来连接一个 Facebook 公共主页，新的客户对话会显示在这里。</p>
-          <dl>
-            <div>
-              <dt>你的角色</dt>
-              <dd>{roleLabel(me.workspace.role)}</dd>
-            </div>
-            <div>
-              <dt>登录账号</dt>
-              <dd>{me.user.email}</dd>
-            </div>
-          </dl>
-        </main>
+        <InboxPage workspace={me.workspace} />
       )}
     </div>
   )
+}
+
+const inboxViews: Array<{ id: InboxView; label: string }> = [
+  { id: 'my', label: '我的对话' },
+  { id: 'waiting-human', label: '等待人工' },
+  { id: 'ai-handling', label: 'AI处理中' },
+  { id: 'unassigned', label: '未分配' },
+  { id: 'all-open', label: '全部进行中' },
+]
+
+function InboxPage({ workspace }: { workspace: Workspace }) {
+  const [view, setView] = useState<InboxView>('all-open')
+  const [conversations, setConversations] = useState<InboxConversation[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [messages, setMessages] = useState<InboxMessage[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const selectedIdRef = useRef<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    const response = await fetch(
+      `/api/workspaces/${workspace.id}/conversations?view=${encodeURIComponent(view)}`,
+    )
+    if (!response.ok) throw await responseError(response)
+    const data = (await response.json()) as InboxPageData
+    setError('')
+    setConversations(data.conversations)
+    setSelectedId((current) => {
+      const stillSelected = current && data.conversations.some(({ id }) => id === current)
+      return stillSelected ? current : (data.conversations[0]?.id ?? null)
+    })
+    setLoading(false)
+  }, [view, workspace.id])
+
+  const refreshThread = useCallback(
+    async (conversationId: string) => {
+      const response = await fetch(
+        `/api/workspaces/${workspace.id}/conversations/${conversationId}/messages`,
+      )
+      if (!response.ok) throw await responseError(response)
+      const data = (await response.json()) as { messages: InboxMessage[] }
+      setMessages(data.messages)
+    },
+    [workspace.id],
+  )
+
+  useEffect(() => {
+    setLoading(true)
+    void refresh().catch((cause) => {
+      setLoading(false)
+      setError(inboxErrorMessage(cause))
+    })
+  }, [refresh])
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId
+    if (!selectedId) {
+      setMessages([])
+      return
+    }
+    void refreshThread(selectedId).catch((cause) => setError(inboxErrorMessage(cause)))
+  }, [refreshThread, selectedId])
+
+  useEffect(() => {
+    const refreshVisible = () => {
+      void refresh()
+        .then(() => {
+          if (selectedIdRef.current) return refreshThread(selectedIdRef.current)
+        })
+        .catch((cause) => setError(inboxErrorMessage(cause)))
+    }
+    const interval = window.setInterval(refreshVisible, 30_000)
+    window.addEventListener('focus', refreshVisible)
+    return () => {
+      window.clearInterval(interval)
+      window.removeEventListener('focus', refreshVisible)
+    }
+  }, [refresh, refreshThread])
+
+  useEffect(() => {
+    let socket: WebSocket | undefined
+    let retryTimer: number | undefined
+    let stopped = false
+
+    const connect = () => {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      socket = new WebSocket(
+        `${protocol}//${window.location.host}/api/workspaces/${workspace.id}/realtime`,
+      )
+      socket.onmessage = () => {
+        void refresh()
+          .then(() => (selectedIdRef.current ? refreshThread(selectedIdRef.current) : undefined))
+          .catch((cause) => setError(inboxErrorMessage(cause)))
+      }
+      socket.onclose = () => {
+        if (!stopped) retryTimer = window.setTimeout(connect, 1_000)
+      }
+    }
+
+    connect()
+    return () => {
+      stopped = true
+      if (retryTimer) window.clearTimeout(retryTimer)
+      socket?.close()
+    }
+  }, [refresh, refreshThread, workspace.id])
+
+  return (
+    <main className="inbox-page">
+      <aside className="inbox-views" aria-label="收件箱视图">
+        <p className="eyebrow">共享收件箱</p>
+        <h1>对话</h1>
+        <nav>
+          {inboxViews.map((item) => (
+            <button
+              className={view === item.id ? 'inbox-view active' : 'inbox-view'}
+              key={item.id}
+              type="button"
+              aria-pressed={view === item.id}
+              onClick={() => setView(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      </aside>
+      <section className="conversation-list" aria-label="对话列表">
+        <div className="inbox-section-heading">
+          <div>
+            <p className="eyebrow">{inboxViews.find((item) => item.id === view)?.label}</p>
+            <h2>{conversations.length ? `${conversations.length} 个对话` : '收件箱已准备就绪'}</h2>
+          </div>
+          <button
+            className="secondary"
+            type="button"
+            onClick={() => void refresh().catch((cause) => setError(inboxErrorMessage(cause)))}
+          >
+            刷新
+          </button>
+        </div>
+        {error && (
+          <p className="form-error" role="alert">
+            {error}
+          </p>
+        )}
+        {loading ? (
+          <p className="inbox-placeholder">正在加载对话…</p>
+        ) : conversations.length ? (
+          <div className="conversation-items">
+            {conversations.map((item) => (
+              <button
+                className={
+                  selectedId === item.id ? 'conversation-item selected' : 'conversation-item'
+                }
+                key={item.id}
+                type="button"
+                onClick={() => setSelectedId(item.id)}
+              >
+                <span className="conversation-item-topline">
+                  <strong>{item.customerName ?? '新客户'}</strong>
+                  <time dateTime={item.updatedAt}>{formatDate(item.updatedAt)}</time>
+                </span>
+                <span className="conversation-item-preview">
+                  {item.latestPreview ?? '暂无消息'}
+                </span>
+                <span className="conversation-item-meta">
+                  {item.assigneeName ?? queueReasonLabel(item.queueReason)}
+                  {item.failedMessage && <em>发送失败</em>}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="inbox-placeholder">新的 Messenger 消息会显示在这里。</p>
+        )}
+      </section>
+      <section className="inbox-thread" aria-label="对话详情">
+        {selectedId ? (
+          (() => {
+            const selected = conversations.find(({ id }) => id === selectedId)
+            if (!selected) return <p className="inbox-placeholder">请选择一个对话。</p>
+            return (
+              <>
+                <header className="thread-heading">
+                  <div>
+                    <p className="eyebrow">{selected.channelName}</p>
+                    <h2>{selected.customerName ?? '新客户'}</h2>
+                  </div>
+                  <div className="thread-state">
+                    <strong>{selected.assigneeName ?? '未分配'}</strong>
+                    <span>{queueReasonLabel(selected.queueReason)}</span>
+                  </div>
+                </header>
+                <div className="message-list" aria-live="polite">
+                  {messages.length ? (
+                    messages.map((message) => (
+                      <article
+                        className={`message-bubble ${message.direction.toLowerCase()}`}
+                        key={message.id}
+                      >
+                        <p>{message.text ?? '附件消息'}</p>
+                        <footer>
+                          <time dateTime={message.createdAt}>{formatDate(message.createdAt)}</time>
+                          {message.deliveryState && (
+                            <span>{deliveryStateLabel(message.deliveryState)}</span>
+                          )}
+                        </footer>
+                      </article>
+                    ))
+                  ) : (
+                    <p className="inbox-placeholder">暂无消息。</p>
+                  )}
+                </div>
+              </>
+            )
+          })()
+        ) : (
+          <div className="thread-empty">
+            <p className="eyebrow">Messenger</p>
+            <h2>选择一个对话</h2>
+            <p>从左侧列表打开客户消息。</p>
+          </div>
+        )}
+      </section>
+    </main>
+  )
+}
+
+function queueReasonLabel(reason: string | null) {
+  return (
+    {
+      NEW_CONVERSATION: '等待分配',
+      AI_HANDOFF: '等待人工',
+      MANUAL_UNASSIGN: '手动取消分配',
+      MEMBER_DISABLED: '成员已停用',
+    }[reason ?? ''] ?? '处理中'
+  )
+}
+
+function deliveryStateLabel(state: NonNullable<InboxMessage['deliveryState']>) {
+  return { PENDING: '发送中', SENT: '已发送', FAILED: '发送失败' }[state]
 }
 
 const facebookStatusLabels: Record<FacebookChannel['connectionStatus'], string> = {
@@ -1143,6 +1401,17 @@ function facebookErrorMessage(cause: unknown): string {
       FACEBOOK_SUBSCRIPTION_FAILED: 'Messenger 订阅失败，请检查 Page 权限。',
       FACEBOOK_PROVIDER_ERROR: 'Facebook 服务暂时不可用，请稍后重试。',
     }[cause.code] ?? 'Facebook 连接失败，请稍后重试。'
+  )
+}
+
+function inboxErrorMessage(cause: unknown): string {
+  if (!(cause instanceof ApiError)) return '收件箱加载失败，请稍后重试。'
+  return (
+    {
+      FORBIDDEN: '你没有查看此工作区收件箱的权限。',
+      NOT_FOUND: '该对话已不存在。',
+      INVALID_REQUEST: '收件箱请求无效，请刷新后重试。',
+    }[cause.code] ?? '收件箱加载失败，请稍后重试。'
   )
 }
 

@@ -5,12 +5,68 @@ import {
   decryptFacebookToken,
   encryptFacebookToken,
   FacebookProviderError,
+  facebookWebhookJobSchema,
+  normalizeFacebookWebhook,
   redactedFacebookFailure,
 } from './facebook'
 
 const encryptionKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)))
 
 describe('Facebook adapter', () => {
+  it('normalizes text events without local dedupe or echo data', () => {
+    const events = normalizeFacebookWebhook({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            {
+              timestamp: 1_700_000_000_000,
+              sender: { id: 'customer-1' },
+              message: { mid: 'mid-1', text: 'hello' },
+            },
+            {
+              sender: { id: 'page-1' },
+              message: { mid: 'echo-1', text: 'reply', is_echo: true },
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toEqual(
+      expect.objectContaining({
+        pageId: 'page-1',
+        externalUserId: 'customer-1',
+        externalMessageId: 'mid-1',
+        text: 'hello',
+        providerSentAt: new Date(1_700_000_000_000),
+      }),
+    )
+    expect(normalizeFacebookWebhook({ object: 'page', entry: [] })).toEqual([])
+  })
+
+  it('validates the versioned webhook queue contract', () => {
+    expect(
+      facebookWebhookJobSchema.parse({
+        v: 1,
+        type: 'facebook.inbound',
+        ingressId: 'ingress-1',
+        payloadSha256: 'a'.repeat(64),
+        receivedAt: '2026-09-14T00:00:00.000Z',
+        event: {
+          pageId: 'page-1',
+          externalUserId: 'customer-1',
+          externalMessageId: 'mid-1',
+          text: 'hello',
+          providerSentAt: null,
+          eventFragment: { messageId: 'mid-1' },
+        },
+      }),
+    ).toEqual(expect.objectContaining({ v: 1, type: 'facebook.inbound' }))
+  })
+
   it('builds OAuth with only the approved permissions', () => {
     const url = new URL(
       buildFacebookOAuthUrl({
