@@ -15,6 +15,7 @@ import {
   facebookWebhookReceipt,
   listConversations,
   listMessages,
+  markFacebookChannelHealth,
   message,
   processFacebookInbound,
   user,
@@ -152,6 +153,55 @@ describe.skipIf(!connectionString)('durable Facebook inbox intake', () => {
     await expect(
       processFacebookInbound(db, inbound(pageId, 'disabled-mid', 'ignored', `${runId}-disabled`)),
     ).resolves.toMatchObject({ kind: 'ignored' })
+  })
+
+  it('keeps inbound messages when the Facebook connection needs attention', async () => {
+    const ownerId = randomUUID()
+    const pageId = randomUUID()
+    await db
+      .insert(user)
+      .values({ id: ownerId, name: 'Inbox owner', email: `${ownerId}@example.com` })
+    const workspace = await bootstrapWorkspace(db, {
+      userId: ownerId,
+      userName: 'Inbox owner',
+      name: 'Inbox health warning',
+    })
+    const [connected] = await connectFacebookPages(db, {
+      workspaceId: workspace.id,
+      actingUserId: ownerId,
+      pages: [
+        {
+          pageId,
+          displayName: 'Support',
+          encryptedPageAccessToken: 'cipher',
+          tokenIv: 'iv',
+          tokenKeyVersion: 'v1',
+        },
+      ],
+    })
+    if (!connected) throw new Error('Facebook channel was not created')
+
+    await markFacebookChannelHealth(db, {
+      workspaceId: workspace.id,
+      channelId: connected.id,
+      userId: ownerId,
+      active: false,
+      error: { code: 'FACEBOOK_CHECK_FAILED', message: 'subscription check failed' },
+    })
+
+    const result = await processFacebookInbound(
+      db,
+      inbound(pageId, 'health-warning-mid', 'still received', randomUUID()),
+    )
+    expect(result).toMatchObject({ kind: 'created', workspaceId: workspace.id })
+
+    const inbox = await listConversations(db, {
+      workspaceId: workspace.id,
+      userId: ownerId,
+      view: 'all-open',
+    })
+    expect(inbox.conversations).toHaveLength(1)
+    expect(inbox.conversations[0]?.latestPreview).toBe('still received')
   })
 })
 

@@ -60,13 +60,7 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
       .select({ channelId: channel.id, workspaceId: channel.workspaceId })
       .from(channel)
       .innerJoin(facebookChannelConfig, eq(facebookChannelConfig.channelId, channel.id))
-      .where(
-        and(
-          eq(facebookChannelConfig.pageId, input.pageId),
-          eq(channel.status, 'ACTIVE'),
-          eq(facebookChannelConfig.connectionStatus, 'ACTIVE'),
-        ),
-      )
+      .where(and(eq(facebookChannelConfig.pageId, input.pageId), eq(channel.status, 'ACTIVE')))
       .limit(1)
 
     if (!activeChannel) {
