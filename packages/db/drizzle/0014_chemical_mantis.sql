@@ -1,0 +1,2 @@
+CREATE INDEX "conversation_routing_recovery_idx" ON "conversation" USING btree ("status","assignee_member_id","routing_queued_at","id");--> statement-breakpoint
+CREATE INDEX "message_delivery_recovery_idx" ON "message" USING btree ("direction","delivery_state","delivery_started_at","created_at","id");

@@ -223,6 +223,31 @@ export async function retryAiResponseRun(db: Database, input: { runId: string; n
   return updated ?? null
 }
 
+export async function listStaleAiResponseRuns(
+  db: Database,
+  input: { now?: Date; limit?: number } = {},
+) {
+  const now = input.now ?? new Date()
+  const cutoff = new Date(now.getTime() - AI_GENERATION_TIMEOUT_MS)
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 100)
+
+  return db.transaction(async (tx) =>
+    tx
+      .select({
+        runId: aiResponseRun.id,
+        conversationId: aiResponseRun.conversationId,
+        workspaceId: conversation.workspaceId,
+        memberId: aiResponseRun.memberId,
+      })
+      .from(aiResponseRun)
+      .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
+      .where(and(eq(aiResponseRun.state, 'GENERATING'), lte(aiResponseRun.startedAt, cutoff)))
+      .orderBy(asc(aiResponseRun.startedAt), asc(aiResponseRun.id))
+      .limit(limit)
+      .for('update', { skipLocked: true }),
+  )
+}
+
 export async function finishAiResponseRun(
   db: Database,
   input: {

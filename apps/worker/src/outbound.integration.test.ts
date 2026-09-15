@@ -10,6 +10,7 @@ import {
   connectFacebookPages,
   createDatabase,
   createFacebookHumanReply as createHumanReply,
+  deliveryAttempt,
   message,
   processFacebookInbound,
   setMemberChannelAccess,
@@ -107,6 +108,43 @@ describe.skipIf(!connectionString)('outbound Worker consumer', () => {
         message: 'access_token=[redacted]',
       },
     ])
+  })
+
+  it('retries transient Graph failures and records each delivery attempt', async () => {
+    const fixture = await createFixture(db)
+    const fakeFetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ error: { message: 'busy' } }, { status: 503 }))
+      .mockResolvedValueOnce(Response.json({ message_id: 'meta-message-2' }))
+    vi.stubGlobal('fetch', fakeFetch)
+
+    const first = queueMessage(fixture.messageId)
+    await handleOutboundBatch(batch(first), environment())
+
+    expect(first.ack).not.toHaveBeenCalled()
+    expect(first.retry).toHaveBeenCalledOnce()
+    expect(
+      await db
+        .select({
+          deliveryState: message.deliveryState,
+          deliveryStartedAt: message.deliveryStartedAt,
+        })
+        .from(message)
+        .where(eq(message.id, fixture.messageId)),
+    ).toEqual([{ deliveryState: 'PENDING', deliveryStartedAt: null }])
+
+    const second = queueMessage(fixture.messageId)
+    await handleOutboundBatch(batch(second), environment())
+
+    expect(fakeFetch).toHaveBeenCalledTimes(2)
+    expect(second.ack).toHaveBeenCalledOnce()
+    expect(
+      await db
+        .select({ attemptNumber: deliveryAttempt.attemptNumber })
+        .from(deliveryAttempt)
+        .where(eq(deliveryAttempt.messageId, fixture.messageId))
+        .orderBy(deliveryAttempt.attemptNumber),
+    ).toEqual([{ attemptNumber: 1 }, { attemptNumber: 2 }])
   })
 
   it('marks a network failure ambiguous without retrying the Graph call', async () => {

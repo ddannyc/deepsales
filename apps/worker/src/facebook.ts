@@ -227,6 +227,11 @@ export function redactedFacebookFailure(
   }
 }
 
+export function isRetryableFacebookFailure(error: unknown) {
+  if (!(error instanceof FacebookProviderError)) return false
+  return error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500
+}
+
 export function isFacebookReplyWindowOpen(eligibleUntil: Date | null, now = new Date()) {
   return Boolean(eligibleUntil && eligibleUntil.getTime() > now.getTime())
 }
@@ -242,49 +247,62 @@ export type FacebookInboundEvent = {
 }
 
 const facebookAttachmentKindSchema = z.enum(['IMAGE', 'FILE', 'AUDIO', 'VIDEO'])
-const facebookQueuedAttachmentSchema = z.object({
-  kind: facebookAttachmentKindSchema,
-  filename: z.string().max(500).nullable(),
-  mimeType: z.string().max(200).nullable(),
-  encryptedSourceUrl: z.string().min(1).max(10_000),
-  urlIv: z.string().min(1).max(200),
-  tokenKeyVersion: z.string().min(1).max(50),
-  expiresAt: z.string().datetime(),
-})
-const facebookInboundEventSchema = z.object({
-  pageId: z.string().min(1).max(200),
-  externalUserId: z.string().min(1).max(500),
-  externalMessageId: z.string().min(1).max(500),
-  text: z.string().max(100_000).nullable().default(null),
-  attachments: z.array(facebookQueuedAttachmentSchema).max(10).default([]),
-  providerSentAt: z.string().datetime().nullable(),
-  eventFragment: z.record(z.string(), z.unknown()),
-})
+const facebookQueuedAttachmentSchema = z
+  .object({
+    kind: facebookAttachmentKindSchema,
+    filename: z.string().max(500).nullable(),
+    mimeType: z.string().max(200).nullable(),
+    encryptedSourceUrl: z.string().min(1).max(10_000),
+    urlIv: z.string().min(1).max(200),
+    tokenKeyVersion: z.string().min(1).max(50),
+    expiresAt: z.string().datetime(),
+  })
+  .strict()
+const facebookInboundEventSchema = z
+  .object({
+    pageId: z.string().min(1).max(200),
+    externalUserId: z.string().min(1).max(500),
+    externalMessageId: z.string().min(1).max(500),
+    text: z.string().max(100_000).nullable().default(null),
+    attachments: z.array(facebookQueuedAttachmentSchema).max(10).default([]),
+    providerSentAt: z.string().datetime().nullable(),
+    eventFragment: z.record(z.string(), z.unknown()),
+  })
+  .strict()
+  .refine(({ text, attachments }) => Boolean(text?.trim()) || attachments.length > 0, {
+    message: 'Message text or attachment is required',
+  })
 
-export const facebookWebhookJobSchema = z.object({
-  v: z.literal(1),
-  type: z.literal('facebook.inbound'),
-  ingressId: z.string().min(1).max(200),
-  payloadSha256: z.string().regex(/^[0-9a-f]{64}$/i),
-  receivedAt: z.string().datetime(),
-  event: facebookInboundEventSchema,
-})
+export const facebookWebhookJobSchema = z
+  .object({
+    v: z.literal(1),
+    type: z.literal('facebook.inbound'),
+    ingressId: z.string().min(1).max(200),
+    payloadSha256: z.string().regex(/^[0-9a-f]{64}$/i),
+    receivedAt: z.string().datetime(),
+    event: facebookInboundEventSchema,
+  })
+  .strict()
 
 export type FacebookWebhookJob = z.infer<typeof facebookWebhookJobSchema>
 
-export const facebookAttachmentJobSchema = z.object({
-  v: z.literal(1),
-  type: z.literal('facebook.attachment'),
-  attachmentId: z.string().uuid(),
-})
+export const facebookAttachmentJobSchema = z
+  .object({
+    v: z.literal(1),
+    type: z.literal('facebook.attachment'),
+    attachmentId: z.string().uuid(),
+  })
+  .strict()
 
 export type FacebookAttachmentJob = z.infer<typeof facebookAttachmentJobSchema>
 
-export const facebookOutboundJobSchema = z.object({
-  v: z.literal(1),
-  type: z.literal('facebook.outbound'),
-  messageId: z.string().uuid(),
-})
+export const facebookOutboundJobSchema = z
+  .object({
+    v: z.literal(1),
+    type: z.literal('facebook.outbound'),
+    messageId: z.string().uuid(),
+  })
+  .strict()
 
 export type FacebookOutboundJob = z.infer<typeof facebookOutboundJobSchema>
 
@@ -402,6 +420,8 @@ function redactFacebookMessage(message: string, secrets: string[]) {
     )
     .replace(/Bearer\s+[^"'\s,}]+/gi, 'Bearer [redacted]')
     .replace(/(access_token|client_secret|code|state)=[^&\s]+/gi, '$1=[redacted]')
+    .replace(/https?:\/\/[^\s"'<>]+/gi, '[redacted-url]')
+    .replace(/\b\d{8,}\b/g, '[redacted-id]')
     .slice(0, 500)
 }
 

@@ -390,6 +390,12 @@ export const conversation = pgTable(
   (table) => [
     index('conversation_workspace_updated_idx').on(table.workspaceId, table.updatedAt, table.id),
     index('conversation_identity_status_idx').on(table.channelIdentityId, table.status),
+    index('conversation_routing_recovery_idx').on(
+      table.status,
+      table.assigneeMemberId,
+      table.routingQueuedAt,
+      table.id,
+    ),
     check(
       'conversation_lifecycle_fields',
       sql`(
@@ -451,6 +457,13 @@ export const message = pgTable(
   },
   (table) => [
     index('message_conversation_created_idx').on(table.conversationId, table.createdAt, table.id),
+    index('message_delivery_recovery_idx').on(
+      table.direction,
+      table.deliveryState,
+      table.deliveryStartedAt,
+      table.createdAt,
+      table.id,
+    ),
     check(
       'message_sender_member_consistency',
       sql`(${table.senderType} = 'MEMBER') = (${table.senderMemberId} is not null)`,

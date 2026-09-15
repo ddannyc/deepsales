@@ -9,11 +9,13 @@ import type { Bindings } from './bindings'
 import type { EmbeddingProvider } from './ai'
 import { AIEmbeddingError } from './ai'
 
-export const knowledgeDocumentJobSchema = z.object({
-  v: z.literal(1),
-  type: z.literal('knowledge.document'),
-  documentId: z.string().uuid(),
-})
+export const knowledgeDocumentJobSchema = z
+  .object({
+    v: z.literal(1),
+    type: z.literal('knowledge.document'),
+    documentId: z.string().uuid(),
+  })
+  .strict()
 
 export async function retrieveKnowledgeChunks(
   db: Database,

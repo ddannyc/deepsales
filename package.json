@@ -6,7 +6,7 @@
     "build": "pnpm --filter @deepsales/web build && pnpm --filter @deepsales/worker build",
     "db:generate": "pnpm --filter @deepsales/db db:generate",
     "db:migrate": "pnpm --filter @deepsales/db db:migrate",
-    "deploy": "pnpm build && pnpm --filter @deepsales/worker run deploy && tsx scripts/run-production-migrate.ts",
+    "deploy": "pnpm build && pnpm --filter @deepsales/worker run deploy",
     "dev": "pnpm --filter @deepsales/web build && pnpm --filter @deepsales/worker dev",
     "format": "biome format --write config database.test.ts apps/worker/src apps/web/src packages/db/src packages/db/test e2e scripts/run-e2e.ts scripts/run-production-migrate.ts playwright.config.ts",
     "format:check": "biome format config database.test.ts apps/worker/src apps/web/src packages/db/src packages/db/test e2e scripts/run-e2e.ts scripts/run-production-migrate.ts playwright.config.ts",

@@ -57,19 +57,21 @@ read-after-write flows require fresh reads:
 pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DATABASE_URL --caching-disabled
 ```
 
-Replace the placeholder Hyperdrive ID in `apps/worker/wrangler.jsonc`, set
-`APP_URL`, `BETTER_AUTH_SECRET`, `META_APP_SECRET`, `META_VERIFY_TOKEN`,
+Replace the placeholder Hyperdrive ID and `APP_URL` in `apps/worker/wrangler.jsonc`, set
+`BETTER_AUTH_SECRET`, `META_APP_SECRET`, `META_VERIFY_TOKEN`,
 `TOKEN_ENCRYPTION_KEY`, and `AI_API_KEY` with Wrangler. Set `AI_BASE_URL` to the
 Alibaba Cloud International Model Studio region/workspace-compatible base URL, then keep the
 Alibaba embedding and LLM variables from `wrangler.jsonc`:
 
 ```powershell
-pnpm run deploy # deploys first, then runs APP_ENV=production pnpm db:migrate
+$env:APP_ENV = 'production'
+pnpm db:migrate
+pnpm run deploy
 ```
 
 `.env.local` is only for development. Put the production Neon URLs in ignored `.env.production.local`: use `DATABASE_URL` for the
-pooled URL and `DATABASE_URL_UNPOOLED` for the direct migration URL. `pnpm run deploy` builds and
-deploys first, then runs the production migration with the direct URL.
+pooled URL and `DATABASE_URL_UNPOOLED` for the direct migration URL. Run the production migration
+separately before deployment with the direct URL.
 
 For an online Neon migration, set `APP_ENV=production` and run `pnpm db:migrate`
 (`$env:APP_ENV = 'production'; pnpm db:migrate` in PowerShell). For a test migration, use

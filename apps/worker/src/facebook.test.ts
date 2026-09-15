@@ -9,6 +9,7 @@ import {
   facebookWebhookJobSchema,
   facebookOutboundJobSchema,
   isFacebookReplyWindowOpen,
+  isRetryableFacebookFailure,
   normalizeFacebookWebhook,
   redactedFacebookFailure,
 } from './facebook'
@@ -141,6 +142,24 @@ describe('Facebook adapter', () => {
         },
       }),
     ).toEqual(expect.objectContaining({ v: 1, type: 'facebook.inbound' }))
+    expect(
+      facebookWebhookJobSchema.safeParse({
+        v: 1,
+        type: 'facebook.inbound',
+        ingressId: 'ingress-empty',
+        payloadSha256: 'a'.repeat(64),
+        receivedAt: '2026-09-14T00:00:00.000Z',
+        event: {
+          pageId: 'page-1',
+          externalUserId: 'customer-1',
+          externalMessageId: 'mid-empty',
+          text: null,
+          attachments: [],
+          providerSentAt: null,
+          eventFragment: {},
+        },
+      }).success,
+    ).toBe(false)
   })
 
   it('encrypts attachment sources before they enter the webhook queue', async () => {
@@ -195,6 +214,14 @@ describe('Facebook adapter', () => {
       type: 'facebook.outbound',
       messageId: '00000000-0000-4000-8000-000000000001',
     })
+    expect(
+      facebookOutboundJobSchema.safeParse({
+        v: 1,
+        type: 'facebook.outbound',
+        messageId: '00000000-0000-4000-8000-000000000001',
+        text: 'customer content must not enter the queue contract',
+      }).success,
+    ).toBe(false)
   })
 
   it('builds OAuth with only the approved permissions', () => {
@@ -293,6 +320,33 @@ describe('Facebook adapter', () => {
         ['page-secret'],
       ).message,
     ).toBe('{"access_token":"[redacted]","authorization":"Bearer [redacted]"}')
+    expect(
+      redactedFacebookFailure(
+        new FacebookProviderError(
+          400,
+          100,
+          null,
+          'OAuthException',
+          'recipient_id=1234567890 url=https://provider.example/file?access_token=secret',
+        ),
+        ['secret'],
+      ).message,
+    ).toBe('recipient_id=[redacted-id] url=[redacted-url]')
+  })
+
+  it('classifies retryable provider responses without retrying ambiguous network errors', () => {
+    expect(
+      isRetryableFacebookFailure(new FacebookProviderError(429, null, null, null, 'busy')),
+    ).toBe(true)
+    expect(
+      isRetryableFacebookFailure(new FacebookProviderError(503, null, null, null, 'busy')),
+    ).toBe(true)
+    expect(
+      isRetryableFacebookFailure(new FacebookProviderError(0, null, null, null, 'network')),
+    ).toBe(false)
+    expect(
+      isRetryableFacebookFailure(new FacebookProviderError(400, null, null, null, 'bad')),
+    ).toBe(false)
   })
 
   it('turns subscription failures into a classified provider error', async () => {

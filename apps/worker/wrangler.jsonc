@@ -48,6 +48,10 @@
 			{
 				"binding": "MAINTENANCE_QUEUE",
 				"queue": "deepsales-maintenance"
+			},
+			{
+				"binding": "JOBS_DLQ",
+				"queue": "deepsales-dlq"
 			}
 		],
 		"consumers": [
@@ -124,6 +128,7 @@
 		"enabled": true
 	},
 	"vars": {
+		"APP_URL": "https://replace-with-production-url.example.com",
 		"META_APP_ID": "REDACTED_META_APP_ID",
 		"META_GRAPH_API_VERSION": "v26.0",
 		"AI_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -131,7 +136,8 @@
 		"EMBEDDING_MODEL": "qwen3.7-text-embedding",
 		"EMBEDDING_DIMENSIONS": "1536",
 		"LLM_PROVIDER": "alibaba",
-		"LLM_MODEL": "qwen3.7-flash",
-		"AI_RETRIEVAL_MAX_DISTANCE": "0.35"
+		"LLM_MODEL": "qwen3.8-flash",
+		"AI_RETRIEVAL_MAX_DISTANCE": "0.35",
+		"AI_DEBOUNCE_SECONDS": "2"
 	}
 }

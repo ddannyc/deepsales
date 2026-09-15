@@ -3,6 +3,7 @@ import {
   claimAiResponseRun,
   autoAssignConversation,
   AssignmentError,
+  AiResponseError,
   AiMemberError,
   bootstrapWorkspace,
   claimOutboundMessage,
@@ -24,6 +25,7 @@ import {
   createFileKnowledgeDocument,
   createInlineKnowledgeDocument,
   deleteKnowledgeDocument,
+  deleteOldFacebookWebhookReceipts,
   disableFacebookChannel,
   expireFacebookInboundAttachments,
   FacebookError,
@@ -47,6 +49,7 @@ import {
   listPendingKnowledgeDocumentIds,
   listQueuedAiResponseRunIds,
   listQueuedConversationIds,
+  listStaleAiResponseRuns,
   listKnowledgeBases,
   listKnowledgeDocuments,
   KnowledgeError,
@@ -58,10 +61,11 @@ import {
   MemberError,
   processFacebookInbound,
   recordAiResponseRetrievedChunks,
+  retryAiResponseRun,
+  releaseOutboundMessage,
   releaseFacebookInboundAttachment,
   releaseKnowledgeDocument,
   recoverStaleOutboundMessages,
-  recoverStaleAiResponseRuns,
   member,
   publishAiMemberConfig,
   setMemberChannelAccess,
@@ -88,6 +92,7 @@ import {
   facebookAttachmentJobSchema,
   facebookWebhookJobSchema,
   isFacebookReplyWindowOpen,
+  isRetryableFacebookFailure,
   normalizeFacebookWebhook,
   decryptFacebookToken,
   createFacebookAdapter,
@@ -566,6 +571,8 @@ app.post('/api/workspaces/:workspaceId/ai-members/:memberId/publish', async (c) 
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `ai-publish:${session.user.id}`)
+    if (limited) return limited
     try {
       const config = await publishAiMemberConfig(db, {
         workspaceId: c.req.param('workspaceId'),
@@ -983,6 +990,8 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/transfer', 
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `conversation-transfer:${session.user.id}`)
+    if (limited) return limited
     const input = transferInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success) {
       return c.json({ error: { code: 'INVALID_REQUEST', message: 'Choose a member' } }, 400)
@@ -1020,6 +1029,8 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/unassign', 
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `conversation-unassign:${session.user.id}`)
+    if (limited) return limited
 
     try {
       const result = await unassignConversation(db, {
@@ -1177,6 +1188,8 @@ app.post('/api/invitations/accept', async (c) => {
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `ai-trigger:${session.user.id}`)
+    if (limited) return limited
 
     const input = invitationAcceptInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success) {
@@ -1207,6 +1220,8 @@ app.post('/api/workspaces/:workspaceId/members', async (c) => {
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `ai-trigger:${session.user.id}`)
+    if (limited) return limited
     const input = aiMemberInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success) {
       return c.json({ error: { code: 'INVALID_REQUEST', message: 'Enter a valid AI member' } }, 400)
@@ -1233,6 +1248,8 @@ app.patch('/api/workspaces/:workspaceId/members/:memberId', async (c) => {
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `ai-trigger:${session.user.id}`)
+    if (limited) return limited
     const input = memberUpdateInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success) {
       return c.json(
@@ -1271,6 +1288,8 @@ app.put('/api/workspaces/:workspaceId/members/:memberId/channels', async (c) => 
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `ai-trigger:${session.user.id}`)
+    if (limited) return limited
     const input = channelAccessInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success) {
       return c.json(
@@ -1328,11 +1347,13 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.EMBEDDING_DIMENSIONS === String(EMBEDDING_DIMENSIONS) &&
       env.LLM_PROVIDER === ALIBABA_LLM_PROVIDER &&
       Boolean(env.LLM_MODEL?.trim()) &&
+      env.AI_DEBOUNCE_SECONDS === '2' &&
       env.WEBHOOKS_QUEUE &&
       env.OUTBOUND_QUEUE &&
       env.AI_QUEUE &&
       env.DOCUMENTS_QUEUE &&
       env.MAINTENANCE_QUEUE &&
+      env.JOBS_DLQ &&
       env.OBJECTS &&
       env.WORKSPACE_REALTIME,
   )
@@ -2070,6 +2091,18 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       }
       queueMessage.ack()
     } catch (error) {
+      if (isRetryableAiFailure(error)) {
+        try {
+          const retried = await withDatabase(env, (db) =>
+            retryAiResponseRun(db, { runId: claimed.id }),
+          )
+          if (retried) queueMessage.retry()
+          else queueMessage.ack()
+        } catch {
+          queueMessage.retry()
+        }
+        continue
+      }
       try {
         await completeAiHandoff(env, claimed, {
           reason: 'PROVIDER_FAILURE',
@@ -2089,7 +2122,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
 
 async function completeAiHandoff(
   env: Bindings,
-  claimed: Extract<Awaited<ReturnType<typeof claimAiResponseRun>>, { kind: 'CLAIMED' }>,
+  claimed: { id: string; workspaceId: string; conversationId: string; memberId: string },
   input: {
     reason:
       | 'CUSTOMER_REQUEST'
@@ -2144,6 +2177,17 @@ function handoffNotice(responseLanguage: string) {
 
 function isPersistentAiFailure(error: unknown) {
   return error instanceof AIProviderError && !error.retryable
+}
+
+function isRetryableAiFailure(error: unknown) {
+  if (error instanceof AIProviderError) return error.retryable
+  return !(
+    error instanceof AIOutputError ||
+    error instanceof AIEmbeddingError ||
+    error instanceof AiResponseError ||
+    error instanceof AssignmentError ||
+    error instanceof KnowledgeError
+  )
 }
 
 function aiFailureCode(error: unknown) {
@@ -2545,11 +2589,13 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
     }
 
     let pageAccessToken = ''
+    let recipientId = ''
     try {
       const facebookDelivery = await withDatabase(env, (db) =>
         getFacebookOutboundDelivery(db, claimed.id),
       )
       if (!facebookDelivery) throw new Error('Facebook delivery context is missing')
+      recipientId = facebookDelivery.externalUserId
       if (!isFacebookReplyWindowOpen(facebookDelivery.eligibleUntil)) {
         await withDatabase(env, (db) =>
           failOutboundMessage(db, {
@@ -2582,7 +2628,7 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
       }).sendText(
         facebookDelivery.pageId,
         facebookDelivery.externalUserId,
-        claimed.text,
+        claimed.text ?? '',
         pageAccessToken,
       )
       await withDatabase(env, (db) =>
@@ -2599,8 +2645,31 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
         pageAccessToken,
         env.META_APP_SECRET,
         env.TOKEN_ENCRYPTION_KEY,
+        recipientId,
+        claimed.text ?? '',
       ])
+      const attempt = {
+        httpStatus:
+          error instanceof FacebookProviderError && error.status > 0 ? error.status : null,
+        code: error instanceof FacebookProviderError ? error.providerCode : null,
+        subcode: error instanceof FacebookProviderError ? error.providerSubcode : null,
+        type: error instanceof FacebookProviderError ? error.providerType : null,
+        message: providerFailure.message,
+      }
       const ambiguous = error instanceof FacebookProviderError && error.status === 0
+      if (isRetryableFacebookFailure(error)) {
+        try {
+          await withDatabase(env, (db) =>
+            releaseOutboundMessage(db, {
+              messageId: claimed.id,
+              attemptId: claimed.attemptId,
+              attempt,
+            }),
+          )
+        } catch {}
+        queueMessage.retry()
+        continue
+      }
       try {
         await withDatabase(env, (db) =>
           failOutboundMessage(db, {
@@ -2610,14 +2679,7 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
             failureMessage: ambiguous
               ? 'Delivery result was ambiguous'
               : 'Facebook delivery failed',
-            attempt: {
-              httpStatus:
-                error instanceof FacebookProviderError && error.status > 0 ? error.status : null,
-              code: error instanceof FacebookProviderError ? error.providerCode : null,
-              subcode: error instanceof FacebookProviderError ? error.providerSubcode : null,
-              type: error instanceof FacebookProviderError ? error.providerType : null,
-              message: providerFailure.message,
-            },
+            attempt,
           }),
         )
         await publishInboxChange(env, claimed.workspaceId, job.data.messageId, 'message.changed')
@@ -2684,6 +2746,11 @@ export async function handleScheduled(env: Bindings) {
       await publishInboxChange(env, item.workspaceId, item.messageId, 'message.changed')
     }
 
+    const deletedReceipts = await withDatabase(env, (db) => deleteOldFacebookWebhookReceipts(db))
+    if (deletedReceipts) {
+      console.log(JSON.stringify({ event: 'webhook_receipts_deleted', receipts: deletedReceipts }))
+    }
+
     if (env.DOCUMENTS_QUEUE) {
       const pendingAttachments = await withDatabase(env, (db) =>
         listPendingFacebookInboundAttachmentIds(db),
@@ -2710,9 +2777,28 @@ export async function handleScheduled(env: Bindings) {
         await withDatabase(env, (db) => listQueuedConversationIds(db)),
       )
     }
-    const staleAiRuns = await withDatabase(env, (db) => recoverStaleAiResponseRuns(db))
+    const staleAiRuns = await withDatabase(env, (db) => listStaleAiResponseRuns(db))
     for (const item of staleAiRuns) {
-      await publishInboxChange(env, item.workspaceId, item.conversationId, 'conversation.changed')
+      try {
+        await completeAiHandoff(
+          env,
+          {
+            id: item.runId,
+            workspaceId: item.workspaceId,
+            conversationId: item.conversationId,
+            memberId: item.memberId,
+          },
+          {
+            reason: 'PROVIDER_FAILURE',
+            runState: 'FAILED',
+            failureCode: 'AI_GENERATION_TIMEOUT',
+            failureMessage: 'AI generation exceeded the recovery timeout',
+            noticeText: null,
+          },
+        )
+      } catch {
+        console.warn(JSON.stringify({ event: 'ai_recovery_failed' }))
+      }
     }
     if (env.AI_QUEUE) {
       const runIds = await withDatabase(env, (db) => listQueuedAiResponseRunIds(db))

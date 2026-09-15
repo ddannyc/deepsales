@@ -1,4 +1,4 @@
-import { and, asc, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
   channelIdentity,
@@ -179,9 +179,20 @@ export async function claimOutboundMessage(
       .returning({ id: message.id })
     if (!claimed) return null
 
+    const [lastAttempt] = await tx
+      .select({ attemptNumber: deliveryAttempt.attemptNumber })
+      .from(deliveryAttempt)
+      .where(eq(deliveryAttempt.messageId, current.id))
+      .orderBy(desc(deliveryAttempt.attemptNumber))
+      .limit(1)
+
     const [attempt] = await tx
       .insert(deliveryAttempt)
-      .values({ messageId: current.id, attemptNumber: 1, startedAt: now })
+      .values({
+        messageId: current.id,
+        attemptNumber: (lastAttempt?.attemptNumber ?? 0) + 1,
+        startedAt: now,
+      })
       .returning({
         id: deliveryAttempt.id,
         attemptNumber: deliveryAttempt.attemptNumber,
@@ -203,6 +214,58 @@ export async function claimOutboundMessage(
       .limit(1)
     if (!delivery) throw new ReplyError('NOT_FOUND', 'Message was not found')
     return { ...delivery, attemptId: attempt.id, attemptNumber: attempt.attemptNumber }
+  })
+}
+
+export async function releaseOutboundMessage(
+  db: Database,
+  input: {
+    messageId: string
+    attemptId: string
+    attempt?: {
+      httpStatus?: number | null
+      code?: number | null
+      subcode?: number | null
+      type?: string | null
+      message?: string | null
+    }
+    now?: Date
+  },
+) {
+  const now = input.now ?? new Date()
+  return db.transaction(async (tx) => {
+    const [updated] = await tx
+      .update(message)
+      .set({ deliveryStartedAt: null, updatedAt: now })
+      .where(
+        and(
+          eq(message.id, input.messageId),
+          eq(message.direction, 'OUTBOUND'),
+          eq(message.deliveryState, 'PENDING'),
+          isNotNull(message.deliveryStartedAt),
+        ),
+      )
+      .returning({ id: message.id })
+    if (!updated) return null
+
+    await tx
+      .update(deliveryAttempt)
+      .set({
+        httpStatus: input.attempt?.httpStatus ?? null,
+        code: input.attempt?.code ?? null,
+        subcode: input.attempt?.subcode ?? null,
+        type: input.attempt?.type ?? null,
+        message: input.attempt?.message?.slice(0, 500) ?? null,
+        completedAt: now,
+      })
+      .where(
+        and(
+          eq(deliveryAttempt.id, input.attemptId),
+          eq(deliveryAttempt.messageId, input.messageId),
+          isNull(deliveryAttempt.completedAt),
+        ),
+      )
+    return updated
   })
 }
 

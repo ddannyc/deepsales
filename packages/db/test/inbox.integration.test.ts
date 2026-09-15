@@ -10,6 +10,7 @@ import {
   conversation,
   createDatabase,
   customer,
+  deleteOldFacebookWebhookReceipts,
   facebookAttachmentSource,
   getFacebookAttachmentForDownload,
   disableFacebookChannel,
@@ -156,6 +157,37 @@ describe.skipIf(!connectionString)('durable Facebook inbox intake', () => {
     await expect(
       processFacebookInbound(db, inbound(pageId, 'disabled-mid', 'ignored', `${runId}-disabled`)),
     ).resolves.toMatchObject({ kind: 'ignored' })
+  })
+
+  it('deletes webhook receipts older than the retention window', async () => {
+    const now = new Date('2026-09-15T00:00:00.000Z')
+    const pageId = randomUUID()
+    await db.insert(facebookWebhookReceipt).values([
+      {
+        ingressId: randomUUID(),
+        pageId,
+        externalMessageId: 'old-message',
+        eventFragment: { kind: 'old' },
+        payloadSha256: 'a'.repeat(64),
+        receivedAt: new Date('2026-08-14T23:59:59.999Z'),
+      },
+      {
+        ingressId: randomUUID(),
+        pageId,
+        externalMessageId: 'new-message',
+        eventFragment: { kind: 'new' },
+        payloadSha256: 'b'.repeat(64),
+        receivedAt: new Date('2026-08-16T00:00:00.001Z'),
+      },
+    ])
+
+    await expect(deleteOldFacebookWebhookReceipts(db, { now })).resolves.toBe(1)
+    expect(
+      await db
+        .select({ externalMessageId: facebookWebhookReceipt.externalMessageId })
+        .from(facebookWebhookReceipt)
+        .where(eq(facebookWebhookReceipt.pageId, pageId)),
+    ).toEqual([{ externalMessageId: 'new-message' }])
   })
 
   it('persists mixed and attachment-only inbound messages with recoverable sources', async () => {

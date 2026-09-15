@@ -1,6 +1,6 @@
 # DeepSales 部署步骤
 
-本文档适用于当前 T08 版本：React SPA、Cloudflare Worker、Neon PostgreSQL、pgvector、Cloudflare Queues 和 Durable Object。`pnpm run deploy` 会先部署 Worker，成功后再显式执行生产数据库迁移。
+本文档适用于当前 T15 版本：React SPA、Cloudflare Worker、Neon PostgreSQL、pgvector、Cloudflare Queues 和 Durable Object。`pnpm run deploy` 只部署应用；数据库迁移单独执行。
 
 ## 执行分类
 
@@ -8,9 +8,9 @@
 
 - `pnpm install --frozen-lockfile`
 - `wrangler login` / `wrangler whoami`
-- 创建 Hyperdrive、三个 Queues，并把 Hyperdrive ID 写入 `wrangler.jsonc`
-- 首次 `pnpm run deploy`（先创建 Worker，成功后执行 `APP_ENV=production pnpm db:migrate`）
+- 创建 Hyperdrive、五个工作 Queues 和共享 DLQ，并把 Hyperdrive ID 写入 `wrangler.jsonc`
 - 配置 Worker Secrets
+- 首次单独执行 `APP_ENV=production pnpm db:migrate`，然后 `pnpm run deploy`
 - 配置 Meta OAuth 回调、Webhook 和 Page 订阅
 
 后续发布通常只需要：
@@ -20,7 +20,9 @@ pnpm install --frozen-lockfile   # 依赖或 lockfile 变更时执行
 pnpm typecheck
 pnpm lint
 pnpm test
-pnpm run deploy # 部署成功后自动执行 APP_ENV=production pnpm db:migrate
+$env:APP_ENV = 'production'
+pnpm db:migrate
+pnpm run deploy
 ```
 
 后续发布不需要重复创建 Hyperdrive、Queues、Durable Object，也不需要重复配置 Secrets 或 Meta 回调。只有更换数据库、Cloudflare 账号、Meta App 或密钥时，才重新执行对应的首次部署步骤。
@@ -86,9 +88,11 @@ pnpm db:migrate
 
 ## 4. 首次部署 Worker
 
-部署会先构建 Web 静态资源和 Worker，Worker 部署成功后再执行生产数据库迁移：
+数据库迁移和 Worker Secrets 配置完成后，构建并部署 Web 静态资源和 Worker：
 
 ```powershell
+$env:APP_ENV = 'production'
+pnpm db:migrate
 pnpm run deploy
 ```
 
@@ -103,13 +107,14 @@ https://deepsales.<account>.workers.dev
 逐项执行，命令会提示输入值：
 
 ```powershell
-pnpm --filter @deepsales/worker exec wrangler secret put APP_URL
 pnpm --filter @deepsales/worker exec wrangler secret put BETTER_AUTH_SECRET
 pnpm --filter @deepsales/worker exec wrangler secret put META_APP_SECRET
 pnpm --filter @deepsales/worker exec wrangler secret put META_VERIFY_TOKEN
 pnpm --filter @deepsales/worker exec wrangler secret put TOKEN_ENCRYPTION_KEY
 pnpm --filter @deepsales/worker exec wrangler secret put AI_API_KEY
 ```
+
+`APP_URL` is configured in `apps/worker/wrangler.jsonc` and must be the final HTTPS URL without a trailing `/`.
 
 要求：
 
@@ -123,7 +128,7 @@ pnpm --filter @deepsales/worker exec wrangler secret put AI_API_KEY
 - `META_APP_ID` 和 `META_GRAPH_API_VERSION` 已在 `wrangler.jsonc` 的 `vars` 中配置；如使用其他 Meta App，请先修改它们。
 - 生产环境不要配置测试用的 `FACEBOOK_GRAPH_BASE_URL`。
 
-设置完 Secret 后重新部署：
+设置完 Secret 后首次部署或重新部署：
 
 ```powershell
 pnpm run deploy

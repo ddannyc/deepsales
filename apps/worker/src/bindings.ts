@@ -8,6 +8,7 @@ export type Bindings = {
   AI_QUEUE?: Queue
   DOCUMENTS_QUEUE?: Queue
   MAINTENANCE_QUEUE?: Queue
+  JOBS_DLQ?: Queue
   OBJECTS?: R2Bucket
   WORKSPACE_REALTIME?: DurableObjectNamespace
   META_APP_ID: string
@@ -22,6 +23,7 @@ export type Bindings = {
   LLM_PROVIDER?: string
   LLM_MODEL?: string
   AI_RETRIEVAL_MAX_DISTANCE?: string
+  AI_DEBOUNCE_SECONDS?: string
   FACEBOOK_GRAPH_BASE_URL?: string
   TOKEN_ENCRYPTION_KEY: string
 }

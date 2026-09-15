@@ -5,6 +5,7 @@ import {
   aiResponseRun,
   autoAssignConversation,
   bootstrapWorkspace,
+  claimAiResponseRun,
   connectFacebookPages,
   conversation,
   conversationAssignment,
@@ -23,7 +24,7 @@ import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Bindings } from './bindings'
-import { handleAiResponseBatch, handleDocumentsBatch } from './index'
+import { handleAiResponseBatch, handleDocumentsBatch, handleScheduled } from './index'
 
 const connectionString = process.env.DATABASE_URL
 const migrationsFolder = resolve(
@@ -335,7 +336,7 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     ).toEqual([{ state: 'COMPLETED' }])
   })
 
-  it('hands off transient runtime failures without disabling the AI member', async () => {
+  it('retries transient runtime failures without disabling the AI member', async () => {
     const fixture = await createFixture(db)
     const receivedAt = new Date(Date.now() - 10_000)
     const received = await processFacebookInbound(db, {
@@ -361,20 +362,75 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     const queued = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
     await handleAiResponseBatch(batch('deepsales-ai', queued), environment())
 
-    expect(queued.ack).toHaveBeenCalledOnce()
-    expect(queued.retry).not.toHaveBeenCalled()
+    expect(queued.ack).not.toHaveBeenCalled()
+    expect(queued.retry).toHaveBeenCalledOnce()
     expect(
       await db
-        .select({ state: aiResponseRun.state })
+        .select({ state: aiResponseRun.state, startedAt: aiResponseRun.startedAt })
         .from(aiResponseRun)
         .where(eq(aiResponseRun.id, routed.aiResponseRunId)),
-    ).toEqual([{ state: 'FAILED' }])
+    ).toEqual([{ state: 'QUEUED', startedAt: null }])
     expect(
       await db
         .select({ runtimeStatus: aiMemberConfig.runtimeStatus })
         .from(aiMemberConfig)
         .where(eq(aiMemberConfig.memberId, fixture.aiMemberId)),
     ).toEqual([{ runtimeStatus: 'USABLE' }])
+  })
+
+  it('hands off stale generations during scheduled recovery', async () => {
+    const fixture = await createFixture(db)
+    const receivedAt = new Date(Date.now() - 10_000)
+    const received = await processFacebookInbound(db, {
+      ingressId: crypto.randomUUID(),
+      pageId: fixture.pageId,
+      externalUserId: `customer-${fixture.ownerId}`,
+      externalMessageId: crypto.randomUUID(),
+      text: 'Please recover this run.',
+      providerSentAt: receivedAt,
+      receivedAt,
+      payloadSha256: 'a'.repeat(64),
+      eventFragment: { text: 'Please recover this run.' },
+    })
+    if (received.kind !== 'created') throw new Error('Inbound message was not created')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+      now: receivedAt,
+    })
+    if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
+
+    const claimed = await claimAiResponseRun(db, {
+      runId: routed.aiResponseRunId,
+      now: new Date(),
+    })
+    if (claimed?.kind !== 'CLAIMED') throw new Error('AI response run was not claimed')
+    const staleStartedAt = new Date(Date.now() - 6 * 60 * 1_000)
+    await db
+      .update(aiResponseRun)
+      .set({ startedAt: staleStartedAt, updatedAt: staleStartedAt })
+      .where(eq(aiResponseRun.id, routed.aiResponseRunId))
+
+    await handleScheduled(environment())
+
+    expect(
+      await db
+        .select({ state: aiResponseRun.state, failureCode: aiResponseRun.failureCode })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, routed.aiResponseRunId)),
+    ).toEqual([{ state: 'FAILED', failureCode: 'AI_GENERATION_TIMEOUT' }])
+    expect(
+      await db
+        .select({
+          assigneeMemberId: conversation.assigneeMemberId,
+          queueReason: conversation.queueReason,
+          routingConstraint: conversation.routingConstraint,
+        })
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId)),
+    ).toEqual([
+      { assigneeMemberId: null, queueReason: 'AI_HANDOFF', routingConstraint: 'HUMAN_ONLY' },
+    ])
   })
 
   it('marks the AI runtime unhealthy for permanent provider configuration failures', async () => {

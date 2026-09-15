@@ -45,6 +45,8 @@ export type FacebookInboundMessage = {
   eventFragment: Record<string, unknown>
 }
 
+export const FACEBOOK_WEBHOOK_RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000
+
 export async function processFacebookInbound(db: Database, input: FacebookInboundMessage) {
   const attachments = input.attachments ?? []
   if (!input.text && !attachments.length) {
@@ -297,6 +299,39 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
       attachmentIds,
       aiResponseRunId,
     }
+  })
+}
+
+export async function deleteOldFacebookWebhookReceipts(
+  db: Database,
+  input: { now?: Date; retentionMs?: number; limit?: number } = {},
+) {
+  const now = input.now ?? new Date()
+  const cutoff = new Date(
+    now.getTime() - (input.retentionMs ?? FACEBOOK_WEBHOOK_RECEIPT_RETENTION_MS),
+  )
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 100)
+
+  return db.transaction(async (tx) => {
+    const stale = await tx
+      .select({ id: facebookWebhookReceipt.id })
+      .from(facebookWebhookReceipt)
+      .where(lt(facebookWebhookReceipt.receivedAt, cutoff))
+      .orderBy(asc(facebookWebhookReceipt.receivedAt), asc(facebookWebhookReceipt.id))
+      .limit(limit)
+      .for('update', { skipLocked: true })
+    if (!stale.length) return 0
+
+    const deleted = await tx
+      .delete(facebookWebhookReceipt)
+      .where(
+        inArray(
+          facebookWebhookReceipt.id,
+          stale.map(({ id }) => id),
+        ),
+      )
+      .returning({ id: facebookWebhookReceipt.id })
+    return deleted.length
   })
 }
 
