@@ -136,6 +136,7 @@ export const knowledgeDocumentStatus = pgEnum('knowledge_document_status', [
   'READY',
   'FAILED',
 ])
+export const aiRuntimeStatus = pgEnum('ai_runtime_status', ['UNPUBLISHED', 'USABLE', 'UNHEALTHY'])
 
 export const workspace = pgTable('workspace', {
   id: uuid().defaultRandom().primaryKey(),
@@ -558,6 +559,39 @@ export const knowledgeBase = pgTable(
   },
   (table) => [index('knowledge_base_workspace_idx').on(table.workspaceId)],
 )
+
+export type AiMemberRuntimeSnapshot = {
+  instructions: string
+  responseLanguage: string
+  knowledgeBaseId: string
+  handoffOnCustomerRequest: boolean
+  handoffOnNoKnowledge: boolean
+  handoffOnNegativeSentiment: boolean
+  handoffOnUnableToAnswer: boolean
+  handoffKeywords: string[]
+}
+
+export const aiMemberConfig = pgTable('ai_member_config', {
+  memberId: uuid('member_id')
+    .primaryKey()
+    .references(() => member.id, { onDelete: 'cascade' }),
+  instructions: text().default('').notNull(),
+  responseLanguage: text('response_language').default('').notNull(),
+  knowledgeBaseId: uuid('knowledge_base_id').references(() => knowledgeBase.id, {
+    onDelete: 'set null',
+  }),
+  handoffOnCustomerRequest: boolean('handoff_on_customer_request').default(true).notNull(),
+  handoffOnNoKnowledge: boolean('handoff_on_no_knowledge').default(true).notNull(),
+  handoffOnNegativeSentiment: boolean('handoff_on_negative_sentiment').default(true).notNull(),
+  handoffOnUnableToAnswer: boolean('handoff_on_unable_to_answer').default(true).notNull(),
+  handoffKeywords: text('handoff_keywords').array().default(sql`ARRAY[]::text[]`).notNull(),
+  publishedSnapshot: jsonb('published_snapshot').$type<AiMemberRuntimeSnapshot | null>(),
+  publishedAt: timestamp('published_at', { withTimezone: true }),
+  runtimeStatus: aiRuntimeStatus('runtime_status').default('UNPUBLISHED').notNull(),
+  runtimeError: text('runtime_error'),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+})
 
 export const knowledgeDocument = pgTable(
   'knowledge_document',

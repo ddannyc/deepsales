@@ -1,6 +1,7 @@
 import {
   acceptInvitation,
   AssignmentError,
+  AiMemberError,
   bootstrapWorkspace,
   claimOutboundMessage,
   claimFacebookInboundAttachment,
@@ -26,6 +27,7 @@ import {
   getFacebookAttachmentForDownload,
   getFacebookOutboundDelivery,
   getKnowledgeDocumentStorageKey,
+  getAiMemberConfig,
   InboxError,
   AttachmentError,
   MAX_INBOUND_ATTACHMENT_BYTES,
@@ -53,11 +55,13 @@ import {
   releaseKnowledgeDocument,
   recoverStaleOutboundMessages,
   member,
+  publishAiMemberConfig,
   setMemberChannelAccess,
   takeOverConversation,
   transferConversation,
   unassignConversation,
   updateMember,
+  updateAiMemberConfig,
   workspace,
   workspaceUserAccess,
   type Database,
@@ -96,12 +100,15 @@ import { publishRealtime, WorkspaceRealtime } from './realtime'
 import { createObjectStorage } from './object-storage'
 import { createJobQueue, type JobQueue } from './queue'
 import {
+  ALIBABA_LLM_PROVIDER,
   ALIBABA_EMBEDDING_PROVIDER,
   AIEmbeddingError,
   AIProviderError,
   createAlibabaEmbeddingProvider,
+  DEFAULT_LLM_MODEL,
   DEFAULT_EMBEDDING_MODEL,
   EMBEDDING_DIMENSIONS,
+  isLlmProviderConfigurationUsable,
 } from './ai'
 import { knowledgeDocumentJobSchema } from './knowledge'
 import {
@@ -178,6 +185,18 @@ const transferInput = z
 const knowledgeBaseInput = z.object({ name: z.string().trim().min(1).max(100) }).strict()
 const knowledgeTextInput = z
   .object({ name: z.string().trim().min(1).max(100), text: z.string() })
+  .strict()
+const aiMemberConfigInput = z
+  .object({
+    instructions: z.string().max(20_000).optional(),
+    responseLanguage: z.string().max(100).optional(),
+    knowledgeBaseId: z.string().uuid().nullable().optional(),
+    handoffOnCustomerRequest: z.boolean().optional(),
+    handoffOnNoKnowledge: z.boolean().optional(),
+    handoffOnNegativeSentiment: z.boolean().optional(),
+    handoffOnUnableToAnswer: z.boolean().optional(),
+    handoffKeywords: z.array(z.string().max(100)).max(100).optional(),
+  })
   .strict()
 
 app.onError((_error, c) => {
@@ -479,6 +498,77 @@ app.get('/api/workspaces/:workspaceId/team', async (c) => {
       return forbidden(c)
     }
     return c.json(await listTeam(db, c.req.param('workspaceId')))
+  })
+})
+
+app.get('/api/workspaces/:workspaceId/ai-members/:memberId/config', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      return c.json({
+        config: await getAiMemberConfig(db, {
+          workspaceId: c.req.param('workspaceId'),
+          memberId: c.req.param('memberId'),
+          actingUserId: session.user.id,
+        }),
+      })
+    } catch (error) {
+      return aiMemberErrorResponse(c, error)
+    }
+  })
+})
+
+app.patch('/api/workspaces/:workspaceId/ai-members/:memberId/config', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const input = aiMemberConfigInput.safeParse(await c.req.json().catch(() => null))
+    if (!input.success) {
+      return c.json(
+        { error: { code: 'INVALID_REQUEST', message: 'Invalid AI configuration' } },
+        400,
+      )
+    }
+    try {
+      const config = await updateAiMemberConfig(db, {
+        workspaceId: c.req.param('workspaceId'),
+        memberId: c.req.param('memberId'),
+        actingUserId: session.user.id,
+        ...input.data,
+      })
+      await publishMemberChange(c.env, c.req.param('workspaceId'), c.req.param('memberId'))
+      return c.json({ config })
+    } catch (error) {
+      return aiMemberErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/ai-members/:memberId/publish', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      const config = await publishAiMemberConfig(db, {
+        workspaceId: c.req.param('workspaceId'),
+        memberId: c.req.param('memberId'),
+        actingUserId: session.user.id,
+        providerConfigured: isLlmProviderConfigurationUsable({
+          apiKey: c.env.AI_API_KEY,
+          baseUrl: c.env.AI_BASE_URL,
+          provider: c.env.LLM_PROVIDER,
+          model: c.env.LLM_MODEL,
+        }),
+      })
+      await publishMemberChange(c.env, c.req.param('workspaceId'), c.req.param('memberId'))
+      return c.json({ config })
+    } catch (error) {
+      return aiMemberErrorResponse(c, error)
+    }
   })
 })
 
@@ -1224,6 +1314,8 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.EMBEDDING_PROVIDER === ALIBABA_EMBEDDING_PROVIDER &&
       env.EMBEDDING_MODEL === DEFAULT_EMBEDDING_MODEL &&
       env.EMBEDDING_DIMENSIONS === String(EMBEDDING_DIMENSIONS) &&
+      env.LLM_PROVIDER === ALIBABA_LLM_PROVIDER &&
+      env.LLM_MODEL === DEFAULT_LLM_MODEL &&
       env.WEBHOOKS_QUEUE &&
       env.OUTBOUND_QUEUE &&
       env.DOCUMENTS_QUEUE &&
@@ -1418,6 +1510,12 @@ function inboxErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) 
 
 function knowledgeErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
   if (!(error instanceof KnowledgeError)) throw error
+  const status = error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : 400
+  return c.json({ error: { code: error.code, message: error.message } }, status)
+}
+
+function aiMemberErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (!(error instanceof AiMemberError)) throw error
   const status = error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : 400
   return c.json({ error: { code: error.code, message: error.message } }, status)
 }
@@ -1668,6 +1766,17 @@ async function publishKnowledgeChange(env: Bindings, workspaceId: string, docume
     })
   } catch {
     console.warn(JSON.stringify({ event: 'realtime_publish_failed', type: 'knowledge.changed' }))
+  }
+}
+
+async function publishMemberChange(env: Bindings, workspaceId: string, memberId: string) {
+  try {
+    await publishRealtime(env.WORKSPACE_REALTIME, workspaceId, {
+      type: 'member.changed',
+      entityId: memberId,
+    })
+  } catch {
+    console.warn(JSON.stringify({ event: 'realtime_publish_failed', type: 'member.changed' }))
   }
 }
 

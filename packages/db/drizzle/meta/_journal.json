@@ -78,6 +78,13 @@
       "when": 1789388549781,
       "tag": "0010_free_thaddeus_ross",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1789433123751,
+      "tag": "0011_peaceful_susan_delgado",
+      "breakpoints": true
     }
   ]
 }

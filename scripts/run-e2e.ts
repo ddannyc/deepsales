@@ -115,6 +115,8 @@ function workerBindings(baseUrl: string, facebookGraphBaseUrl: string, aiBaseUrl
     EMBEDDING_PROVIDER: 'alibaba',
     EMBEDDING_MODEL: 'qwen3.7-text-embedding',
     EMBEDDING_DIMENSIONS: '1536',
+    LLM_PROVIDER: 'alibaba',
+    LLM_MODEL: 'qwen3.8-flash',
   }
 }
 

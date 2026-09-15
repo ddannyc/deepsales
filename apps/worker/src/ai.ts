@@ -3,7 +3,23 @@ import { z } from 'zod'
 export const ALIBABA_EMBEDDING_PROVIDER = 'alibaba'
 export const DEFAULT_EMBEDDING_MODEL = 'qwen3.7-text-embedding'
 export const EMBEDDING_DIMENSIONS = 1_536
+export const ALIBABA_LLM_PROVIDER = 'alibaba'
+export const DEFAULT_LLM_MODEL = 'qwen3.8-flash'
 const ALIBABA_MAX_BATCH_SIZE = 20
+
+export function isLlmProviderConfigurationUsable(config: {
+  apiKey?: string
+  baseUrl?: string
+  provider?: string
+  model?: string
+}) {
+  return Boolean(
+    config.apiKey?.trim() &&
+      config.baseUrl?.trim() &&
+      config.provider === ALIBABA_LLM_PROVIDER &&
+      config.model === DEFAULT_LLM_MODEL,
+  )
+}
 
 export type EmbeddingMetadata = {
   provider: string

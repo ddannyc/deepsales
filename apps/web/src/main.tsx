@@ -41,7 +41,7 @@ type TeamMember = {
   availability: boolean | null
   role: 'OWNER' | 'ADMIN' | 'AGENT' | null
   email: string | null
-  configurationStatus: 'UNPUBLISHED' | null
+  configurationStatus: 'UNPUBLISHED' | 'USABLE' | 'UNHEALTHY' | null
   channelIds: string[]
 }
 
@@ -141,6 +141,47 @@ type KnowledgeDocument = {
   updatedAt: string
 }
 
+type AiMemberRuntimeSnapshot = {
+  instructions: string
+  responseLanguage: string
+  knowledgeBaseId: string
+  handoffOnCustomerRequest: boolean
+  handoffOnNoKnowledge: boolean
+  handoffOnNegativeSentiment: boolean
+  handoffOnUnableToAnswer: boolean
+  handoffKeywords: string[]
+}
+
+type AiMemberConfig = {
+  memberId: string
+  memberDisplayName: string | null
+  memberStatus: 'ACTIVE' | 'DISABLED'
+  instructions: string
+  responseLanguage: string
+  knowledgeBaseId: string | null
+  handoffOnCustomerRequest: boolean
+  handoffOnNoKnowledge: boolean
+  handoffOnNegativeSentiment: boolean
+  handoffOnUnableToAnswer: boolean
+  handoffKeywords: string[]
+  publishedSnapshot: AiMemberRuntimeSnapshot | null
+  publishedAt: string | null
+  runtimeStatus: 'UNPUBLISHED' | 'USABLE' | 'UNHEALTHY'
+  runtimeError: string | null
+}
+
+type AiMemberDraft = Pick<
+  AiMemberConfig,
+  | 'instructions'
+  | 'responseLanguage'
+  | 'knowledgeBaseId'
+  | 'handoffOnCustomerRequest'
+  | 'handoffOnNoKnowledge'
+  | 'handoffOnNegativeSentiment'
+  | 'handoffOnUnableToAnswer'
+  | 'handoffKeywords'
+>
+
 class ApiError extends Error {
   constructor(
     readonly code: string,
@@ -165,6 +206,13 @@ const lifecycleLabels: Record<TeamMember['status'], string> = {
 }
 const configurationStatusLabels: Record<NonNullable<TeamMember['configurationStatus']>, string> = {
   UNPUBLISHED: '未发布',
+  USABLE: '可用',
+  UNHEALTHY: '需检查',
+}
+const runtimeStatusLabels: Record<AiMemberConfig['runtimeStatus'], string> = {
+  UNPUBLISHED: '未发布',
+  USABLE: '可用',
+  UNHEALTHY: '需检查',
 }
 
 function roleLabel(role: Workspace['role'] | null) {
@@ -440,9 +488,11 @@ function Shell({
   onSignOut: () => void
   onWorkspaceChange: (workspaceId: string) => Promise<void>
 }) {
-  const teamPage = window.location.pathname === '/team'
-  const knowledgePage = window.location.pathname === '/knowledge'
-  const facebookPage = window.location.pathname === '/settings/facebook'
+  const pathname = window.location.pathname
+  const aiMemberId = pathname.match(/^\/ai-member\/([^/]+)$/)?.[1] ?? null
+  const teamPage = pathname === '/team' || Boolean(aiMemberId)
+  const knowledgePage = pathname === '/knowledge'
+  const facebookPage = pathname === '/settings/facebook'
 
   async function signOut() {
     await request('/api/auth/sign-out', {})
@@ -496,7 +546,9 @@ function Shell({
           退出登录
         </button>
       </header>
-      {teamPage ? (
+      {aiMemberId ? (
+        <AiMemberPage workspace={me.workspace} memberId={aiMemberId} />
+      ) : teamPage ? (
         <TeamPage workspace={me.workspace} />
       ) : knowledgePage ? (
         <KnowledgePage workspace={me.workspace} />
@@ -1568,6 +1620,330 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
   )
 }
 
+function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId: string }) {
+  const [config, setConfig] = useState<AiMemberConfig>()
+  const [draft, setDraft] = useState<AiMemberDraft>()
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
+  const [loadError, setLoadError] = useState('')
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+  const canManage = workspace.role !== 'AGENT'
+
+  const load = useCallback(async () => {
+    const configResponse = await fetch(
+      `/api/workspaces/${workspace.id}/ai-members/${memberId}/config`,
+    )
+    if (!configResponse.ok) throw await responseError(configResponse)
+    const nextConfig = ((await configResponse.json()) as { config: AiMemberConfig }).config
+    const basesResponse = await fetch(`/api/workspaces/${workspace.id}/knowledge-bases`)
+    if (!basesResponse.ok) throw await responseError(basesResponse)
+    const bases = (await basesResponse.json()) as { knowledgeBases: KnowledgeBase[] }
+    setConfig(nextConfig)
+    setDraft(aiDraftFromConfig(nextConfig))
+    setKnowledgeBases(bases.knowledgeBases)
+  }, [memberId, workspace.id])
+
+  useEffect(() => {
+    if (!canManage) return
+    setLoadError('')
+    void load().catch((cause) => setLoadError(aiMemberErrorMessage(cause)))
+  }, [canManage, load])
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!draft) return
+    setBusy(true)
+    setMessage('')
+    const data = new FormData(event.currentTarget)
+    try {
+      const result = (await request(
+        `/api/workspaces/${workspace.id}/ai-members/${memberId}/config`,
+        {
+          instructions: String(data.get('instructions') ?? ''),
+          responseLanguage: String(data.get('responseLanguage') ?? ''),
+          knowledgeBaseId: String(data.get('knowledgeBaseId') ?? '') || null,
+          handoffOnCustomerRequest: data.get('handoffOnCustomerRequest') === 'on',
+          handoffOnNoKnowledge: data.get('handoffOnNoKnowledge') === 'on',
+          handoffOnNegativeSentiment: data.get('handoffOnNegativeSentiment') === 'on',
+          handoffOnUnableToAnswer: data.get('handoffOnUnableToAnswer') === 'on',
+          handoffKeywords: String(data.get('handoffKeywords') ?? '').split(/[,\n]/),
+        },
+        'PATCH',
+      )) as { config: AiMemberConfig }
+      setConfig(result.config)
+      setDraft(aiDraftFromConfig(result.config))
+      setMessage('草稿已保存')
+    } catch (cause) {
+      setMessage(aiMemberErrorMessage(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function publish() {
+    setBusy(true)
+    setMessage('')
+    try {
+      const result = (await request(
+        `/api/workspaces/${workspace.id}/ai-members/${memberId}/publish`,
+        {},
+      )) as { config: AiMemberConfig }
+      setConfig(result.config)
+      setDraft(aiDraftFromConfig(result.config))
+      setMessage('已发布运行快照')
+    } catch (cause) {
+      setMessage(aiMemberErrorMessage(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!canManage) {
+    return (
+      <main className="ai-member-page" role="alert">
+        <a className="back-link" href="/team">
+          ← 返回团队
+        </a>
+        <p className="form-error">你没有管理 AI 成员配置的权限。</p>
+      </main>
+    )
+  }
+  if (loadError && !config) {
+    return (
+      <main className="ai-member-page" role="alert">
+        <a className="back-link" href="/team">
+          ← 返回团队
+        </a>
+        <p className="form-error">{loadError}</p>
+      </main>
+    )
+  }
+  if (!config || !draft) return <main className="ai-member-page">正在加载 AI 配置…</main>
+
+  return (
+    <main className="ai-member-page">
+      <div className="ai-member-heading">
+        <div>
+          <a className="back-link" href="/team">
+            ← 返回团队
+          </a>
+          <p className="eyebrow">工作区 / AI 成员</p>
+          <h1>AI 成员配置</h1>
+          <p>{config.memberDisplayName ?? '未命名成员'} 的草稿与运行快照。</p>
+        </div>
+        <span
+          className="runtime-status"
+          data-runtime-status={config.runtimeStatus}
+          data-status={config.runtimeStatus}
+        >
+          {runtimeStatusLabels[config.runtimeStatus]}
+        </span>
+      </div>
+
+      {message && (
+        <p
+          className={
+            message === '已发布运行快照' || message === '草稿已保存' ? 'success' : 'form-error'
+          }
+          role="status"
+        >
+          {message}
+        </p>
+      )}
+      <div className="ai-member-layout">
+        <form className="ai-member-card ai-member-form" onSubmit={save}>
+          <div className="section-heading">
+            <p className="card-label">当前草稿</p>
+            <span>可编辑</span>
+          </div>
+          <label className="field ai-field-wide" htmlFor="ai-instructions">
+            <span>指令</span>
+            <textarea
+              id="ai-instructions"
+              name="instructions"
+              value={draft.instructions}
+              maxLength={20_000}
+              onChange={(event) => {
+                const value = event.currentTarget.value
+                setDraft((current) => (current ? { ...current, instructions: value } : current))
+              }}
+            />
+          </label>
+          <div className="ai-config-grid">
+            <label className="field" htmlFor="ai-response-language">
+              <span>回复语言</span>
+              <input
+                id="ai-response-language"
+                name="responseLanguage"
+                value={draft.responseLanguage}
+                maxLength={100}
+                onChange={(event) => {
+                  const value = event.currentTarget.value
+                  setDraft((current) =>
+                    current ? { ...current, responseLanguage: value } : current,
+                  )
+                }}
+              />
+            </label>
+            <label className="field" htmlFor="ai-knowledge-base">
+              <span>知识库</span>
+              <select
+                id="ai-knowledge-base"
+                name="knowledgeBaseId"
+                value={draft.knowledgeBaseId ?? ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value || null
+                  setDraft((current) =>
+                    current ? { ...current, knowledgeBaseId: value } : current,
+                  )
+                }}
+              >
+                <option value="">请选择知识库</option>
+                {knowledgeBases.map((knowledgeBase) => (
+                  <option key={knowledgeBase.id} value={knowledgeBase.id}>
+                    {knowledgeBase.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label className="field ai-field-wide" htmlFor="ai-handoff-keywords">
+            <span>转人工关键词</span>
+            <input
+              id="ai-handoff-keywords"
+              name="handoffKeywords"
+              value={draft.handoffKeywords.join(', ')}
+              placeholder="人工, 客服"
+              maxLength={10_000}
+              onChange={(event) => {
+                const handoffKeywords = event.currentTarget.value.split(/[,\n]/)
+                setDraft((current) => (current ? { ...current, handoffKeywords } : current))
+              }}
+            />
+          </label>
+          <fieldset className="ai-handoff-fields">
+            <legend>转人工行为</legend>
+            <label className="check-field">
+              <input
+                name="handoffOnCustomerRequest"
+                type="checkbox"
+                checked={draft.handoffOnCustomerRequest}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked
+                  setDraft((current) =>
+                    current ? { ...current, handoffOnCustomerRequest: checked } : current,
+                  )
+                }}
+              />
+              客户要求人工时转接
+            </label>
+            <label className="check-field">
+              <input
+                name="handoffOnNoKnowledge"
+                type="checkbox"
+                checked={draft.handoffOnNoKnowledge}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked
+                  setDraft((current) =>
+                    current ? { ...current, handoffOnNoKnowledge: checked } : current,
+                  )
+                }}
+              />
+              没有知识时转接
+            </label>
+            <label className="check-field">
+              <input
+                name="handoffOnNegativeSentiment"
+                type="checkbox"
+                checked={draft.handoffOnNegativeSentiment}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked
+                  setDraft((current) =>
+                    current ? { ...current, handoffOnNegativeSentiment: checked } : current,
+                  )
+                }}
+              />
+              检测到负面情绪时转接
+            </label>
+            <label className="check-field">
+              <input
+                name="handoffOnUnableToAnswer"
+                type="checkbox"
+                checked={draft.handoffOnUnableToAnswer}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked
+                  setDraft((current) =>
+                    current ? { ...current, handoffOnUnableToAnswer: checked } : current,
+                  )
+                }}
+              />
+              无法回答时转接
+            </label>
+          </fieldset>
+          <div className="member-actions">
+            <button className="secondary" disabled={busy} type="submit">
+              {busy ? '保存中…' : '保存草稿'}
+            </button>
+            <button
+              className="primary"
+              disabled={busy}
+              type="button"
+              onClick={() => void publish()}
+            >
+              {busy ? '处理中…' : '发布'}
+            </button>
+          </div>
+        </form>
+
+        <section className="ai-member-card ai-published-panel">
+          <div className="section-heading">
+            <p className="card-label">已发布运行快照</p>
+            <span>{config.publishedAt ? formatDate(config.publishedAt) : '尚未发布'}</span>
+          </div>
+          {config.publishedSnapshot ? (
+            <dl className="ai-snapshot">
+              <div>
+                <dt>指令</dt>
+                <dd>{config.publishedSnapshot.instructions}</dd>
+              </div>
+              <div>
+                <dt>回复语言</dt>
+                <dd>{config.publishedSnapshot.responseLanguage}</dd>
+              </div>
+              <div>
+                <dt>知识库</dt>
+                <dd>
+                  {knowledgeBases.find(({ id }) => id === config.publishedSnapshot?.knowledgeBaseId)
+                    ?.name ?? '已选择知识库'}
+                </dd>
+              </div>
+              <div>
+                <dt>转人工关键词</dt>
+                <dd>{config.publishedSnapshot.handoffKeywords.join('、') || '未设置'}</dd>
+              </div>
+            </dl>
+          ) : (
+            <p className="muted">发布后，运行时只会使用这里显示的快照。</p>
+          )}
+        </section>
+      </div>
+    </main>
+  )
+}
+
+function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
+  return {
+    instructions: config.instructions,
+    responseLanguage: config.responseLanguage,
+    knowledgeBaseId: config.knowledgeBaseId,
+    handoffOnCustomerRequest: config.handoffOnCustomerRequest,
+    handoffOnNoKnowledge: config.handoffOnNoKnowledge,
+    handoffOnNegativeSentiment: config.handoffOnNegativeSentiment,
+    handoffOnUnableToAnswer: config.handoffOnUnableToAnswer,
+    handoffKeywords: config.handoffKeywords,
+  }
+}
+
 function TeamPage({ workspace }: { workspace: Workspace }) {
   const [team, setTeam] = useState<Team>()
   const [loadError, setLoadError] = useState('')
@@ -1912,6 +2288,11 @@ function MemberEditor({
       </fieldset>
       {canManage && (
         <div className="member-actions">
+          {member.type === 'AI' && (
+            <a className="secondary" href={`/ai-member/${member.id}`}>
+              配置 AI
+            </a>
+          )}
           <button className="secondary" disabled={busy} type="submit">
             {busy ? '保存中…' : '保存更改'}
           </button>
@@ -2029,6 +2410,19 @@ function teamErrorMessage(cause: unknown): string {
       INVALID_REQUEST: '请检查团队设置后重试。',
       NOT_FOUND: '该成员已不存在。',
     }[cause.code] ?? '团队信息更新失败。'
+  )
+}
+
+function aiMemberErrorMessage(cause: unknown): string {
+  if (!(cause instanceof ApiError)) return 'AI 成员配置加载失败，请稍后重试。'
+  return (
+    {
+      FORBIDDEN: '你没有管理 AI 成员配置的权限。',
+      NOT_FOUND: '该 AI 成员不存在。',
+      INVALID_REQUEST: '请检查配置内容后重试。',
+      INVALID_CONFIGURATION:
+        '配置不完整，无法发布。请检查渠道、知识库、指令、回复语言和 AI 服务配置。',
+    }[cause.code] ?? 'AI 成员配置操作失败，请稍后重试。'
   )
 }
 

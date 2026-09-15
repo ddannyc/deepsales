@@ -2,6 +2,7 @@ import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 import { requeueMemberConversation } from './assignments'
 import type { Database } from './database'
 import {
+  aiMemberConfig,
   channel,
   conversation,
   humanMemberAvailability,
@@ -221,11 +222,13 @@ export async function listTeam(db: Database, workspaceId: string) {
         role: workspaceUserAccess.role,
         userId: workspaceUserAccess.userId,
         email: user.email,
+        runtimeStatus: aiMemberConfig.runtimeStatus,
       })
       .from(member)
       .leftJoin(humanMemberAvailability, eq(humanMemberAvailability.memberId, member.id))
       .leftJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
       .leftJoin(user, eq(user.id, workspaceUserAccess.userId))
+      .leftJoin(aiMemberConfig, eq(aiMemberConfig.memberId, member.id))
       .where(eq(member.workspaceId, workspaceId))
       .orderBy(asc(member.createdAt), asc(member.id)),
     db
@@ -258,7 +261,7 @@ export async function listTeam(db: Database, workspaceId: string) {
     members: members.map((item) => ({
       ...item,
       availability: item.type === 'HUMAN' ? item.availability : null,
-      configurationStatus: item.type === 'AI' ? 'UNPUBLISHED' : null,
+      configurationStatus: item.type === 'AI' ? (item.runtimeStatus ?? 'UNPUBLISHED') : null,
       channelIds: channelIdsByMember.get(item.id) ?? [],
     })),
   }
