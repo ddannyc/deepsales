@@ -80,6 +80,97 @@ export const aiDecisionSchema = z
 
 export type AiResponseDecision = z.infer<typeof aiDecisionSchema>
 
+export type AiHandoffReason = NonNullable<AiResponseDecision['handoffReason']>
+
+type HandoffPolicyConfig = {
+  handoffOnCustomerRequest: boolean
+  handoffOnNoKnowledge: boolean
+  handoffOnNegativeSentiment: boolean
+  handoffOnUnableToAnswer: boolean
+  handoffKeywords: string[]
+  responseLanguage: string
+}
+
+export function detectConfiguredHandoff(
+  messages: Array<{ text: string | null }>,
+  config: Pick<HandoffPolicyConfig, 'handoffOnCustomerRequest' | 'handoffKeywords'>,
+): AiHandoffReason | null {
+  const text = messages
+    .map(({ text: value }) => (value ? normalizeHandoffText(value) : ''))
+    .filter(Boolean)
+    .join(' ')
+  if (!text) return null
+
+  if (
+    config.handoffKeywords.some((keyword) => {
+      const normalized = normalizeHandoffText(keyword)
+      return normalized.length > 0 && text.includes(normalized)
+    })
+  ) {
+    return 'KEYWORD'
+  }
+  return config.handoffOnCustomerRequest && isExplicitHumanRequest(text) ? 'CUSTOMER_REQUEST' : null
+}
+
+export function applyHandoffPolicy(decision: AiResponseDecision, config: HandoffPolicyConfig) {
+  if (decision.decision !== 'HANDOFF' || isHandoffEnabled(decision.handoffReason, config)) {
+    return {
+      kind: decision.decision === 'HANDOFF' ? ('HANDOFF' as const) : ('ANSWER' as const),
+      decision,
+    }
+  }
+
+  return {
+    kind: 'FALLBACK' as const,
+    decision: {
+      decision: 'ANSWER' as const,
+      response: noKnowledgeReply(config.responseLanguage),
+      handoffReason: null,
+      containsBusinessFacts: false,
+      usedChunkIds: [],
+    },
+  }
+}
+
+function normalizeHandoffText(value: string) {
+  return value
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+}
+
+function isExplicitHumanRequest(text: string) {
+  if (/(人工|客服|真人)/u.test(text)) return true
+
+  const person = /\b(?:human|person|agent|representative|customer service)\b/u.test(text)
+  const request =
+    /\b(?:talk|speak|connect|transfer|switch|route|put|get|let|need|want|request|prefer|reach|contact|help|please)\b/u.test(
+      text,
+    )
+  return person && request
+}
+
+function isHandoffEnabled(reason: AiHandoffReason | null, config: HandoffPolicyConfig) {
+  switch (reason) {
+    case 'CUSTOMER_REQUEST':
+      return config.handoffOnCustomerRequest
+    case 'NO_KNOWLEDGE':
+      return config.handoffOnNoKnowledge
+    case 'NEGATIVE_SENTIMENT':
+      return config.handoffOnNegativeSentiment
+    case 'UNABLE_TO_ANSWER':
+      return config.handoffOnUnableToAnswer
+    case 'KEYWORD':
+      return false
+    case 'UNSUPPORTED_ATTACHMENT':
+    case 'PROVIDER_FAILURE':
+      return true
+    default:
+      return true
+  }
+}
+
 export const aiMemberRuntimeSnapshotSchema = z.object({
   instructions: z.string(),
   responseLanguage: z.string(),
@@ -127,7 +218,7 @@ export function createAlibabaEmbeddingProvider(
   fetcher: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = (input, init) =>
     globalThis.fetch(input, init),
 ): EmbeddingProvider {
-  if (!config.apiKey?.trim() || !config.baseUrl?.trim()) throw new AIProviderError(0, true)
+  if (!config.apiKey?.trim() || !config.baseUrl?.trim()) throw new AIProviderError(0, false)
   if ((config.provider ?? ALIBABA_EMBEDDING_PROVIDER) !== ALIBABA_EMBEDDING_PROVIDER) {
     throw new AIEmbeddingError()
   }

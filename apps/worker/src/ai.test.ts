@@ -3,8 +3,10 @@ import {
   ALIBABA_LLM_PROVIDER,
   DEFAULT_LLM_MODEL,
   AlibabaLlmProvider,
+  applyHandoffPolicy,
   aiDecisionSchema,
   buildAiPrompt,
+  detectConfiguredHandoff,
   enforceGrounding,
   isLlmProviderConfigurationUsable,
 } from './ai'
@@ -133,5 +135,82 @@ describe('AI grounding', () => {
       kind: 'FALLBACK',
       decision: { decision: 'ANSWER', containsBusinessFacts: false, usedChunkIds: [] },
     })
+  })
+})
+
+describe('AI handoff policy', () => {
+  const config = {
+    handoffOnCustomerRequest: true,
+    handoffOnNoKnowledge: true,
+    handoffOnNegativeSentiment: true,
+    handoffOnUnableToAnswer: true,
+    handoffKeywords: ['agent'],
+    responseLanguage: 'English',
+  }
+
+  it('detects normalized customer requests and configured keywords before model work', () => {
+    expect(detectConfiguredHandoff([{ text: 'I NEED a  HUMAN!' }], config)).toBe('CUSTOMER_REQUEST')
+    expect(detectConfiguredHandoff([{ text: 'ＡＧＥＮＴ please' }], config)).toBe('KEYWORD')
+    expect(detectConfiguredHandoff([{ text: '客户服务很好，谢谢。' }], config)).toBeNull()
+    expect(
+      detectConfiguredHandoff([{ text: 'I need a human' }], {
+        ...config,
+        handoffOnCustomerRequest: false,
+        handoffKeywords: [],
+      }),
+    ).toBeNull()
+  })
+
+  it('returns a factual-free fallback when a configured policy is disabled', () => {
+    const decision = {
+      decision: 'HANDOFF' as const,
+      response: '',
+      handoffReason: 'NEGATIVE_SENTIMENT' as const,
+      containsBusinessFacts: false,
+      usedChunkIds: [],
+    }
+    expect(applyHandoffPolicy(decision, { ...config, handoffOnNegativeSentiment: false })).toEqual(
+      expect.objectContaining({
+        kind: 'FALLBACK',
+        decision: expect.objectContaining({
+          decision: 'ANSWER',
+          containsBusinessFacts: false,
+          usedChunkIds: [],
+          handoffReason: null,
+        }),
+      }),
+    )
+  })
+
+  it('always hands off unsupported input and provider failures', () => {
+    for (const handoffReason of ['UNSUPPORTED_ATTACHMENT', 'PROVIDER_FAILURE'] as const) {
+      expect(
+        applyHandoffPolicy(
+          {
+            decision: 'HANDOFF',
+            response: '',
+            handoffReason,
+            containsBusinessFacts: false,
+            usedChunkIds: [],
+          },
+          { ...config, handoffOnNoKnowledge: false },
+        ),
+      ).toMatchObject({ kind: 'HANDOFF' })
+    }
+  })
+
+  it('does not trust a model keyword without a configured match', () => {
+    expect(
+      applyHandoffPolicy(
+        {
+          decision: 'HANDOFF',
+          response: '',
+          handoffReason: 'KEYWORD',
+          containsBusinessFacts: false,
+          usedChunkIds: [],
+        },
+        { ...config, handoffKeywords: [] },
+      ),
+    ).toMatchObject({ kind: 'FALLBACK' })
   })
 })

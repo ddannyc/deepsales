@@ -44,6 +44,27 @@ export class AssignmentError extends Error {
 
 export type AssignmentCommand =
   | { type: 'AUTO_ROUTE'; workspaceId: string; conversationId: string; now?: Date }
+  | {
+      type: 'AI_HANDOFF'
+      workspaceId: string
+      conversationId: string
+      memberId: string
+      runId: string
+      reason:
+        | 'CUSTOMER_REQUEST'
+        | 'NO_KNOWLEDGE'
+        | 'NEGATIVE_SENTIMENT'
+        | 'UNABLE_TO_ANSWER'
+        | 'KEYWORD'
+        | 'UNSUPPORTED_ATTACHMENT'
+        | 'PROVIDER_FAILURE'
+      noticeText?: string | null
+      runState?: 'HANDOFF' | 'FAILED'
+      failureCode?: string
+      failureMessage?: string
+      markRuntimeUnhealthy?: boolean
+      now?: Date
+    }
   | (CommandBase & { type: 'TAKEOVER' })
   | (CommandBase & { type: 'TRANSFER'; targetMemberId: string; confirmOverride?: boolean })
   | (CommandBase & { type: 'UNASSIGN' })
@@ -56,6 +77,7 @@ export type AssignmentResult = {
   fromMemberId: string | null
   toMemberId: string | null
   aiResponseRunId: string | null
+  messageId: string | null
   changed: boolean
 }
 
@@ -67,6 +89,9 @@ type CurrentConversation = {
   assigneeWorkspaceId: string | null
   channelId: string
   routingConstraint: 'ANY_MEMBER' | 'HUMAN_ONLY'
+  latestMessageAt: Date | null
+  lastOutboundMessageAt: Date | null
+  lastCustomerMessageId: string | null
 }
 
 export const AI_DEBOUNCE_MS = 2_000
@@ -110,6 +135,9 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
       assigneeWorkspaceId: member.workspaceId,
       channelId: channel.id,
       routingConstraint: conversation.routingConstraint,
+      latestMessageAt: conversation.latestMessageAt,
+      lastOutboundMessageAt: conversation.lastOutboundMessageAt,
+      lastCustomerMessageId: conversation.lastCustomerMessageId,
     })
     .from(conversation)
     .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
@@ -123,6 +151,10 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
     )
     .limit(1)
   if (!current) throw new AssignmentError('NOT_FOUND', 'Conversation not found')
+  if (command.type === 'AI_HANDOFF') {
+    if (current.status !== 'OPEN') return unchanged(current, current.assigneeMemberId)
+    return executeAiHandoff(tx, command, current, now)
+  }
   if (current.status !== 'OPEN') {
     throw new AssignmentError('CONVERSATION_CLOSED', 'Conversation is closed')
   }
@@ -325,6 +357,13 @@ export async function takeOverConversation(
   return db.transaction((tx) => executeAssignment(tx, { type: 'TAKEOVER', ...input }))
 }
 
+export async function handoffAiConversation(
+  db: Database,
+  input: Omit<Extract<AssignmentCommand, { type: 'AI_HANDOFF' }>, 'type'>,
+) {
+  return db.transaction((tx) => executeAssignment(tx, { type: 'AI_HANDOFF', ...input }))
+}
+
 export async function transferConversation(
   db: Database,
   input: {
@@ -480,6 +519,137 @@ async function executeAutoAssignment(tx: Transaction, input: AutoAssignInput) {
   return changed(current, assignmentId, candidate.id, aiResponseRunId)
 }
 
+async function executeAiHandoff(
+  tx: Transaction,
+  command: Extract<AssignmentCommand, { type: 'AI_HANDOFF' }>,
+  current: CurrentConversation,
+  now: Date,
+): Promise<AssignmentResult> {
+  const involvedMemberIds = [...new Set([current.assigneeMemberId, command.memberId])]
+    .filter((id): id is string => Boolean(id))
+    .sort()
+  if (involvedMemberIds.length) {
+    await tx
+      .select({ id: member.id })
+      .from(member)
+      .where(
+        and(eq(member.workspaceId, command.workspaceId), inArray(member.id, involvedMemberIds)),
+      )
+      .orderBy(asc(member.id))
+      .for('update')
+  }
+
+  if (current.assigneeMemberId !== command.memberId || current.assigneeType !== 'AI') {
+    return unchanged(current, current.assigneeMemberId)
+  }
+
+  const [run] = await tx
+    .select({
+      memberId: aiResponseRun.memberId,
+      state: aiResponseRun.state,
+      inputLastMessageId: aiResponseRun.inputLastMessageId,
+    })
+    .from(aiResponseRun)
+    .where(and(eq(aiResponseRun.id, command.runId), eq(aiResponseRun.conversationId, current.id)))
+    .for('update')
+    .limit(1)
+  if (!run || run.memberId !== command.memberId || !['QUEUED', 'GENERATING'].includes(run.state)) {
+    return unchanged(current, current.assigneeMemberId)
+  }
+  if (current.lastCustomerMessageId !== run.inputLastMessageId) {
+    await tx
+      .update(aiResponseRun)
+      .set({
+        state: 'CANCELLED',
+        cancellationReason: 'NEW_CUSTOMER_MESSAGE',
+        completedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(aiResponseRun.id, command.runId),
+          inArray(aiResponseRun.state, ['QUEUED', 'GENERATING']),
+        ),
+      )
+    return unchanged(current, current.assigneeMemberId)
+  }
+
+  const noticeText = command.noticeText?.trim() ?? ''
+  if (noticeText.length > 2_000) {
+    throw new AssignmentError('INVALID_REQUEST', 'Handoff notice is too long')
+  }
+
+  const assignmentId = await recordAssignment(tx, {
+    conversationId: current.id,
+    fromMemberId: current.assigneeMemberId,
+    toMemberId: null,
+    reason: 'AI_HANDOFF',
+    actingMemberId: null,
+    createdAt: now,
+  })
+  let messageId: string | null = null
+  if (noticeText) {
+    const [created] = await tx
+      .insert(message)
+      .values({
+        conversationId: current.id,
+        channelId: current.channelId,
+        direction: 'OUTBOUND',
+        senderType: 'MEMBER',
+        senderMemberId: command.memberId,
+        messageType: 'TEXT',
+        text: noticeText,
+        deliveryState: 'PENDING',
+        createdAt: now,
+        updatedAt: now,
+      })
+      .returning({ id: message.id })
+    messageId = created?.id ?? null
+  }
+
+  await tx
+    .update(conversation)
+    .set({
+      assigneeMemberId: null,
+      queueReason: 'AI_HANDOFF',
+      routingConstraint: 'HUMAN_ONLY',
+      routingQueuedAt: now,
+      latestMessageAt: noticeText ? later(current.latestMessageAt, now) : current.latestMessageAt,
+      lastOutboundMessageAt: noticeText ? now : current.lastOutboundMessageAt,
+      updatedAt: now,
+    })
+    .where(eq(conversation.id, current.id))
+
+  await tx
+    .update(aiResponseRun)
+    .set({
+      state: command.runState ?? 'HANDOFF',
+      completedAt: now,
+      failureCode: (command.failureCode ?? command.reason).slice(0, 100),
+      failureMessage: command.failureMessage?.slice(0, 500) ?? null,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(aiResponseRun.id, command.runId),
+        inArray(aiResponseRun.state, ['QUEUED', 'GENERATING']),
+      ),
+    )
+
+  if (command.markRuntimeUnhealthy) {
+    await tx
+      .update(aiMemberConfig)
+      .set({
+        runtimeStatus: 'UNHEALTHY',
+        runtimeError: (command.failureCode ?? 'AI_RUNTIME_ERROR').slice(0, 500),
+        updatedAt: now,
+      })
+      .where(eq(aiMemberConfig.memberId, command.memberId))
+  }
+
+  return changed(current, assignmentId, null, null, messageId)
+}
+
 async function selectCurrentConversation(
   tx: Transaction,
   workspaceId: string,
@@ -494,6 +664,9 @@ async function selectCurrentConversation(
       assigneeWorkspaceId: member.workspaceId,
       channelId: channel.id,
       routingConstraint: conversation.routingConstraint,
+      latestMessageAt: conversation.latestMessageAt,
+      lastOutboundMessageAt: conversation.lastOutboundMessageAt,
+      lastCustomerMessageId: conversation.lastCustomerMessageId,
     })
     .from(conversation)
     .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
@@ -766,6 +939,7 @@ async function recordAssignment(
       | 'TAKEOVER'
       | 'MANUAL_TRANSFER'
       | 'MANUAL_UNASSIGN'
+      | 'AI_HANDOFF'
       | 'MEMBER_DISABLED'
       | 'CLOSE'
     actingMemberId: string | null
@@ -788,6 +962,7 @@ function unchanged(current: CurrentConversation, memberId: string | null): Assig
     fromMemberId: memberId,
     toMemberId: memberId,
     aiResponseRunId: null,
+    messageId: null,
     changed: false,
   }
 }
@@ -797,6 +972,7 @@ function changed(
   assignmentId: string | null,
   toMemberId: string | null,
   aiResponseRunId: string | null = null,
+  messageId: string | null = null,
 ): AssignmentResult {
   return {
     conversationId: current.id,
@@ -804,6 +980,11 @@ function changed(
     fromMemberId: current.assigneeMemberId,
     toMemberId,
     aiResponseRunId,
+    messageId,
     changed: true,
   }
+}
+
+function later(first: Date | null, second: Date) {
+  return !first || second.getTime() > first.getTime() ? second : first
 }

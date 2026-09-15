@@ -1,10 +1,13 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  aiMemberConfig,
   aiResponseRun,
   autoAssignConversation,
   bootstrapWorkspace,
   connectFacebookPages,
+  conversation,
+  conversationAssignment,
   createAiMember,
   createDatabase,
   createInlineKnowledgeDocument,
@@ -175,6 +178,245 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     expect(aiMessage.ack).not.toHaveBeenCalled()
     expect(aiMessage.retry).toHaveBeenCalledWith({ delaySeconds: expect.any(Number) })
   })
+
+  it('hands off an explicit human request before invoking the model', async () => {
+    const fixture = await createFixture(db)
+    const receivedAt = new Date(Date.now() - 10_000)
+    const received = await processFacebookInbound(db, {
+      ingressId: crypto.randomUUID(),
+      pageId: fixture.pageId,
+      externalUserId: `customer-${fixture.ownerId}`,
+      externalMessageId: crypto.randomUUID(),
+      text: 'I need to speak to a human, please.',
+      providerSentAt: receivedAt,
+      receivedAt,
+      payloadSha256: 'a'.repeat(64),
+      eventFragment: { text: 'I need to speak to a human, please.' },
+    })
+    if (received.kind !== 'created') throw new Error('Inbound message was not created')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+      now: receivedAt,
+    })
+    if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
+
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    const outboundQueue = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Queue
+    const maintenanceQueue = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Queue
+    const queued = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
+    await handleAiResponseBatch(
+      batch('deepsales-ai', queued),
+      environment(outboundQueue, maintenanceQueue),
+    )
+
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(queued.ack).toHaveBeenCalledOnce()
+    expect(queued.retry).not.toHaveBeenCalled()
+    expect(outboundQueue.send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'facebook.outbound' }),
+    )
+    expect(maintenanceQueue.send).toHaveBeenCalledWith({
+      v: 1,
+      type: 'routing.conversation',
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+    })
+    expect(
+      await db
+        .select({
+          assigneeMemberId: conversation.assigneeMemberId,
+          queueReason: conversation.queueReason,
+          routingConstraint: conversation.routingConstraint,
+        })
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId)),
+    ).toEqual([
+      {
+        assigneeMemberId: null,
+        queueReason: 'AI_HANDOFF',
+        routingConstraint: 'HUMAN_ONLY',
+      },
+    ])
+    expect(
+      await db
+        .select({ reason: conversationAssignment.reason })
+        .from(conversationAssignment)
+        .where(eq(conversationAssignment.conversationId, received.conversationId)),
+    ).toEqual([{ reason: 'AUTO_ROUTE' }, { reason: 'AI_HANDOFF' }])
+  })
+
+  it('uses a factual-free fallback when a structured handoff policy is disabled', async () => {
+    const fixture = await createFixture(db)
+    const receivedAt = new Date(Date.now() - 10_000)
+    await updateAiMemberConfig(db, {
+      workspaceId: fixture.workspaceId,
+      memberId: fixture.aiMemberId,
+      actingUserId: fixture.ownerId,
+      handoffOnNegativeSentiment: false,
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: fixture.workspaceId,
+      memberId: fixture.aiMemberId,
+      actingUserId: fixture.ownerId,
+      providerConfigured: true,
+    })
+    const received = await processFacebookInbound(db, {
+      ingressId: crypto.randomUUID(),
+      pageId: fixture.pageId,
+      externalUserId: `customer-${fixture.ownerId}`,
+      externalMessageId: crypto.randomUUID(),
+      text: 'This is terrible.',
+      providerSentAt: receivedAt,
+      receivedAt,
+      payloadSha256: 'a'.repeat(64),
+      eventFragment: { text: 'This is terrible.' },
+    })
+    if (received.kind !== 'created') throw new Error('Inbound message was not created')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+      now: receivedAt,
+    })
+    if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).endsWith('/chat/completions')
+          ? Response.json({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      decision: 'HANDOFF',
+                      response: '',
+                      handoffReason: 'NEGATIVE_SENTIMENT',
+                      containsBusinessFacts: false,
+                      usedChunkIds: [],
+                    }),
+                  },
+                },
+              ],
+            })
+          : new Response(null, { status: 404 }),
+      ),
+    )
+    const outboundQueue = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Queue
+    const queued = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
+    await handleAiResponseBatch(batch('deepsales-ai', queued), environment(outboundQueue))
+
+    expect(queued.ack).toHaveBeenCalledOnce()
+    expect(outboundQueue.send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'facebook.outbound' }),
+    )
+    expect(
+      await db
+        .select({ text: message.text, senderMemberId: message.senderMemberId })
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.senderMemberId, fixture.aiMemberId),
+          ),
+        ),
+    ).toEqual([
+      {
+        text: "I don't have enough information to answer that accurately.",
+        senderMemberId: fixture.aiMemberId,
+      },
+    ])
+    expect(
+      await db
+        .select({ state: aiResponseRun.state })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, routed.aiResponseRunId)),
+    ).toEqual([{ state: 'COMPLETED' }])
+  })
+
+  it('hands off transient runtime failures without disabling the AI member', async () => {
+    const fixture = await createFixture(db)
+    const receivedAt = new Date(Date.now() - 10_000)
+    const received = await processFacebookInbound(db, {
+      ingressId: crypto.randomUUID(),
+      pageId: fixture.pageId,
+      externalUserId: `customer-${fixture.ownerId}`,
+      externalMessageId: crypto.randomUUID(),
+      text: 'The provider is unavailable.',
+      providerSentAt: receivedAt,
+      receivedAt,
+      payloadSha256: 'a'.repeat(64),
+      eventFragment: { text: 'The provider is unavailable.' },
+    })
+    if (received.kind !== 'created') throw new Error('Inbound message was not created')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+      now: receivedAt,
+    })
+    if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('temporary network failure')))
+
+    const queued = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
+    await handleAiResponseBatch(batch('deepsales-ai', queued), environment())
+
+    expect(queued.ack).toHaveBeenCalledOnce()
+    expect(queued.retry).not.toHaveBeenCalled()
+    expect(
+      await db
+        .select({ state: aiResponseRun.state })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, routed.aiResponseRunId)),
+    ).toEqual([{ state: 'FAILED' }])
+    expect(
+      await db
+        .select({ runtimeStatus: aiMemberConfig.runtimeStatus })
+        .from(aiMemberConfig)
+        .where(eq(aiMemberConfig.memberId, fixture.aiMemberId)),
+    ).toEqual([{ runtimeStatus: 'USABLE' }])
+  })
+
+  it('marks the AI runtime unhealthy for permanent provider configuration failures', async () => {
+    const fixture = await createFixture(db)
+    const receivedAt = new Date(Date.now() - 10_000)
+    const received = await processFacebookInbound(db, {
+      ingressId: crypto.randomUUID(),
+      pageId: fixture.pageId,
+      externalUserId: `customer-${fixture.ownerId}`,
+      externalMessageId: crypto.randomUUID(),
+      text: 'Can you help me?',
+      providerSentAt: receivedAt,
+      receivedAt,
+      payloadSha256: 'a'.repeat(64),
+      eventFragment: { text: 'Can you help me?' },
+    })
+    if (received.kind !== 'created') throw new Error('Inbound message was not created')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+      now: receivedAt,
+    })
+    if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
+
+    const queued = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
+    await handleAiResponseBatch(batch('deepsales-ai', queued), { ...environment(), AI_API_KEY: '' })
+
+    expect(queued.ack).toHaveBeenCalledOnce()
+    expect(queued.retry).not.toHaveBeenCalled()
+    expect(
+      await db
+        .select({ state: aiResponseRun.state, failureCode: aiResponseRun.failureCode })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, routed.aiResponseRunId)),
+    ).toEqual([{ state: 'FAILED', failureCode: 'AI_PROVIDER_ERROR' }])
+    expect(
+      await db
+        .select({ runtimeStatus: aiMemberConfig.runtimeStatus })
+        .from(aiMemberConfig)
+        .where(eq(aiMemberConfig.memberId, fixture.aiMemberId)),
+    ).toEqual([{ runtimeStatus: 'UNHEALTHY' }])
+  })
 })
 
 async function createFixture(db: ReturnType<typeof createDatabase>) {
@@ -234,7 +476,7 @@ async function createFixture(db: ReturnType<typeof createDatabase>) {
   }
 }
 
-function environment(outboundQueue?: Queue): Bindings {
+function environment(outboundQueue?: Queue, maintenanceQueue?: Queue): Bindings {
   return {
     APP_URL: 'http://localhost:8787',
     AUTH_RATE_LIMITER: {} as RateLimit,
@@ -253,6 +495,7 @@ function environment(outboundQueue?: Queue): Bindings {
     LLM_PROVIDER: 'alibaba',
     LLM_MODEL: 'qwen3.8-flash',
     OUTBOUND_QUEUE: outboundQueue,
+    MAINTENANCE_QUEUE: maintenanceQueue,
   }
 }
 

@@ -38,7 +38,7 @@ import {
   failOutboundMessage,
   failFacebookInboundAttachment,
   failKnowledgeDocument,
-  finishAiResponseRun,
+  handoffAiConversation,
   listFacebookChannels,
   listFacebookChannelsPage,
   listFacebookConversations,
@@ -58,7 +58,6 @@ import {
   MemberError,
   processFacebookInbound,
   recordAiResponseRetrievedChunks,
-  retryAiResponseRun,
   releaseFacebookInboundAttachment,
   releaseKnowledgeDocument,
   recoverStaleOutboundMessages,
@@ -114,10 +113,12 @@ import {
   AIEmbeddingError,
   AIOutputError,
   AIProviderError,
+  applyHandoffPolicy,
   aiMemberRuntimeSnapshotSchema,
   createAlibabaLlmProvider,
   createAlibabaEmbeddingProvider,
   DEFAULT_EMBEDDING_MODEL,
+  detectConfiguredHandoff,
   enforceGrounding,
   EMBEDDING_DIMENSIONS,
   isLlmProviderConfigurationUsable,
@@ -1942,30 +1943,35 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       claimed.conversationId,
       'conversation.changed',
     )
+    let snapshot: ReturnType<typeof aiMemberRuntimeSnapshotSchema.parse> | null = null
     try {
-      const snapshot = aiMemberRuntimeSnapshotSchema.safeParse(claimed.publishedSnapshot)
-      if (!snapshot.success) throw new AIOutputError()
+      const parsedSnapshot = aiMemberRuntimeSnapshotSchema.safeParse(claimed.publishedSnapshot)
+      if (!parsedSnapshot.success) throw new AIOutputError()
+      const currentSnapshot = parsedSnapshot.data
+      snapshot = currentSnapshot
+
+      const configuredReason = detectConfiguredHandoff(claimed.inputMessages, currentSnapshot)
+      if (configuredReason) {
+        await completeAiHandoff(env, claimed, {
+          reason: configuredReason,
+          noticeText: handoffNotice(currentSnapshot.responseLanguage),
+          failureCode: configuredReason,
+          failureMessage: 'Configured handoff trigger matched',
+        })
+        queueMessage.ack()
+        continue
+      }
 
       const inputMessages = claimed.inputMessages
         .filter(({ text }) => Boolean(text?.trim()))
         .map(({ id, text }) => ({ id, text: text as string }))
       if (!inputMessages.length) {
-        const finished = await withDatabase(env, (db) =>
-          finishAiResponseRun(db, {
-            runId: claimed.id,
-            state: 'HANDOFF',
-            failureCode: 'UNSUPPORTED_ATTACHMENT',
-            failureMessage: 'AI cannot process attachment-only input',
-          }),
-        )
-        if (finished) {
-          await publishInboxChange(
-            env,
-            claimed.workspaceId,
-            claimed.conversationId,
-            'conversation.changed',
-          )
-        }
+        await completeAiHandoff(env, claimed, {
+          reason: 'UNSUPPORTED_ATTACHMENT',
+          noticeText: handoffNotice(currentSnapshot.responseLanguage),
+          failureCode: 'UNSUPPORTED_ATTACHMENT',
+          failureMessage: 'AI cannot process attachment-only input',
+        })
         queueMessage.ack()
         continue
       }
@@ -1982,7 +1988,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         retrievedChunks = await withDatabase(env, (db) =>
           retrieveKnowledgeChunks(db, embeddingProvider, env, {
             workspaceId: claimed.workspaceId,
-            knowledgeBaseId: snapshot.data.knowledgeBaseId,
+            knowledgeBaseId: currentSnapshot.knowledgeBaseId,
             query: inputMessages.map(({ text }) => text).join('\n'),
           }),
         )
@@ -2012,39 +2018,34 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         model: env.LLM_MODEL,
       })
       const decision = await llmProvider.generateResponse({
-        instructions: snapshot.data.instructions,
-        responseLanguage: snapshot.data.responseLanguage,
+        instructions: currentSnapshot.instructions,
+        responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,
         knowledgeChunks: retrievedChunks.map(({ id, text }) => ({ id, text })),
       })
-      const grounded = enforceGrounding(decision, retrievedChunkIds, snapshot.data)
-      if (grounded.kind === 'HANDOFF') {
-        const finished = await withDatabase(env, (db) =>
-          finishAiResponseRun(db, {
-            runId: claimed.id,
-            state: 'HANDOFF',
-            failureCode:
-              grounded.decision.decision === 'HANDOFF' ? 'MODEL_HANDOFF' : 'GROUNDING_FAILED',
-            failureMessage:
-              grounded.decision.decision === 'HANDOFF'
-                ? 'AI requested human handoff'
-                : 'AI response was not grounded in published knowledge',
-          }),
-        )
-        if (finished) {
-          await publishInboxChange(
-            env,
-            claimed.workspaceId,
-            claimed.conversationId,
-            'conversation.changed',
-          )
-        }
+      const grounded = enforceGrounding(decision, retrievedChunkIds, currentSnapshot)
+      const policy = applyHandoffPolicy(grounded.decision, currentSnapshot)
+      if (policy.kind === 'HANDOFF') {
+        await completeAiHandoff(env, claimed, {
+          reason: policy.decision.handoffReason ?? 'UNABLE_TO_ANSWER',
+          noticeText: handoffNotice(currentSnapshot.responseLanguage),
+          failureCode:
+            grounded.kind === 'HANDOFF' && grounded.decision.decision === 'HANDOFF'
+              ? grounded.decision.handoffReason === 'NO_KNOWLEDGE'
+                ? 'NO_KNOWLEDGE'
+                : 'MODEL_HANDOFF'
+              : 'GROUNDING_FAILED',
+          failureMessage:
+            grounded.kind === 'HANDOFF' && grounded.decision.decision === 'HANDOFF'
+              ? 'AI requested human handoff'
+              : 'AI response was not grounded in published knowledge',
+        })
         queueMessage.ack()
         continue
       }
 
       const result = await withDatabase(env, (db) =>
-        commitAiResponse(db, { runId: claimed.id, text: grounded.decision.response }),
+        commitAiResponse(db, { runId: claimed.id, text: policy.decision.response }),
       )
       if (!result) {
         queueMessage.ack()
@@ -2069,51 +2070,80 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       }
       queueMessage.ack()
     } catch (error) {
-      if (error instanceof AIProviderError && error.retryable) {
-        let retried: Awaited<ReturnType<typeof retryAiResponseRun>>
-        try {
-          retried = await withDatabase(env, (db) => retryAiResponseRun(db, { runId: claimed.id }))
-        } catch {
-          queueMessage.retry()
-          continue
-        }
-        if (!retried) {
-          queueMessage.ack()
-          continue
-        }
-        await publishInboxChange(
-          env,
-          claimed.workspaceId,
-          claimed.conversationId,
-          'conversation.changed',
-        )
-        queueMessage.retry()
-        continue
-      }
-
       try {
-        const finished = await withDatabase(env, (db) =>
-          finishAiResponseRun(db, {
-            runId: claimed.id,
-            state: 'FAILED',
-            failureCode: aiFailureCode(error),
-            failureMessage: 'AI response could not be generated',
-          }),
-        )
-        if (finished) {
-          await publishInboxChange(
-            env,
-            claimed.workspaceId,
-            claimed.conversationId,
-            'conversation.changed',
-          )
-        }
+        await completeAiHandoff(env, claimed, {
+          reason: 'PROVIDER_FAILURE',
+          runState: 'FAILED',
+          failureCode: aiFailureCode(error),
+          failureMessage: 'AI response could not be generated',
+          markRuntimeUnhealthy: isPersistentAiFailure(error),
+          noticeText: handoffNotice(snapshot?.responseLanguage ?? 'English'),
+        })
         queueMessage.ack()
       } catch {
         queueMessage.retry()
       }
     }
   }
+}
+
+async function completeAiHandoff(
+  env: Bindings,
+  claimed: Extract<Awaited<ReturnType<typeof claimAiResponseRun>>, { kind: 'CLAIMED' }>,
+  input: {
+    reason:
+      | 'CUSTOMER_REQUEST'
+      | 'NO_KNOWLEDGE'
+      | 'NEGATIVE_SENTIMENT'
+      | 'UNABLE_TO_ANSWER'
+      | 'KEYWORD'
+      | 'UNSUPPORTED_ATTACHMENT'
+      | 'PROVIDER_FAILURE'
+    noticeText?: string | null
+    runState?: 'HANDOFF' | 'FAILED'
+    failureCode?: string
+    failureMessage?: string
+    markRuntimeUnhealthy?: boolean
+  },
+) {
+  const result = await withDatabase(env, (db) =>
+    handoffAiConversation(db, {
+      workspaceId: claimed.workspaceId,
+      conversationId: claimed.conversationId,
+      memberId: claimed.memberId,
+      runId: claimed.id,
+      ...input,
+    }),
+  )
+  if (!result.changed) {
+    await publishInboxChange(
+      env,
+      claimed.workspaceId,
+      claimed.conversationId,
+      'conversation.changed',
+    )
+    return result
+  }
+
+  await publishInboxChange(env, claimed.workspaceId, claimed.conversationId, 'conversation.changed')
+  if (result.messageId) {
+    await publishInboxChange(env, claimed.workspaceId, result.messageId, 'message.changed')
+    await enqueueOutboundMessage(env, result.messageId)
+  }
+  await enqueueMaintenanceJobs(env, [
+    { workspaceId: claimed.workspaceId, conversationId: claimed.conversationId },
+  ])
+  return result
+}
+
+function handoffNotice(responseLanguage: string) {
+  return /(^|[-_ ])(?:zh|cn)|chinese|中文|汉语/i.test(responseLanguage)
+    ? '我会为你转接人工客服，请稍候。'
+    : "I'll connect you with a human teammate. Please wait."
+}
+
+function isPersistentAiFailure(error: unknown) {
+  return error instanceof AIProviderError && !error.retryable
 }
 
 function aiFailureCode(error: unknown) {

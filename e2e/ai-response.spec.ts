@@ -137,7 +137,7 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
   )
   if (!conversation) throw new Error('AI conversation was not found')
 
-  const followUp = `Please connect me to a person ${suffix}`
+  const followUp = `Could you explain that again ${suffix}`
   await sendInbound(page, pageId, `customer-${suffix}`, `mid-follow-up-${suffix}`, followUp)
   await expect(page.getByText('AI 正在生成', { exact: true }).first()).toBeVisible({
     timeout: 20_000,

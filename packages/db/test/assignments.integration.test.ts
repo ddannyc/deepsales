@@ -13,8 +13,10 @@ import {
   createAiMember,
   createDatabase,
   createKnowledgeBase,
+  handoffAiConversation,
   aiResponseRun,
   member,
+  message,
   processFacebookInbound,
   publishAiMemberConfig,
   setMemberChannelAccess,
@@ -272,6 +274,71 @@ describe.skipIf(!connectionString)('conversation auto-assignment', () => {
     expect(results.filter(({ changed }) => changed)).toHaveLength(1)
     expect(results.find(({ changed }) => changed)?.toMemberId).toBe(fixture.aiMemberId)
     expect(results.filter(({ toMemberId }) => toMemberId === null)).toHaveLength(1)
+  })
+
+  it('hands an AI conversation to a human in one transaction', async () => {
+    const fixture = await createFixture(db)
+    const received = await receive(db, fixture, 'please connect me to a person')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
+
+    const result = await handoffAiConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+      memberId: fixture.aiMemberId,
+      runId: routed.aiResponseRunId,
+      reason: 'CUSTOMER_REQUEST',
+      noticeText: 'A human teammate will take over shortly.',
+      now: new Date('2026-09-15T00:00:01.000Z'),
+    })
+
+    expect(result).toMatchObject({ changed: true, toMemberId: null, messageId: expect.any(String) })
+    const [stored] = await db
+      .select({
+        assigneeMemberId: conversation.assigneeMemberId,
+        queueReason: conversation.queueReason,
+        routingConstraint: conversation.routingConstraint,
+      })
+      .from(conversation)
+      .where(eq(conversation.id, received.conversationId))
+    expect(stored).toEqual({
+      assigneeMemberId: null,
+      queueReason: 'AI_HANDOFF',
+      routingConstraint: 'HUMAN_ONLY',
+    })
+    expect(
+      await db
+        .select({ reason: conversationAssignment.reason })
+        .from(conversationAssignment)
+        .where(eq(conversationAssignment.conversationId, received.conversationId)),
+    ).toEqual([{ reason: 'AUTO_ROUTE' }, { reason: 'AI_HANDOFF' }])
+    expect(
+      await db
+        .select({ state: aiResponseRun.state, failureCode: aiResponseRun.failureCode })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, routed.aiResponseRunId)),
+    ).toEqual([{ state: 'HANDOFF', failureCode: 'CUSTOMER_REQUEST' }])
+    expect(
+      await db
+        .select({ text: message.text, deliveryState: message.deliveryState })
+        .from(message)
+        .where(eq(message.id, result.messageId as string)),
+    ).toEqual([{ text: 'A human teammate will take over shortly.', deliveryState: 'PENDING' }])
+
+    await expect(
+      autoAssignConversation(db, {
+        workspaceId: fixture.workspaceId,
+        conversationId: received.conversationId,
+      }),
+    ).resolves.toMatchObject({ changed: true, toMemberId: fixture.ownerMemberId })
+    const [assigned] = await db
+      .select({ routingConstraint: conversation.routingConstraint })
+      .from(conversation)
+      .where(eq(conversation.id, received.conversationId))
+    expect(assigned?.routingConstraint).toBe('HUMAN_ONLY')
   })
 })
 
