@@ -117,7 +117,6 @@ import {
   aiMemberRuntimeSnapshotSchema,
   createAlibabaLlmProvider,
   createAlibabaEmbeddingProvider,
-  DEFAULT_LLM_MODEL,
   DEFAULT_EMBEDDING_MODEL,
   enforceGrounding,
   EMBEDDING_DIMENSIONS,
@@ -1327,7 +1326,7 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.EMBEDDING_MODEL === DEFAULT_EMBEDDING_MODEL &&
       env.EMBEDDING_DIMENSIONS === String(EMBEDDING_DIMENSIONS) &&
       env.LLM_PROVIDER === ALIBABA_LLM_PROVIDER &&
-      env.LLM_MODEL === DEFAULT_LLM_MODEL &&
+      Boolean(env.LLM_MODEL?.trim()) &&
       env.WEBHOOKS_QUEUE &&
       env.OUTBOUND_QUEUE &&
       env.AI_QUEUE &&
@@ -2680,10 +2679,10 @@ export async function handleScheduled(env: Bindings) {
         env,
         await withDatabase(env, (db) => listQueuedConversationIds(db)),
       )
+    }
     const staleAiRuns = await withDatabase(env, (db) => recoverStaleAiResponseRuns(db))
     for (const item of staleAiRuns) {
       await publishInboxChange(env, item.workspaceId, item.conversationId, 'conversation.changed')
-    }
     }
     if (env.AI_QUEUE) {
       const runIds = await withDatabase(env, (db) => listQueuedAiResponseRunIds(db))

@@ -20,13 +20,15 @@ describe('LLM provider configuration', () => {
     expect(isLlmProviderConfigurationUsable(config)).toBe(true)
     expect(isLlmProviderConfigurationUsable({ ...config, apiKey: ' ' })).toBe(false)
     expect(isLlmProviderConfigurationUsable({ ...config, provider: 'openai' })).toBe(false)
-    expect(isLlmProviderConfigurationUsable({ ...config, model: 'other-model' })).toBe(false)
+    expect(isLlmProviderConfigurationUsable({ ...config, model: 'qwen3.7-flash' })).toBe(true)
+    expect(isLlmProviderConfigurationUsable({ ...config, model: ' ' })).toBe(false)
   })
 })
 
 describe('Alibaba LLM responses', () => {
   it('sends delimited data to the native chat completion endpoint and validates the decision', async () => {
     const chunkId = '00000000-0000-4000-8000-000000000001'
+    const model = 'qwen3.7-flash'
     const fetcher = vi.fn().mockResolvedValue(
       Response.json({
         choices: [
@@ -45,7 +47,7 @@ describe('Alibaba LLM responses', () => {
       }),
     )
     const provider = new AlibabaLlmProvider(
-      { apiKey: 'test-key', baseUrl: 'http://ai.test/v1' },
+      { apiKey: 'test-key', baseUrl: 'http://ai.test/v1', model },
       fetcher,
     )
 
@@ -66,7 +68,7 @@ describe('Alibaba LLM responses', () => {
       }),
     )
     const body = JSON.parse(fetcher.mock.calls[0]?.[1]?.body as string)
-    expect(body.model).toBe(DEFAULT_LLM_MODEL)
+    expect(body.model).toBe(model)
     expect(body.response_format).toEqual({ type: 'json_object' })
     expect(body.messages[1].content).toContain('<customer_messages>')
   })

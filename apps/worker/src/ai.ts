@@ -18,7 +18,7 @@ export function isLlmProviderConfigurationUsable(config: {
     config.apiKey?.trim() &&
       config.baseUrl?.trim() &&
       config.provider === ALIBABA_LLM_PROVIDER &&
-      config.model === DEFAULT_LLM_MODEL,
+      config.model?.trim(),
   )
 }
 
@@ -278,8 +278,8 @@ export class AlibabaLlmProvider implements LlmProvider {
     if (!config.apiKey.trim() || !config.baseUrl.trim()) throw new AIProviderError(0, false)
     this.apiKey = config.apiKey
     this.baseUrl = config.baseUrl.replace(/\/+$/, '')
-    this.model = config.model ?? DEFAULT_LLM_MODEL
-    if (this.model !== DEFAULT_LLM_MODEL) throw new AIProviderError(0, false)
+    this.model = config.model === undefined ? DEFAULT_LLM_MODEL : config.model.trim()
+    if (!this.model) throw new AIProviderError(0, false)
     this.fetcher = fetcher
   }
 
