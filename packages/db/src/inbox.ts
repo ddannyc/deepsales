@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm'
+import { ensureAiResponseRun } from './assignments'
 import type { FacebookInboundAttachmentInput } from './attachments'
 import type { Database } from './database'
 import {
@@ -255,6 +256,22 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
       })
       .where(eq(conversation.id, openConversation.id))
 
+    let aiResponseRunId: string | null = null
+    if (openConversation.assigneeMemberId) {
+      const [assignee] = await tx
+        .select({ type: member.type })
+        .from(member)
+        .where(eq(member.id, openConversation.assigneeMemberId))
+        .limit(1)
+      if (assignee?.type === 'AI') {
+        aiResponseRunId = await ensureAiResponseRun(tx, {
+          conversationId: openConversation.id,
+          memberId: openConversation.assigneeMemberId,
+          now,
+        })
+      }
+    }
+
     const eligibleUntil = new Date(eventAt.getTime() + 24 * 60 * 60 * 1_000)
     await tx
       .insert(facebookMessagingWindow)
@@ -281,6 +298,7 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
       conversationId: openConversation.id,
       messageId: createdMessage.id,
       attachmentIds,
+      aiResponseRunId,
     }
   })
 }

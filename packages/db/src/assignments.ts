@@ -1,6 +1,8 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
+  aiMemberConfig,
+  aiResponseRun,
   channel,
   channelIdentity,
   conversation,
@@ -8,6 +10,7 @@ import {
   humanMemberAvailability,
   member,
   memberChannelAccess,
+  message,
   workspace,
   workspaceUserAccess,
 } from './schema'
@@ -39,6 +42,7 @@ export class AssignmentError extends Error {
 }
 
 export type AssignmentCommand =
+  | { type: 'AUTO_ROUTE'; workspaceId: string; conversationId: string; now?: Date }
   | (CommandBase & { type: 'TAKEOVER' })
   | (CommandBase & { type: 'TRANSFER'; targetMemberId: string; confirmOverride?: boolean })
   | (CommandBase & { type: 'UNASSIGN' })
@@ -50,6 +54,7 @@ export type AssignmentResult = {
   assignmentId: string | null
   fromMemberId: string | null
   toMemberId: string | null
+  aiResponseRunId: string | null
   changed: boolean
 }
 
@@ -60,9 +65,13 @@ type CurrentConversation = {
   assigneeType: 'HUMAN' | 'AI' | null
   assigneeWorkspaceId: string | null
   channelId: string
+  routingConstraint: 'ANY_MEMBER' | 'HUMAN_ONLY'
 }
 
+export const AI_DEBOUNCE_MS = 2_000
+
 export async function executeAssignment(tx: Transaction, command: AssignmentCommand) {
+  if (command.type === 'AUTO_ROUTE') return executeAutoAssignment(tx, command)
   const now = command.now ?? new Date()
 
   if (command.type === 'CLOSE') {
@@ -99,6 +108,7 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
       assigneeType: member.type,
       assigneeWorkspaceId: member.workspaceId,
       channelId: channel.id,
+      routingConstraint: conversation.routingConstraint,
     })
     .from(conversation)
     .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
@@ -231,11 +241,20 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
       .set({
         assigneeMemberId: target.id,
         queueReason: null,
+        routingConstraint: target.type === 'AI' ? 'ANY_MEMBER' : current.routingConstraint,
         routingQueuedAt: null,
         updatedAt: now,
       })
       .where(eq(conversation.id, current.id))
-    return changed(current, assignmentId, target.id)
+    const aiResponseRunId =
+      target.type === 'AI'
+        ? await ensureAiResponseRun(tx, {
+            conversationId: current.id,
+            memberId: target.id,
+            now,
+          })
+        : null
+    return changed(current, assignmentId, target.id, aiResponseRunId)
   }
 
   if (command.type === 'MEMBER_DISABLED' && current.assigneeMemberId !== command.memberId) {
@@ -343,7 +362,291 @@ export async function requeueMemberConversation(
   return executeAssignment(tx, { type: 'MEMBER_DISABLED', ...input })
 }
 
-async function lockConversation(tx: Transaction, command: CommandBase) {
+export type AutoAssignInput = {
+  workspaceId: string
+  conversationId: string
+  now?: Date
+}
+
+export async function autoAssignConversation(db: Database, input: AutoAssignInput) {
+  return db.transaction((tx) => executeAssignment(tx, { type: 'AUTO_ROUTE', ...input }))
+}
+
+export async function listQueuedConversationIds(
+  db: Database,
+  input: { workspaceId?: string; limit?: number } = {},
+) {
+  return db.transaction(async (tx) => {
+    return tx
+      .select({ conversationId: conversation.id, workspaceId: conversation.workspaceId })
+      .from(conversation)
+      .where(
+        and(
+          input.workspaceId ? eq(conversation.workspaceId, input.workspaceId) : undefined,
+          eq(conversation.status, 'OPEN'),
+          sql`${conversation.assigneeMemberId} is null`,
+        ),
+      )
+      .orderBy(asc(conversation.routingQueuedAt), asc(conversation.id))
+      .limit(Math.min(Math.max(input.limit ?? 100, 1), 100))
+      .for('update', { skipLocked: true })
+  })
+}
+
+export async function listQueuedAiResponseRunIds(db: Database, limit = 100) {
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .select({ runId: aiResponseRun.id })
+      .from(aiResponseRun)
+      .where(eq(aiResponseRun.state, 'QUEUED'))
+      .orderBy(asc(aiResponseRun.scheduledFor), asc(aiResponseRun.id))
+      .limit(Math.min(Math.max(limit, 1), 100))
+      .for('update', { skipLocked: true })
+    return rows.map(({ runId }) => runId)
+  })
+}
+
+async function executeAutoAssignment(tx: Transaction, input: AutoAssignInput) {
+  const now = input.now ?? new Date()
+  // ponytail: one workspace lock is the V1 throughput ceiling; split locks only after measured contention.
+  const workspaceLock = await tx.execute(
+    sql`select id from ${workspace} where id = ${input.workspaceId} for update`,
+  )
+  if (!workspaceLock.rows.length) throw new AssignmentError('NOT_FOUND', 'Workspace not found')
+  await lockConversation(tx, input)
+
+  const current = await selectCurrentConversation(tx, input.workspaceId, input.conversationId)
+  if (!current) throw new AssignmentError('NOT_FOUND', 'Conversation not found')
+  if (current.status !== 'OPEN') return unchanged(current, current.assigneeMemberId)
+  if (current.assigneeMemberId) return unchanged(current, current.assigneeMemberId)
+
+  let candidates = await findEligibleCandidates(tx, input.workspaceId, current.channelId)
+  if (candidates.length) {
+    await tx
+      .select({ id: member.id })
+      .from(member)
+      .where(
+        and(
+          eq(member.workspaceId, input.workspaceId),
+          inArray(
+            member.id,
+            candidates.map(({ id }) => id),
+          ),
+        ),
+      )
+      .orderBy(asc(member.id))
+      .for('update')
+    candidates = await findEligibleCandidates(tx, input.workspaceId, current.channelId)
+  }
+
+  const candidate = await rankCandidate(
+    tx,
+    input.workspaceId,
+    current.routingConstraint,
+    candidates,
+  )
+  if (!candidate) return unchanged(current, null)
+
+  const assignmentId = await recordAssignment(tx, {
+    conversationId: current.id,
+    fromMemberId: null,
+    toMemberId: candidate.id,
+    reason: 'AUTO_ROUTE',
+    actingMemberId: null,
+    createdAt: now,
+  })
+  await tx
+    .update(conversation)
+    .set({
+      assigneeMemberId: candidate.id,
+      queueReason: null,
+      routingQueuedAt: null,
+      updatedAt: now,
+    })
+    .where(eq(conversation.id, current.id))
+  await tx
+    .update(member)
+    .set({ lastAutoAssignedAt: now, updatedAt: now })
+    .where(eq(member.id, candidate.id))
+
+  const aiResponseRunId =
+    candidate.type === 'AI'
+      ? await ensureAiResponseRun(tx, { conversationId: current.id, memberId: candidate.id, now })
+      : null
+  return changed(current, assignmentId, candidate.id, aiResponseRunId)
+}
+
+async function selectCurrentConversation(
+  tx: Transaction,
+  workspaceId: string,
+  conversationId: string,
+) {
+  const [current] = await tx
+    .select({
+      id: conversation.id,
+      status: conversation.status,
+      assigneeMemberId: conversation.assigneeMemberId,
+      assigneeType: member.type,
+      assigneeWorkspaceId: member.workspaceId,
+      channelId: channel.id,
+      routingConstraint: conversation.routingConstraint,
+    })
+    .from(conversation)
+    .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+    .innerJoin(channel, eq(channel.id, channelIdentity.channelId))
+    .leftJoin(member, eq(member.id, conversation.assigneeMemberId))
+    .where(and(eq(conversation.id, conversationId), eq(conversation.workspaceId, workspaceId)))
+    .limit(1)
+  return current
+}
+
+async function findEligibleCandidates(tx: Transaction, workspaceId: string, channelId: string) {
+  return tx
+    .select({
+      id: member.id,
+      type: member.type,
+      maxActiveConversations: member.maxActiveConversations,
+      lastAutoAssignedAt: member.lastAutoAssignedAt,
+    })
+    .from(member)
+    .innerJoin(memberChannelAccess, eq(memberChannelAccess.memberId, member.id))
+    .leftJoin(humanMemberAvailability, eq(humanMemberAvailability.memberId, member.id))
+    .leftJoin(aiMemberConfig, eq(aiMemberConfig.memberId, member.id))
+    .where(
+      and(
+        eq(member.workspaceId, workspaceId),
+        eq(member.status, 'ACTIVE'),
+        eq(member.autoAssignmentEnabled, true),
+        eq(memberChannelAccess.channelId, channelId),
+        sql`(
+          (${member.type} = 'HUMAN' and ${humanMemberAvailability.available} = true)
+          or
+          (${member.type} = 'AI' and ${aiMemberConfig.runtimeStatus} = 'USABLE')
+        )`,
+      ),
+    )
+}
+
+async function rankCandidate(
+  tx: Transaction,
+  workspaceId: string,
+  routingConstraint: 'ANY_MEMBER' | 'HUMAN_ONLY',
+  candidates: Awaited<ReturnType<typeof findEligibleCandidates>>,
+) {
+  const allowed = candidates.filter(
+    ({ type }) => routingConstraint === 'ANY_MEMBER' || type === 'HUMAN',
+  )
+  if (!allowed.length) return null
+
+  const loads = await tx
+    .select({
+      memberId: conversation.assigneeMemberId,
+      count: sql<number>`count(*)::int`,
+    })
+    .from(conversation)
+    .where(
+      and(
+        eq(conversation.workspaceId, workspaceId),
+        eq(conversation.status, 'OPEN'),
+        inArray(
+          conversation.assigneeMemberId,
+          allowed.map(({ id }) => id),
+        ),
+      ),
+    )
+    .groupBy(conversation.assigneeMemberId)
+  const loadByMemberId = new Map(loads.map(({ memberId, count }) => [memberId, Number(count)]))
+  const available = allowed.filter(
+    ({ id, maxActiveConversations }) => (loadByMemberId.get(id) ?? 0) < maxActiveConversations,
+  )
+  const typeCandidates = available.filter(({ type }) => type === 'AI')
+  const selectedPool =
+    routingConstraint === 'ANY_MEMBER' && typeCandidates.length
+      ? typeCandidates
+      : available.filter(({ type }) => type === 'HUMAN')
+  selectedPool.sort((left, right) => {
+    const leftRatio = (loadByMemberId.get(left.id) ?? 0) / left.maxActiveConversations
+    const rightRatio = (loadByMemberId.get(right.id) ?? 0) / right.maxActiveConversations
+    if (leftRatio !== rightRatio) return leftRatio - rightRatio
+    if (!left.lastAutoAssignedAt && right.lastAutoAssignedAt) return -1
+    if (left.lastAutoAssignedAt && !right.lastAutoAssignedAt) return 1
+    if (left.lastAutoAssignedAt && right.lastAutoAssignedAt) {
+      const byTime = left.lastAutoAssignedAt.getTime() - right.lastAutoAssignedAt.getTime()
+      if (byTime) return byTime
+    }
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0
+  })
+  return selectedPool[0] ?? null
+}
+
+export async function ensureAiResponseRun(
+  tx: Transaction,
+  input: { conversationId: string; memberId: string; now: Date },
+) {
+  const messages = await tx
+    .select({ id: message.id, direction: message.direction, senderType: message.senderType })
+    .from(message)
+    .where(eq(message.conversationId, input.conversationId))
+    .orderBy(asc(message.createdAt), asc(message.id))
+  let lastMemberOutbound = -1
+  for (const [index, item] of messages.entries()) {
+    if (item.direction === 'OUTBOUND' && item.senderType === 'MEMBER') lastMemberOutbound = index
+  }
+  const unanswered = messages
+    .slice(lastMemberOutbound + 1)
+    .filter((item) => item.direction === 'INBOUND' && item.senderType === 'CUSTOMER')
+  const first = unanswered[0]
+  const last = unanswered.at(-1)
+  if (!first || !last) return null
+
+  const [active] = await tx
+    .select({ id: aiResponseRun.id, state: aiResponseRun.state })
+    .from(aiResponseRun)
+    .where(
+      and(
+        eq(aiResponseRun.conversationId, input.conversationId),
+        inArray(aiResponseRun.state, ['QUEUED', 'GENERATING']),
+      ),
+    )
+    .for('update')
+    .limit(1)
+  if (active) {
+    if (active.state === 'QUEUED') {
+      await tx
+        .update(aiResponseRun)
+        .set({
+          memberId: input.memberId,
+          inputFirstMessageId: first.id,
+          inputLastMessageId: last.id,
+          scheduledFor: new Date(input.now.getTime() + AI_DEBOUNCE_MS),
+          updatedAt: input.now,
+        })
+        .where(eq(aiResponseRun.id, active.id))
+    }
+    return active.id
+  }
+
+  const [created] = await tx
+    .insert(aiResponseRun)
+    .values({
+      conversationId: input.conversationId,
+      memberId: input.memberId,
+      state: 'QUEUED',
+      inputFirstMessageId: first.id,
+      inputLastMessageId: last.id,
+      scheduledFor: new Date(input.now.getTime() + AI_DEBOUNCE_MS),
+      createdAt: input.now,
+      updatedAt: input.now,
+    })
+    .returning({ id: aiResponseRun.id })
+  if (!created) throw new AssignmentError('INVALID_REQUEST', 'AI response run was not created')
+  return created.id
+}
+
+async function lockConversation(
+  tx: Transaction,
+  command: Pick<CommandBase, 'workspaceId' | 'conversationId'>,
+) {
   const conversationLock = await tx.execute(
     sql`select id from ${conversation} where id = ${command.conversationId} and workspace_id = ${command.workspaceId} for update`,
   )
@@ -364,13 +667,15 @@ async function assertTransferTarget(
       status: member.status,
       maxActiveConversations: member.maxActiveConversations,
       available: humanMemberAvailability.available,
+      runtimeStatus: aiMemberConfig.runtimeStatus,
     })
     .from(member)
     .leftJoin(humanMemberAvailability, eq(humanMemberAvailability.memberId, member.id))
+    .leftJoin(aiMemberConfig, eq(aiMemberConfig.memberId, member.id))
     .where(and(eq(member.id, command.targetMemberId), eq(member.workspaceId, command.workspaceId)))
     .limit(1)
-  if (target?.type !== 'HUMAN' || target.status !== 'ACTIVE') {
-    throw new AssignmentError('INVALID_TARGET', 'An active human target is required')
+  if (target?.status !== 'ACTIVE') {
+    throw new AssignmentError('INVALID_TARGET', 'Target member is not active')
   }
 
   const [access] = await tx
@@ -385,6 +690,15 @@ async function assertTransferTarget(
     .limit(1)
   if (!access) throw new AssignmentError('INVALID_TARGET', 'Target channel access is required')
 
+  if (target.type === 'AI') {
+    if (target.runtimeStatus !== 'USABLE') {
+      throw new AssignmentError('INVALID_TARGET', 'AI member is not published and usable')
+    }
+  }
+  if (target.type !== 'HUMAN' && target.type !== 'AI') {
+    throw new AssignmentError('INVALID_TARGET', 'Invalid target member')
+  }
+
   const [load] = await tx
     .select({ count: sql<number>`count(*)::int` })
     .from(conversation)
@@ -396,7 +710,7 @@ async function assertTransferTarget(
       ),
     )
   const atCapacity = Number(load?.count ?? 0) >= target.maxActiveConversations
-  const unavailable = target.available === false
+  const unavailable = target.type === 'HUMAN' && target.available === false
   if ((atCapacity || unavailable) && !command.confirmOverride) {
     throw new AssignmentError(
       'TRANSFER_CONFIRMATION_REQUIRED',
@@ -414,8 +728,14 @@ async function recordAssignment(
     conversationId: string
     fromMemberId: string | null
     toMemberId: string | null
-    reason: 'TAKEOVER' | 'MANUAL_TRANSFER' | 'MANUAL_UNASSIGN' | 'MEMBER_DISABLED' | 'CLOSE'
-    actingMemberId: string
+    reason:
+      | 'AUTO_ROUTE'
+      | 'TAKEOVER'
+      | 'MANUAL_TRANSFER'
+      | 'MANUAL_UNASSIGN'
+      | 'MEMBER_DISABLED'
+      | 'CLOSE'
+    actingMemberId: string | null
     createdAt: Date
   },
 ) {
@@ -434,6 +754,7 @@ function unchanged(current: CurrentConversation, memberId: string | null): Assig
     assignmentId: null,
     fromMemberId: memberId,
     toMemberId: memberId,
+    aiResponseRunId: null,
     changed: false,
   }
 }
@@ -442,12 +763,14 @@ function changed(
   current: CurrentConversation,
   assignmentId: string | null,
   toMemberId: string | null,
+  aiResponseRunId: string | null = null,
 ): AssignmentResult {
   return {
     conversationId: current.id,
     assignmentId,
     fromMemberId: current.assigneeMemberId,
     toMemberId,
+    aiResponseRunId,
     changed: true,
   }
 }

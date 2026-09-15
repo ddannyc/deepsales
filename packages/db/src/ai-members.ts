@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
   aiMemberConfig,
@@ -6,6 +6,7 @@ import {
   knowledgeBase,
   member,
   memberChannelAccess,
+  workspace,
   workspaceUserAccess,
   type AiMemberRuntimeSnapshot,
 } from './schema'
@@ -79,6 +80,7 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
   const draft = normalizeDraft(input)
   return db.transaction(async (tx) => {
     await assertManager(tx, input.workspaceId, input.actingUserId)
+    await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
     const target = await lockAiMember(tx, input.workspaceId, input.memberId)
     if (draft.knowledgeBaseId !== undefined && draft.knowledgeBaseId !== null) {
       await assertKnowledgeBase(tx, input.workspaceId, draft.knowledgeBaseId)

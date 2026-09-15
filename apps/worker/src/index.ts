@@ -1,5 +1,6 @@
 import {
   acceptInvitation,
+  autoAssignConversation,
   AssignmentError,
   AiMemberError,
   bootstrapWorkspace,
@@ -41,6 +42,8 @@ import {
   listMessages,
   listPendingFacebookInboundAttachmentIds,
   listPendingKnowledgeDocumentIds,
+  listQueuedAiResponseRunIds,
+  listQueuedConversationIds,
   listKnowledgeBases,
   listKnowledgeDocuments,
   KnowledgeError,
@@ -111,6 +114,7 @@ import {
   isLlmProviderConfigurationUsable,
 } from './ai'
 import { knowledgeDocumentJobSchema } from './knowledge'
+import { maintenanceRoutingJobSchema } from './routing'
 import {
   extractKnowledgeText,
   KnowledgeFileError,
@@ -564,6 +568,7 @@ app.post('/api/workspaces/:workspaceId/ai-members/:memberId/publish', async (c) 
           model: c.env.LLM_MODEL,
         }),
       })
+      await enqueueQueuedConversations(c.env, db, c.req.param('workspaceId'))
       await publishMemberChange(c.env, c.req.param('workspaceId'), c.req.param('memberId'))
       return c.json({ config })
     } catch (error) {
@@ -970,7 +975,7 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/transfer', 
     if (!session) return unauthorized(c)
     const input = transferInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success) {
-      return c.json({ error: { code: 'INVALID_REQUEST', message: 'Choose a human member' } }, 400)
+      return c.json({ error: { code: 'INVALID_REQUEST', message: 'Choose a member' } }, 400)
     }
 
     try {
@@ -980,6 +985,7 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/transfer', 
         actingUserId: session.user.id,
         ...input.data,
       })
+      if (result.aiResponseRunId) await enqueueAiResponseJob(c.env, result.aiResponseRunId)
       await publishInboxChange(
         c.env,
         c.req.param('workspaceId'),
@@ -1188,6 +1194,7 @@ app.post('/api/invitations/accept', async (c) => {
         userEmail: session.user.email,
         userName: session.user.name,
       })
+      await enqueueQueuedConversations(c.env, db, accepted.workspaceId)
       const [access] = await findAccesses(db, session.user.id, accepted.workspaceId)
       return c.json({ workspace: access, memberId: accepted.memberId })
     } catch (error) {
@@ -1212,6 +1219,8 @@ app.post('/api/workspaces/:workspaceId/members', async (c) => {
         createdByUserId: session.user.id,
         ...input.data,
       })
+      await enqueueQueuedConversations(c.env, db, c.req.param('workspaceId'))
+      await publishMemberChange(c.env, c.req.param('workspaceId'), created.id)
       const team = await listTeam(db, c.req.param('workspaceId'))
       return c.json({ member: team.members.find(({ id }) => id === created.id) }, 201)
     } catch (error) {
@@ -1248,6 +1257,8 @@ app.patch('/api/workspaces/:workspaceId/members/:memberId', async (c) => {
           'conversation.changed',
         )
       }
+      await enqueueQueuedConversations(c.env, db, c.req.param('workspaceId'))
+      await publishMemberChange(c.env, c.req.param('workspaceId'), c.req.param('memberId'))
       const team = await listTeam(db, c.req.param('workspaceId'))
       return c.json({ member: team.members.find(({ id }) => id === c.req.param('memberId')) })
     } catch (error) {
@@ -1276,6 +1287,8 @@ app.put('/api/workspaces/:workspaceId/members/:memberId/channels', async (c) => 
         actingUserId: session.user.id,
         channelIds: input.data.channelIds,
       })
+      await enqueueQueuedConversations(c.env, db, c.req.param('workspaceId'))
+      await publishMemberChange(c.env, c.req.param('workspaceId'), c.req.param('memberId'))
       return c.json({ access })
     } catch (error) {
       return memberErrorResponse(c, error)
@@ -1318,7 +1331,9 @@ function hasApplicationBindings(env: Bindings): boolean {
       env.LLM_MODEL === DEFAULT_LLM_MODEL &&
       env.WEBHOOKS_QUEUE &&
       env.OUTBOUND_QUEUE &&
+      env.AI_QUEUE &&
       env.DOCUMENTS_QUEUE &&
+      env.MAINTENANCE_QUEUE &&
       env.OBJECTS &&
       env.WORKSPACE_REALTIME,
   )
@@ -1758,6 +1773,39 @@ async function enqueueKnowledgeDocumentJob(queue: Queue | undefined, documentId:
   }
 }
 
+async function enqueueAiResponseJob(env: Bindings, runId: string) {
+  if (!env.AI_QUEUE) {
+    console.warn(JSON.stringify({ event: 'ai_queue_unavailable', runId }))
+    return
+  }
+  try {
+    await createJobQueue(env.AI_QUEUE).send({ v: 1, type: 'ai.response', runId })
+  } catch {
+    console.warn(JSON.stringify({ event: 'ai_queue_failed', runId }))
+  }
+}
+
+async function enqueueMaintenanceJobs(
+  env: Bindings,
+  conversations: Array<{ workspaceId: string; conversationId: string }>,
+) {
+  if (!conversations.length || !env.MAINTENANCE_QUEUE) return
+  try {
+    const queue = createJobQueue(env.MAINTENANCE_QUEUE)
+    await Promise.all(
+      conversations.map(({ workspaceId, conversationId }) =>
+        queue.send({ v: 1, type: 'routing.conversation', workspaceId, conversationId }),
+      ),
+    )
+  } catch {
+    console.warn(JSON.stringify({ event: 'maintenance_queue_failed' }))
+  }
+}
+
+async function enqueueQueuedConversations(env: Bindings, db: Database, workspaceId?: string) {
+  await enqueueMaintenanceJobs(env, await listQueuedConversationIds(db, { workspaceId }))
+}
+
 async function publishKnowledgeChange(env: Bindings, workspaceId: string, documentId: string) {
   try {
     await publishRealtime(env.WORKSPACE_REALTIME, workspaceId, {
@@ -1816,16 +1864,24 @@ export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bind
       )
       if (result.kind === 'created' || result.kind === 'duplicate-message') {
         await enqueueAttachmentJobs(documentsQueue, result.attachmentIds)
-      }
-      if (result.kind === 'created') {
-        try {
-          await publishRealtime(env.WORKSPACE_REALTIME, result.workspaceId, {
-            type: 'conversation.changed',
-            entityId: result.conversationId,
-          })
-        } catch {
-          console.warn(JSON.stringify({ event: 'realtime_publish_failed' }))
+        const routing = await withDatabase(env, (db) =>
+          autoAssignConversation(db, {
+            workspaceId: result.workspaceId,
+            conversationId: result.conversationId,
+          }),
+        )
+        if (result.kind === 'created' || routing.changed) {
+          await publishInboxChange(
+            env,
+            result.workspaceId,
+            result.conversationId,
+            'conversation.changed',
+          )
         }
+        if (result.kind === 'created' && result.aiResponseRunId) {
+          await enqueueAiResponseJob(env, result.aiResponseRunId)
+        }
+        if (routing.aiResponseRunId) await enqueueAiResponseJob(env, routing.aiResponseRunId)
       }
       message.ack()
     } catch {
@@ -2310,6 +2366,33 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
   }
 }
 
+export async function handleMaintenanceBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  for (const queueMessage of batch.messages) {
+    const job = maintenanceRoutingJobSchema.safeParse(queueMessage.body)
+    if (!job.success) {
+      queueMessage.ack()
+      continue
+    }
+
+    try {
+      const result = await withDatabase(env, (db) => autoAssignConversation(db, job.data))
+      if (result.changed) {
+        await publishInboxChange(
+          env,
+          job.data.workspaceId,
+          result.conversationId,
+          'conversation.changed',
+        )
+      }
+      if (result.aiResponseRunId) await enqueueAiResponseJob(env, result.aiResponseRunId)
+      queueMessage.ack()
+    } catch (error) {
+      if (error instanceof AssignmentError && error.code === 'NOT_FOUND') queueMessage.ack()
+      else queueMessage.retry()
+    }
+  }
+}
+
 export async function handleScheduled(env: Bindings) {
   if (!env.HYPERDRIVE?.connectionString) return
 
@@ -2357,8 +2440,19 @@ export async function handleScheduled(env: Bindings) {
         await enqueueKnowledgeDocumentJob(env.DOCUMENTS_QUEUE, documentId)
       }
     }
+
+    if (env.MAINTENANCE_QUEUE) {
+      await enqueueMaintenanceJobs(
+        env,
+        await withDatabase(env, (db) => listQueuedConversationIds(db)),
+      )
+    }
+    if (env.AI_QUEUE) {
+      const runIds = await withDatabase(env, (db) => listQueuedAiResponseRunIds(db))
+      for (const runId of runIds) await enqueueAiResponseJob(env, runId)
+    }
   } catch {
-    console.error(JSON.stringify({ event: 'outbound_recovery_failed' }))
+    console.error(JSON.stringify({ event: 'scheduled_recovery_failed' }))
   }
 }
 
@@ -2372,7 +2466,9 @@ const worker = {
       ? handleOutboundBatch(batch, env)
       : batch.queue === 'deepsales-documents'
         ? handleDocumentsBatch(batch, env)
-        : handleWebhookBatch(batch, env),
+        : batch.queue === 'deepsales-maintenance'
+          ? handleMaintenanceBatch(batch, env)
+          : handleWebhookBatch(batch, env),
   scheduled: (_controller: ScheduledController, env: Bindings) => handleScheduled(env),
 }
 

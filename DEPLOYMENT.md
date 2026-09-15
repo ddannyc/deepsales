@@ -63,7 +63,9 @@ pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DATABASE
 ```powershell
 pnpm exec wrangler queues create deepsales-webhooks
 pnpm exec wrangler queues create deepsales-outbound
+pnpm exec wrangler queues create deepsales-ai
 pnpm exec wrangler queues create deepsales-documents
+pnpm exec wrangler queues create deepsales-maintenance
 pnpm exec wrangler queues create deepsales-dlq
 pnpm exec wrangler r2 bucket create deepsales-objects
 ```

@@ -137,6 +137,18 @@ export const knowledgeDocumentStatus = pgEnum('knowledge_document_status', [
   'FAILED',
 ])
 export const aiRuntimeStatus = pgEnum('ai_runtime_status', ['UNPUBLISHED', 'USABLE', 'UNHEALTHY'])
+export const aiResponseRunState = pgEnum('ai_response_run_state', [
+  'QUEUED',
+  'GENERATING',
+  'COMPLETED',
+  'HANDOFF',
+  'CANCELLED',
+  'FAILED',
+])
+export const aiResponseCancellationReason = pgEnum('ai_response_cancellation_reason', [
+  'OWNERSHIP_CHANGED',
+  'NEW_CUSTOMER_MESSAGE',
+])
 
 export const workspace = pgTable('workspace', {
   id: uuid().defaultRandom().primaryKey(),
@@ -454,6 +466,42 @@ export const message = pgTable(
     uniqueIndex('message_channel_external_id_idx')
       .on(table.channelId, table.externalMessageId)
       .where(sql`${table.externalMessageId} is not null`),
+  ],
+)
+
+export const aiResponseRun = pgTable(
+  'ai_response_run',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    state: aiResponseRunState().default('QUEUED').notNull(),
+    inputFirstMessageId: uuid('input_first_message_id')
+      .notNull()
+      .references(() => message.id, { onDelete: 'cascade' }),
+    inputLastMessageId: uuid('input_last_message_id')
+      .notNull()
+      .references(() => message.id, { onDelete: 'cascade' }),
+    scheduledFor: timestamp('scheduled_for', { withTimezone: true }).notNull(),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    retrievedChunkIds: uuid('retrieved_chunk_ids').array().default(sql`ARRAY[]::uuid[]`).notNull(),
+    cancellationReason: aiResponseCancellationReason('cancellation_reason'),
+    failureCode: text('failure_code'),
+    failureMessage: text('failure_message'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_response_run_conversation_idx').on(table.conversationId),
+    index('ai_response_run_schedule_idx').on(table.state, table.scheduledFor, table.updatedAt),
+    uniqueIndex('ai_response_run_one_active_conversation_idx')
+      .on(table.conversationId)
+      .where(sql`${table.state} in ('QUEUED', 'GENERATING')`),
   ],
 )
 

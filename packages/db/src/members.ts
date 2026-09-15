@@ -433,6 +433,7 @@ export async function setMemberChannelAccess(
 ) {
   return db.transaction(async (tx) => {
     await assertManager(tx, input.workspaceId, input.actingUserId)
+    await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
     const [target] = await tx
       .select({ id: member.id })
       .from(member)

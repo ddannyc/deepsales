@@ -584,13 +584,16 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [clock, setClock] = useState(() => Date.now())
   const selectedIdRef = useRef<string | null>(null)
   const selectedConversation = conversations.find(({ id }) => id === selectedId)
-  const transferTargets = teamMembers.filter(
-    (member) =>
-      member.id !== selectedConversation?.assigneeMemberId &&
-      member.type === 'HUMAN' &&
-      member.status === 'ACTIVE' &&
-      member.channelIds.includes(selectedConversation?.channelId ?? ''),
-  )
+  const transferTargets =
+    selectedConversation?.assigneeType === 'HUMAN'
+      ? teamMembers.filter(
+          (member) =>
+            member.id !== selectedConversation.assigneeMemberId &&
+            member.status === 'ACTIVE' &&
+            member.channelIds.includes(selectedConversation.channelId) &&
+            (member.type === 'HUMAN' || member.configurationStatus === 'USABLE'),
+        )
+      : []
   const canManageSelected = Boolean(
     selectedConversation &&
       (workspace.role !== 'AGENT' || selectedConversation.assigneeMemberId === workspace.memberId),

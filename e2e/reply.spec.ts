@@ -60,6 +60,10 @@ test('human can take over, send a reply, and see SENT or FAILED', async ({ page 
     await pool.end()
   }
 
+  await page.request.patch(`/api/workspaces/${workspace.id}/members/${workspace.memberId}`, {
+    data: { autoAssignmentEnabled: false },
+  })
+
   const body = JSON.stringify({
     object: 'page',
     entry: [

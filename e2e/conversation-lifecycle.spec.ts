@@ -93,6 +93,13 @@ test('human can transfer, unassign, close, and receive a later message in a new 
     await pool.end()
   }
 
+  await page.request.patch(`/api/workspaces/${me.workspace.id}/members/${me.workspace.memberId}`, {
+    data: { autoAssignmentEnabled: false },
+  })
+  await page.request.patch(`/api/workspaces/${me.workspace.id}/members/${targetMemberId}`, {
+    data: { autoAssignmentEnabled: false },
+  })
+
   await page.reload()
   await sendInbound(
     page,

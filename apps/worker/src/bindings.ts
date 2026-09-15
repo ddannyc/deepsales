@@ -5,7 +5,9 @@ export type Bindings = {
   HYPERDRIVE: Hyperdrive
   WEBHOOKS_QUEUE?: Queue
   OUTBOUND_QUEUE?: Queue
+  AI_QUEUE?: Queue
   DOCUMENTS_QUEUE?: Queue
+  MAINTENANCE_QUEUE?: Queue
   OBJECTS?: R2Bucket
   WORKSPACE_REALTIME?: DurableObjectNamespace
   META_APP_ID: string
