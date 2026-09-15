@@ -80,6 +80,7 @@ type InboxConversation = {
   assigneeMemberId: string | null
   assigneeName: string | null
   assigneeType: 'HUMAN' | 'AI' | null
+  aiGenerating: boolean
   latestPreview: string | null
   replyWindowOpen: boolean
   replyWindowEligibleUntil: string | null
@@ -877,6 +878,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                 </span>
                 <span className="conversation-item-meta">
                   {item.assigneeName ?? queueReasonLabel(item.queueReason)}
+                  {item.aiGenerating && <em>AI 正在生成</em>}
                   {item.failedMessage && <em>发送失败</em>}
                 </span>
               </button>
@@ -904,6 +906,11 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                     <p className="reply-window" role="status">
                       {replyWindowOpen ? 'Messenger 回复窗口开放' : 'Messenger 回复窗口已关闭'}
                     </p>
+                    {selected.aiGenerating && (
+                      <p className="reply-window" role="status">
+                        AI 正在生成回复…
+                      </p>
+                    )}
                   </div>
                   <div className="thread-actions">
                     <div className="thread-state">

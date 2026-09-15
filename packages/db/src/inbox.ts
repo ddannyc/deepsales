@@ -7,6 +7,7 @@ import {
   channelIdentity,
   conversation,
   customer,
+  aiResponseRun,
   facebookAttachmentSource,
   facebookChannelConfig,
   facebookMessagingWindow,
@@ -358,6 +359,11 @@ export async function listConversations(
       assigneeMemberId: conversation.assigneeMemberId,
       assigneeName: member.displayName,
       assigneeType: member.type,
+      aiGenerating: sql<boolean>`exists (
+        select 1 from ${aiResponseRun} generating_run
+        where generating_run.conversation_id = ${conversation.id}
+          and generating_run.state in ('QUEUED', 'GENERATING')
+      )`,
       latestPreview: message.text,
       failedMessage: sql<boolean>`exists (
         select 1 from message failed_message

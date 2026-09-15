@@ -66,6 +66,13 @@
 				"dead_letter_queue": "deepsales-dlq"
 			},
 			{
+				"queue": "deepsales-ai",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 3,
+				"dead_letter_queue": "deepsales-dlq"
+			},
+			{
 				"queue": "deepsales-documents",
 				"max_batch_size": 10,
 				"max_batch_timeout": 5,

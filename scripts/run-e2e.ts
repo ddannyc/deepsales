@@ -208,7 +208,10 @@ async function startFakeFacebook() {
 async function startFakeAI() {
   const server = createHttpServer(async (request, response) => {
     const pathname = request.url ? new URL(request.url, 'http://fake-ai').pathname : ''
-    if (request.method !== 'POST' || pathname !== '/v1/embeddings') {
+    if (
+      request.method !== 'POST' ||
+      (pathname !== '/v1/embeddings' && pathname !== '/v1/chat/completions')
+    ) {
       response.statusCode = 404
       response.end()
       return
@@ -220,21 +223,52 @@ async function startFakeAI() {
       input?: unknown
       model?: unknown
       dimensions?: unknown
+      messages?: Array<{ content?: string }>
     }
-    const input = Array.isArray(body.input) ? body.input : []
-    if (body.model !== 'qwen3.7-text-embedding' || body.dimensions !== 1_536) {
+    response.setHeader('content-type', 'application/json')
+    if (pathname === '/v1/embeddings') {
+      const input = Array.isArray(body.input) ? body.input : []
+      if (body.model !== 'qwen3.7-text-embedding' || body.dimensions !== 1_536) {
+        response.statusCode = 400
+        response.end()
+        return
+      }
+      await sleep(2_500)
+      response.end(
+        JSON.stringify({
+          data: input.map((_, index) => ({
+            index,
+            embedding: Array.from({ length: 1_536 }, (_value, position) =>
+              position === 0 ? 1 : 0,
+            ),
+          })),
+        }),
+      )
+      return
+    }
+
+    if (body.model !== 'qwen3.8-flash') {
       response.statusCode = 400
       response.end()
       return
     }
-    await sleep(2_500)
-    response.setHeader('content-type', 'application/json')
+    const content = body.messages?.[1]?.content ?? ''
+    const chunkId = /<knowledge_chunk id="([^"]+)">/.exec(content)?.[1]
     response.end(
       JSON.stringify({
-        data: input.map((_, index) => ({
-          index,
-          embedding: Array.from({ length: 1_536 }, (_value, position) => (position === 0 ? 1 : 0)),
-        })),
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Shipping is free.',
+                handoffReason: null,
+                containsBusinessFacts: Boolean(chunkId),
+                usedChunkIds: chunkId ? [chunkId] : [],
+              }),
+            },
+          },
+        ],
       }),
     )
   })

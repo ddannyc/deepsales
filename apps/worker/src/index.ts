@@ -1,5 +1,6 @@
 import {
   acceptInvitation,
+  claimAiResponseRun,
   autoAssignConversation,
   AssignmentError,
   AiMemberError,
@@ -14,6 +15,7 @@ import {
   completeFacebookInboundAttachment,
   completeKnowledgeDocument,
   completeOutboundMessage,
+  commitAiResponse,
   createDatabase,
   createAiMember,
   createInvitation,
@@ -36,6 +38,7 @@ import {
   failOutboundMessage,
   failFacebookInboundAttachment,
   failKnowledgeDocument,
+  finishAiResponseRun,
   listFacebookChannels,
   listFacebookChannelsPage,
   listFacebookConversations,
@@ -54,6 +57,8 @@ import {
   listTeam,
   MemberError,
   processFacebookInbound,
+  recordAiResponseRetrievedChunks,
+  retryAiResponseRun,
   releaseFacebookInboundAttachment,
   releaseKnowledgeDocument,
   recoverStaleOutboundMessages,
@@ -106,15 +111,19 @@ import {
   ALIBABA_LLM_PROVIDER,
   ALIBABA_EMBEDDING_PROVIDER,
   AIEmbeddingError,
+  AIOutputError,
   AIProviderError,
+  aiMemberRuntimeSnapshotSchema,
+  createAlibabaLlmProvider,
   createAlibabaEmbeddingProvider,
   DEFAULT_LLM_MODEL,
   DEFAULT_EMBEDDING_MODEL,
+  enforceGrounding,
   EMBEDDING_DIMENSIONS,
   isLlmProviderConfigurationUsable,
 } from './ai'
-import { knowledgeDocumentJobSchema } from './knowledge'
-import { maintenanceRoutingJobSchema } from './routing'
+import { knowledgeDocumentJobSchema, retrieveKnowledgeChunks } from './knowledge'
+import { aiResponseJobSchema, maintenanceRoutingJobSchema } from './routing'
 import {
   extractKnowledgeText,
   KnowledgeFileError,
@@ -1081,18 +1090,7 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/replies', a
         actingUserId: session.user.id,
         text: input.data.text,
       })
-      const job = {
-        v: 1 as const,
-        type: 'facebook.outbound' as const,
-        messageId: created.message.id,
-      }
-      try {
-        if (c.env.OUTBOUND_QUEUE) await createJobQueue(c.env.OUTBOUND_QUEUE).send(job)
-      } catch {
-        console.warn(
-          JSON.stringify({ event: 'outbound_queue_failed', messageId: created.message.id }),
-        )
-      }
+      await enqueueOutboundMessage(c.env, created.message.id)
       await publishInboxChange(
         c.env,
         c.req.param('workspaceId'),
@@ -1785,6 +1783,19 @@ async function enqueueAiResponseJob(env: Bindings, runId: string) {
   }
 }
 
+async function enqueueOutboundMessage(env: Bindings, messageId: string) {
+  if (!env.OUTBOUND_QUEUE) return
+  try {
+    await createJobQueue(env.OUTBOUND_QUEUE).send({
+      v: 1,
+      type: 'facebook.outbound',
+      messageId,
+    })
+  } catch {
+    console.warn(JSON.stringify({ event: 'outbound_queue_failed', messageId }))
+  }
+}
+
 async function enqueueMaintenanceJobs(
   env: Bindings,
   conversations: Array<{ workspaceId: string; conversationId: string }>,
@@ -1889,6 +1900,228 @@ export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bind
       message.retry()
     }
   }
+}
+
+export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: Bindings) {
+  for (const queueMessage of batch.messages) {
+    const job = aiResponseJobSchema.safeParse(queueMessage.body)
+    if (!job.success) {
+      queueMessage.ack()
+      continue
+    }
+
+    let claimed: Awaited<ReturnType<typeof claimAiResponseRun>>
+    try {
+      claimed = await withDatabase(env, (db) => claimAiResponseRun(db, { runId: job.data.runId }))
+    } catch {
+      queueMessage.retry()
+      continue
+    }
+    if (!claimed) {
+      queueMessage.ack()
+      continue
+    }
+    if (claimed.kind === 'DELAYED') {
+      queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(claimed.retryAfterMs / 1_000)) })
+      continue
+    }
+    if (claimed.kind === 'CANCELLED') {
+      await publishInboxChange(
+        env,
+        claimed.workspaceId,
+        claimed.conversationId,
+        'conversation.changed',
+      )
+      queueMessage.ack()
+      continue
+    }
+
+    await publishInboxChange(
+      env,
+      claimed.workspaceId,
+      claimed.conversationId,
+      'conversation.changed',
+    )
+    try {
+      const snapshot = aiMemberRuntimeSnapshotSchema.safeParse(claimed.publishedSnapshot)
+      if (!snapshot.success) throw new AIOutputError()
+
+      const inputMessages = claimed.inputMessages
+        .filter(({ text }) => Boolean(text?.trim()))
+        .map(({ id, text }) => ({ id, text: text as string }))
+      if (!inputMessages.length) {
+        const finished = await withDatabase(env, (db) =>
+          finishAiResponseRun(db, {
+            runId: claimed.id,
+            state: 'HANDOFF',
+            failureCode: 'UNSUPPORTED_ATTACHMENT',
+            failureMessage: 'AI cannot process attachment-only input',
+          }),
+        )
+        if (finished) {
+          await publishInboxChange(
+            env,
+            claimed.workspaceId,
+            claimed.conversationId,
+            'conversation.changed',
+          )
+        }
+        queueMessage.ack()
+        continue
+      }
+
+      const embeddingProvider = createAlibabaEmbeddingProvider({
+        provider: env.EMBEDDING_PROVIDER,
+        apiKey: env.AI_API_KEY,
+        baseUrl: env.AI_BASE_URL,
+        model: env.EMBEDDING_MODEL,
+        dimensions: env.EMBEDDING_DIMENSIONS,
+      })
+      let retrievedChunks: Awaited<ReturnType<typeof retrieveKnowledgeChunks>> = []
+      try {
+        retrievedChunks = await withDatabase(env, (db) =>
+          retrieveKnowledgeChunks(db, embeddingProvider, env, {
+            workspaceId: claimed.workspaceId,
+            knowledgeBaseId: snapshot.data.knowledgeBaseId,
+            query: inputMessages.map(({ text }) => text).join('\n'),
+          }),
+        )
+      } catch (error) {
+        if (
+          !(
+            error instanceof KnowledgeError && ['NOT_FOUND', 'INVALID_REQUEST'].includes(error.code)
+          )
+        ) {
+          throw error
+        }
+      }
+
+      const retrievedChunkIds = retrievedChunks.map(({ id }) => id)
+      const recorded = await withDatabase(env, (db) =>
+        recordAiResponseRetrievedChunks(db, { runId: claimed.id, chunkIds: retrievedChunkIds }),
+      )
+      if (!recorded) {
+        queueMessage.ack()
+        continue
+      }
+
+      const llmProvider = createAlibabaLlmProvider({
+        provider: env.LLM_PROVIDER,
+        apiKey: env.AI_API_KEY,
+        baseUrl: env.AI_BASE_URL,
+        model: env.LLM_MODEL,
+      })
+      const decision = await llmProvider.generateResponse({
+        instructions: snapshot.data.instructions,
+        responseLanguage: snapshot.data.responseLanguage,
+        messages: inputMessages,
+        knowledgeChunks: retrievedChunks.map(({ id, text }) => ({ id, text })),
+      })
+      const grounded = enforceGrounding(decision, retrievedChunkIds, snapshot.data)
+      if (grounded.kind === 'HANDOFF') {
+        const finished = await withDatabase(env, (db) =>
+          finishAiResponseRun(db, {
+            runId: claimed.id,
+            state: 'HANDOFF',
+            failureCode:
+              grounded.decision.decision === 'HANDOFF' ? 'MODEL_HANDOFF' : 'GROUNDING_FAILED',
+            failureMessage:
+              grounded.decision.decision === 'HANDOFF'
+                ? 'AI requested human handoff'
+                : 'AI response was not grounded in published knowledge',
+          }),
+        )
+        if (finished) {
+          await publishInboxChange(
+            env,
+            claimed.workspaceId,
+            claimed.conversationId,
+            'conversation.changed',
+          )
+        }
+        queueMessage.ack()
+        continue
+      }
+
+      const result = await withDatabase(env, (db) =>
+        commitAiResponse(db, { runId: claimed.id, text: grounded.decision.response }),
+      )
+      if (!result) {
+        queueMessage.ack()
+        continue
+      }
+      if (result.kind === 'CANCELLED') {
+        await publishInboxChange(
+          env,
+          claimed.workspaceId,
+          claimed.conversationId,
+          'conversation.changed',
+        )
+      } else {
+        await publishInboxChange(env, result.workspaceId, result.message.id, 'message.changed')
+        await publishInboxChange(
+          env,
+          result.workspaceId,
+          result.conversationId,
+          'conversation.changed',
+        )
+        await enqueueOutboundMessage(env, result.message.id)
+      }
+      queueMessage.ack()
+    } catch (error) {
+      if (error instanceof AIProviderError && error.retryable) {
+        let retried: Awaited<ReturnType<typeof retryAiResponseRun>>
+        try {
+          retried = await withDatabase(env, (db) => retryAiResponseRun(db, { runId: claimed.id }))
+        } catch {
+          queueMessage.retry()
+          continue
+        }
+        if (!retried) {
+          queueMessage.ack()
+          continue
+        }
+        await publishInboxChange(
+          env,
+          claimed.workspaceId,
+          claimed.conversationId,
+          'conversation.changed',
+        )
+        queueMessage.retry()
+        continue
+      }
+
+      try {
+        const finished = await withDatabase(env, (db) =>
+          finishAiResponseRun(db, {
+            runId: claimed.id,
+            state: 'FAILED',
+            failureCode: aiFailureCode(error),
+            failureMessage: 'AI response could not be generated',
+          }),
+        )
+        if (finished) {
+          await publishInboxChange(
+            env,
+            claimed.workspaceId,
+            claimed.conversationId,
+            'conversation.changed',
+          )
+        }
+        queueMessage.ack()
+      } catch {
+        queueMessage.retry()
+      }
+    }
+  }
+}
+
+function aiFailureCode(error: unknown) {
+  if (error instanceof AIOutputError) return 'INVALID_OUTPUT'
+  if (error instanceof AIEmbeddingError) return 'INVALID_EMBEDDING'
+  if (error instanceof KnowledgeError) return 'KNOWLEDGE_UNAVAILABLE'
+  if (error instanceof AIProviderError) return 'AI_PROVIDER_ERROR'
+  return 'AI_RUNTIME_ERROR'
 }
 
 class AttachmentProcessingError extends Error {
@@ -2464,11 +2697,13 @@ const worker = {
   queue: (batch: MessageBatch<unknown>, env: Bindings) =>
     batch.queue === 'deepsales-outbound'
       ? handleOutboundBatch(batch, env)
-      : batch.queue === 'deepsales-documents'
-        ? handleDocumentsBatch(batch, env)
-        : batch.queue === 'deepsales-maintenance'
-          ? handleMaintenanceBatch(batch, env)
-          : handleWebhookBatch(batch, env),
+      : batch.queue === 'deepsales-ai'
+        ? handleAiResponseBatch(batch, env)
+        : batch.queue === 'deepsales-documents'
+          ? handleDocumentsBatch(batch, env)
+          : batch.queue === 'deepsales-maintenance'
+            ? handleMaintenanceBatch(batch, env)
+            : handleWebhookBatch(batch, env),
   scheduled: (_controller: ScheduledController, env: Bindings) => handleScheduled(env),
 }
 
