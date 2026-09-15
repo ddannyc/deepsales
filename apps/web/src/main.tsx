@@ -290,7 +290,7 @@ function Auth({
   onAuthenticated: () => Promise<void>
   invited: boolean
 }) {
-  const [mode, setMode] = useState<'sign-in' | 'sign-up'>('sign-in')
+  const [mode, setMode] = useState<'sign-in' | 'sign-up'>(invited ? 'sign-up' : 'sign-in')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -363,7 +363,9 @@ function Auth({
         <h2 id="auth-title">{signingUp ? '创建账户' : '登录'}</h2>
         <p className="form-lede">
           {invited
-            ? '请使用受邀工作邮箱登录以加入团队。'
+            ? signingUp
+              ? '请使用受邀工作邮箱创建账户以加入团队。'
+              : '请使用受邀工作邮箱登录以加入团队。'
             : signingUp
               ? '开始创建团队工作区。'
               : '返回团队收件箱。'}

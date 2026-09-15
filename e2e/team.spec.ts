@@ -40,7 +40,7 @@ test('owner creates an AI member, edits it, and invites a teammate', async ({ br
   const invitedPage = await invitedContext.newPage()
   try {
     await invitedPage.goto(inviteUrl)
-    await invitedPage.getByRole('button', { name: '创建账户视图' }).click()
+    await expect(invitedPage.getByRole('heading', { name: '创建账户' })).toBeVisible()
     await invitedPage.getByLabel('姓名').fill('Grace Hopper')
     await invitedPage.getByLabel('工作邮箱').fill(invitedEmail)
     await invitedPage.getByLabel('密码').fill(password)
