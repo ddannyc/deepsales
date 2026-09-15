@@ -1,4 +1,5 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
+import { cancelActiveAiResponseRuns } from './ai-responses'
 import type { Database } from './database'
 import {
   aiMemberConfig,
@@ -194,6 +195,7 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
     ) {
       throw new AssignmentError('ALREADY_ASSIGNED', 'Conversation is already assigned')
     }
+    await cancelAiRunsOnOwnershipChange(tx, current, now)
     const assignmentId = await recordAssignment(tx, {
       conversationId: current.id,
       fromMemberId: current.assigneeMemberId,
@@ -270,6 +272,7 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
 
   if (command.type === 'UNASSIGN' || command.type === 'MEMBER_DISABLED') {
     const reason = command.type === 'UNASSIGN' ? 'MANUAL_UNASSIGN' : 'MEMBER_DISABLED'
+    await cancelAiRunsOnOwnershipChange(tx, current, now)
     const assignmentId = await recordAssignment(tx, {
       conversationId: current.id,
       fromMemberId: current.assigneeMemberId,
@@ -290,6 +293,7 @@ export async function executeAssignment(tx: Transaction, command: AssignmentComm
     return changed(current, assignmentId, null)
   }
 
+  await cancelAiRunsOnOwnershipChange(tx, current, now)
   const assignmentId = await recordAssignment(tx, {
     conversationId: current.id,
     fromMemberId: current.assigneeMemberId,
@@ -583,6 +587,9 @@ export async function ensureAiResponseRun(
   tx: Transaction,
   input: { conversationId: string; memberId: string; now: Date },
 ) {
+  await tx.execute(
+    sql`select id from ${conversation} where id = ${input.conversationId} for update`,
+  )
   const messages = await tx
     .select({ id: message.id, direction: message.direction, senderType: message.senderType })
     .from(message)
@@ -600,7 +607,12 @@ export async function ensureAiResponseRun(
   if (!first || !last) return null
 
   const [active] = await tx
-    .select({ id: aiResponseRun.id, state: aiResponseRun.state })
+    .select({
+      id: aiResponseRun.id,
+      state: aiResponseRun.state,
+      memberId: aiResponseRun.memberId,
+      inputLastMessageId: aiResponseRun.inputLastMessageId,
+    })
     .from(aiResponseRun)
     .where(
       and(
@@ -611,7 +623,7 @@ export async function ensureAiResponseRun(
     .for('update')
     .limit(1)
   if (active) {
-    if (active.state === 'QUEUED') {
+    if (active.memberId === input.memberId && active.state === 'QUEUED') {
       await tx
         .update(aiResponseRun)
         .set({
@@ -622,8 +634,16 @@ export async function ensureAiResponseRun(
           updatedAt: input.now,
         })
         .where(eq(aiResponseRun.id, active.id))
+      return active.id
     }
-    return active.id
+    if (active.memberId === input.memberId && active.inputLastMessageId === last.id) {
+      return active.id
+    }
+    await cancelActiveAiResponseRuns(tx, {
+      conversationId: input.conversationId,
+      reason: active.memberId === input.memberId ? 'NEW_CUSTOMER_MESSAGE' : 'OWNERSHIP_CHANGED',
+      now: input.now,
+    })
   }
 
   const [created] = await tx
@@ -653,6 +673,19 @@ async function lockConversation(
   if (!conversationLock.rows.length) {
     throw new AssignmentError('NOT_FOUND', 'Conversation not found')
   }
+}
+
+async function cancelAiRunsOnOwnershipChange(
+  tx: Transaction,
+  current: Pick<CurrentConversation, 'id' | 'assigneeType'>,
+  now: Date,
+) {
+  if (current.assigneeType !== 'AI') return
+  await cancelActiveAiResponseRuns(tx, {
+    conversationId: current.id,
+    reason: 'OWNERSHIP_CHANGED',
+    now,
+  })
 }
 
 async function assertTransferTarget(

@@ -1,11 +1,11 @@
 import { createHmac } from 'node:crypto'
-import { expect, test, type Page } from '@playwright/test'
 import {
   channel,
   createDatabase,
   facebookChannelConfig,
   setMemberChannelAccess,
 } from '@deepsales/db'
+import { expect, type Page, test } from '@playwright/test'
 import { Pool } from 'pg'
 import { encryptFacebookToken } from '../apps/worker/src/facebook'
 
@@ -125,7 +125,59 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
     timeout: 20_000,
   })
   await expect(page.getByText('已发送', { exact: true }).first()).toBeVisible({ timeout: 20_000 })
+
+  const conversationsResponse = await page.request.get(
+    `/api/workspaces/${me.workspace.id}/conversations?view=all-open`,
+  )
+  const conversations = (await conversationsResponse.json()) as {
+    conversations: Array<{ id: string; latestPreview: string | null }>
+  }
+  const conversation = conversations.conversations.find(
+    ({ latestPreview }) => latestPreview === inboundText,
+  )
+  if (!conversation) throw new Error('AI conversation was not found')
+
+  const followUp = `Please connect me to a person ${suffix}`
+  await sendInbound(page, pageId, `customer-${suffix}`, `mid-follow-up-${suffix}`, followUp)
+  await expect(page.getByText('AI 正在生成', { exact: true }).first()).toBeVisible({
+    timeout: 20_000,
+  })
+  const statePool = new Pool({ connectionString: process.env.DATABASE_URL })
+  try {
+    await expect
+      .poll(() => latestAiRunState(statePool, conversation.id), { timeout: 20_000 })
+      .toBe('GENERATING')
+    const takeover = await page.request.post(
+      `/api/workspaces/${me.workspace.id}/conversations/${conversation.id}/takeover`,
+    )
+    expect(takeover.ok()).toBeTruthy()
+    await expect
+      .poll(() => latestAiRunState(statePool, conversation.id), { timeout: 20_000 })
+      .toBe('CANCELLED')
+
+    const messagesResponse = await page.request.get(
+      `/api/workspaces/${me.workspace.id}/conversations/${conversation.id}/messages`,
+    )
+    const messages = (await messagesResponse.json()) as {
+      messages: Array<{ text: string | null }>
+    }
+    expect(messages.messages.filter(({ text }) => text === 'Shipping is free.')).toHaveLength(1)
+  } finally {
+    await statePool.end()
+  }
 })
+
+async function latestAiRunState(pool: Pool, conversationId: string) {
+  const result = await pool.query<{ state: string }>(
+    `select state
+       from ai_response_run
+      where conversation_id = $1
+      order by created_at desc, id desc
+      limit 1`,
+    [conversationId],
+  )
+  return result.rows[0]?.state ?? null
+}
 
 async function sendInbound(
   page: Page,

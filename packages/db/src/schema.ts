@@ -499,6 +499,7 @@ export const aiResponseRun = pgTable(
   (table) => [
     index('ai_response_run_conversation_idx').on(table.conversationId),
     index('ai_response_run_schedule_idx').on(table.state, table.scheduledFor, table.updatedAt),
+    index('ai_response_run_generation_idx').on(table.state, table.startedAt, table.id),
     uniqueIndex('ai_response_run_one_active_conversation_idx')
       .on(table.conversationId)
       .where(sql`${table.state} in ('QUEUED', 'GENERATING')`),

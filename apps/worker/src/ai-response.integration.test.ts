@@ -1,9 +1,5 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { migrate } from 'drizzle-orm/node-postgres/migrator'
-import { and, eq } from 'drizzle-orm'
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
-import { Pool } from 'pg'
 import {
   aiResponseRun,
   autoAssignConversation,
@@ -19,6 +15,10 @@ import {
   updateAiMemberConfig,
   user,
 } from '@deepsales/db'
+import { and, eq } from 'drizzle-orm'
+import { migrate } from 'drizzle-orm/node-postgres/migrator'
+import { Pool } from 'pg'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Bindings } from './bindings'
 import { handleAiResponseBatch, handleDocumentsBatch } from './index'
 
@@ -105,12 +105,24 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     })
     if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
 
-    const aiMessage = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
+    const aiMessages = [
+      queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId }),
+      queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId }),
+    ]
     const outboundQueue = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Queue
-    await handleAiResponseBatch(batch('deepsales-ai', aiMessage), environment(outboundQueue))
+    await Promise.all(
+      aiMessages.map((aiMessage) =>
+        handleAiResponseBatch(batch('deepsales-ai', aiMessage), environment(outboundQueue)),
+      ),
+    )
 
-    expect(aiMessage.ack).toHaveBeenCalledOnce()
-    expect(aiMessage.retry).not.toHaveBeenCalled()
+    for (const aiMessage of aiMessages) {
+      expect(aiMessage.ack).toHaveBeenCalledOnce()
+      expect(aiMessage.retry).not.toHaveBeenCalled()
+    }
+    expect(
+      fetcher.mock.calls.filter(([url]) => String(url).endsWith('/chat/completions')),
+    ).toHaveLength(1)
     expect(outboundQueue.send).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'facebook.outbound' }),
     )
@@ -131,6 +143,37 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
           ),
         ),
     ).toEqual([{ text: 'Shipping is free.', deliveryState: 'PENDING' }])
+  })
+
+  it('retries an AI queue delivery until the debounce delay elapses', async () => {
+    const fixture = await createFixture(db)
+    const received = await processFacebookInbound(db, {
+      ingressId: crypto.randomUUID(),
+      pageId: fixture.pageId,
+      externalUserId: `customer-${fixture.ownerId}`,
+      externalMessageId: crypto.randomUUID(),
+      text: 'wait for debounce',
+      providerSentAt: new Date(),
+      receivedAt: new Date(),
+      payloadSha256: 'a'.repeat(64),
+      eventFragment: { text: 'wait for debounce' },
+    })
+    if (received.kind !== 'created') throw new Error('Inbound message was not created')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
+    await db
+      .update(aiResponseRun)
+      .set({ scheduledFor: new Date(Date.now() + 10_000) })
+      .where(eq(aiResponseRun.id, routed.aiResponseRunId))
+
+    const aiMessage = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
+    await handleAiResponseBatch(batch('deepsales-ai', aiMessage), environment())
+
+    expect(aiMessage.ack).not.toHaveBeenCalled()
+    expect(aiMessage.retry).toHaveBeenCalledWith({ delaySeconds: expect.any(Number) })
   })
 })
 

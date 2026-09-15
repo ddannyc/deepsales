@@ -92,6 +92,13 @@
       "when": 1789446792247,
       "tag": "0012_graceful_tyger_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789475703125,
+      "tag": "0013_bitter_black_bolt",
+      "breakpoints": true
     }
   ]
 }

@@ -1,0 +1,1 @@
+CREATE INDEX "ai_response_run_generation_idx" ON "ai_response_run" USING btree ("state","started_at","id");

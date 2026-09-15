@@ -62,6 +62,7 @@ import {
   releaseFacebookInboundAttachment,
   releaseKnowledgeDocument,
   recoverStaleOutboundMessages,
+  recoverStaleAiResponseRuns,
   member,
   publishAiMemberConfig,
   setMemberChannelAccess,
@@ -2679,6 +2680,10 @@ export async function handleScheduled(env: Bindings) {
         env,
         await withDatabase(env, (db) => listQueuedConversationIds(db)),
       )
+    const staleAiRuns = await withDatabase(env, (db) => recoverStaleAiResponseRuns(db))
+    for (const item of staleAiRuns) {
+      await publishInboxChange(env, item.workspaceId, item.conversationId, 'conversation.changed')
+    }
     }
     if (env.AI_QUEUE) {
       const runIds = await withDatabase(env, (db) => listQueuedAiResponseRunIds(db))

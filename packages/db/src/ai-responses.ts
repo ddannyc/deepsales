@@ -1,16 +1,17 @@
-import { and, asc, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, lte, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
+  type AiMemberRuntimeSnapshot,
   aiMemberConfig,
   aiResponseRun,
   channelIdentity,
   conversation,
   member,
   message,
-  type AiMemberRuntimeSnapshot,
 } from './schema'
 
 const MAX_AI_RESPONSE_TEXT_LENGTH = 2_000
+export const AI_GENERATION_TIMEOUT_MS = 5 * 60 * 1_000
 
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 
@@ -53,12 +54,67 @@ export class AiResponseError extends Error {
   }
 }
 
+export type AiResponseCancellationReason = 'OWNERSHIP_CHANGED' | 'NEW_CUSTOMER_MESSAGE'
+
+export async function cancelActiveAiResponseRuns(
+  tx: Transaction,
+  input: {
+    conversationId: string
+    reason: AiResponseCancellationReason
+    now: Date
+  },
+) {
+  const active = await tx
+    .select({ id: aiResponseRun.id })
+    .from(aiResponseRun)
+    .where(
+      and(
+        eq(aiResponseRun.conversationId, input.conversationId),
+        inArray(aiResponseRun.state, ['QUEUED', 'GENERATING']),
+      ),
+    )
+    .for('update')
+
+  if (!active.length) return []
+  await tx
+    .update(aiResponseRun)
+    .set({
+      state: 'CANCELLED',
+      cancellationReason: input.reason,
+      completedAt: input.now,
+      updatedAt: input.now,
+    })
+    .where(
+      inArray(
+        aiResponseRun.id,
+        active.map(({ id }) => id),
+      ),
+    )
+  return active.map(({ id }) => id)
+}
+
 export async function claimAiResponseRun(
   db: Database,
   input: { runId: string; now?: Date },
 ): Promise<AiResponseRunClaimResult> {
   const now = input.now ?? new Date()
   return db.transaction(async (tx) => {
+    const [reference] = await tx
+      .select({ conversationId: aiResponseRun.conversationId })
+      .from(aiResponseRun)
+      .where(eq(aiResponseRun.id, input.runId))
+      .limit(1)
+    if (!reference) return null
+
+    const conversationLock = await tx.execute(
+      sql`select id from ${conversation} where id = ${reference.conversationId} for update`,
+    )
+    if (!conversationLock.rows.length) return null
+    const runLock = await tx.execute(
+      sql`select id from ${aiResponseRun} where id = ${input.runId} for update`,
+    )
+    if (!runLock.rows.length) return null
+
     const [current] = await tx
       .select({
         id: aiResponseRun.id,
@@ -76,7 +132,6 @@ export async function claimAiResponseRun(
       .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
       .innerJoin(member, eq(member.id, aiResponseRun.memberId))
       .where(eq(aiResponseRun.id, input.runId))
-      .for('update')
       .limit(1)
     if (current?.state !== 'QUEUED') return null
     if (current.scheduledFor.getTime() > now.getTime()) {
@@ -193,6 +248,59 @@ export async function finishAiResponseRun(
   return updated ?? null
 }
 
+export async function recoverStaleAiResponseRuns(
+  db: Database,
+  input: { now?: Date; limit?: number } = {},
+) {
+  const now = input.now ?? new Date()
+  const cutoff = new Date(now.getTime() - AI_GENERATION_TIMEOUT_MS)
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 100)
+  return db.transaction(async (tx) => {
+    const stale = await tx
+      .select({ id: aiResponseRun.id, conversationId: aiResponseRun.conversationId })
+      .from(aiResponseRun)
+      .where(and(eq(aiResponseRun.state, 'GENERATING'), lte(aiResponseRun.startedAt, cutoff)))
+      .orderBy(asc(aiResponseRun.startedAt), asc(aiResponseRun.id))
+      .limit(limit)
+      .for('update', { skipLocked: true })
+
+    if (!stale.length) return []
+    await tx
+      .update(aiResponseRun)
+      .set({
+        state: 'FAILED',
+        completedAt: now,
+        failureCode: 'AI_GENERATION_TIMEOUT',
+        failureMessage: 'AI generation exceeded the recovery timeout',
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(aiResponseRun.state, 'GENERATING'),
+          inArray(
+            aiResponseRun.id,
+            stale.map(({ id }) => id),
+          ),
+        ),
+      )
+
+    return tx
+      .select({
+        runId: aiResponseRun.id,
+        conversationId: aiResponseRun.conversationId,
+        workspaceId: conversation.workspaceId,
+      })
+      .from(aiResponseRun)
+      .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
+      .where(
+        inArray(
+          aiResponseRun.id,
+          stale.map(({ id }) => id),
+        ),
+      )
+  })
+}
+
 export type CommitAiResponseResult =
   | {
       kind: 'COMMITTED'
@@ -303,7 +411,7 @@ export async function commitAiResponse(
 async function cancelRun(
   tx: Transaction,
   runId: string,
-  reason: 'OWNERSHIP_CHANGED' | 'NEW_CUSTOMER_MESSAGE',
+  reason: AiResponseCancellationReason,
   now: Date,
 ) {
   await tx
@@ -314,7 +422,7 @@ async function cancelRun(
       completedAt: now,
       updatedAt: now,
     })
-    .where(eq(aiResponseRun.id, runId))
+    .where(and(eq(aiResponseRun.id, runId), inArray(aiResponseRun.state, ['QUEUED', 'GENERATING'])))
 }
 
 function later(first: Date | null, second: Date) {

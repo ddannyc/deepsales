@@ -3,18 +3,18 @@ import { ensureAiResponseRun } from './assignments'
 import type { FacebookInboundAttachmentInput } from './attachments'
 import type { Database } from './database'
 import {
+  aiResponseRun,
   channel,
   channelIdentity,
   conversation,
   customer,
-  aiResponseRun,
   facebookAttachmentSource,
   facebookChannelConfig,
   facebookMessagingWindow,
   facebookWebhookReceipt,
   member,
-  messageAttachment,
   message,
+  messageAttachment,
   workspaceUserAccess,
 } from './schema'
 
@@ -248,11 +248,7 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
       .set({
         latestMessageAt,
         lastCustomerMessageAt,
-        lastCustomerMessageId:
-          !openConversation.lastCustomerMessageAt ||
-          eventAt.getTime() >= openConversation.lastCustomerMessageAt.getTime()
-            ? createdMessage.id
-            : openConversation.lastCustomerMessageId,
+        lastCustomerMessageId: createdMessage.id,
         updatedAt: now,
       })
       .where(eq(conversation.id, openConversation.id))
