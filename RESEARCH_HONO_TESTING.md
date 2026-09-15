@@ -28,7 +28,7 @@ Hono 的官方文档只定义请求和 `env` 注入方式，并明确指出测�
 - `setupFiles` 在每个测试文件前运行；`globalSetup` 在 Node.js 主进程中运行。需要启动本地数据库或 TCP 服务时，后者更合适。
 - Vitest 的 `projects` 可以把 unit、database integration 和其他运行时测试拆成不同项目，分别使用自己的 include、setup 和 pool。
 
-对本仓库而言，`packages/db/vitest.integration.config.ts` 已是合适的数据库测试配置入口；集成测试直接读取 `process.env.DATABASE_URL`，由配置的 `test.env` 注入。仓库提交 `database.test.ts` 作为配置加载器，连接串放在被忽略的 `.env.local`（变量名为 `TEST_DATABASE_URL`），没有该变量时使用本地默认地址；它不会把应用的 `DATABASE_URL` 当作测试地址，并在加载配置时拒绝远程主机。
+对本仓库而言，`packages/db/vitest.integration.config.ts` 已是合适的数据库测试配置入口；集成测试直接读取 `process.env.DATABASE_URL`，由配置的 `test.env` 注入。仓库提交 `database.test.ts` 作为配置加载器，连接串放在被忽略的 `.env.test.local`（变量名为 `DATABASE_URL`），没有该变量时使用本地默认地址；它会拒绝远程测试主机。
 
 ### Cloudflare `@cloudflare/vitest-pool-workers`
 
@@ -41,7 +41,7 @@ Cloudflare 官方配置还支持通过 `globalSetup` 启动本地 TCP 服务，�
 ## 对本仓库的建议
 
 1. 保持 [`apps/worker/src/index.test.ts`](apps/worker/src/index.test.ts) 这类测试使用普通 Vitest + `app.request(path, init, bindings)`。它们不需要真实数据库，也不需要 Cloudflare test pool。
-2. 为数据库集成测试配置固定的 [`database.test.ts`](database.test.ts)，从被忽略的 `.env.local` 读取个人连接串，再在各自的 Vitest 配置中用 `test.env` 注入 `DATABASE_URL`。测试命令即可直接运行，不再依赖开发者当前 shell 的 `DATABASE_URL`。
+2. 为数据库集成测试配置固定的 [`database.test.ts`](database.test.ts)，从被忽略的 `.env.test.local` 读取个人 `DATABASE_URL`，再在各自的 Vitest 配置中用 `test.env` 注入。测试命令即可直接运行，不再依赖开发者当前 shell 的 `DATABASE_URL`。
 3. 继续要求测试 URL 指向本地 Postgres，并最好使用明确的测试数据库名，例如 `deepsales_test`；环境文件是默认值，不能取消本地 URL 守卫。
 4. 将 unit 与 `*.integration.test.ts` 分成不同 Vitest include/project。当前仓库已让 Worker 的 `test:unit` 排除集成测试，并提供独立的 `test:integration` 配置。
 5. 只有需要验证 Cloudflare runtime/binding 时，才新增独立的 Cloudflare Vitest 配置；届时使用 `@cloudflare/vitest-plugin`、`wrangler.jsonc` 和官方 Hyperdrive `provide`/`inject` 模式。不要把它当作 Rails 式数据库环境管理器。
