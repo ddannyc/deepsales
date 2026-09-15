@@ -149,6 +149,114 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     ).toEqual([{ text: 'Shipping is free.', deliveryState: 'PENDING' }])
   })
 
+  it('answers a knowledge-free joke without handing off to a human', async () => {
+    const fixture = await createFixture(db)
+    const receivedAt = new Date(Date.now() - 10_000)
+    const received = await processFacebookInbound(db, {
+      ingressId: crypto.randomUUID(),
+      pageId: fixture.pageId,
+      externalUserId: `customer-${fixture.ownerId}`,
+      externalMessageId: crypto.randomUUID(),
+      text: '讲个笑话',
+      providerSentAt: receivedAt,
+      receivedAt,
+      payloadSha256: 'a'.repeat(64),
+      eventFragment: { text: '讲个笑话' },
+    })
+    if (received.kind !== 'created') throw new Error('Inbound message was not created')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: received.conversationId,
+      now: receivedAt,
+    })
+    if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
+
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input)
+      if (url.endsWith('/embeddings')) {
+        return Response.json({ data: [{ index: 0, embedding: vector() }] })
+      }
+      if (url.endsWith('/chat/completions')) {
+        const body = JSON.parse(init?.body as string) as {
+          messages: Array<{ content: string }>
+        }
+        const supportsKnowledgeFreeConversation = body.messages[0]?.content.includes(
+          'For greetings, jokes, small talk, and other non-business requests, answer normally even when no knowledge chunks are available.',
+        )
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify(
+                  supportsKnowledgeFreeConversation
+                    ? {
+                        decision: 'ANSWER',
+                        response: 'Here is a joke.',
+                        handoffReason: null,
+                        containsBusinessFacts: false,
+                        usedChunkIds: [],
+                      }
+                    : {
+                        decision: 'HANDOFF',
+                        response: '',
+                        handoffReason: 'NO_KNOWLEDGE',
+                        containsBusinessFacts: false,
+                        usedChunkIds: [],
+                      },
+                ),
+              },
+            },
+          ],
+        })
+      }
+      return new Response(null, { status: 404 })
+    })
+    vi.stubGlobal('fetch', fetcher)
+
+    const outboundQueue = { send: vi.fn().mockResolvedValue(undefined) } as unknown as Queue
+    const queued = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
+    await handleAiResponseBatch(batch('deepsales-ai', queued), environment(outboundQueue))
+
+    expect(queued.ack).toHaveBeenCalledOnce()
+    expect(queued.retry).not.toHaveBeenCalled()
+    expect(outboundQueue.send).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'facebook.outbound' }),
+    )
+    expect(
+      await db
+        .select({ text: message.text, senderMemberId: message.senderMemberId })
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.senderMemberId, fixture.aiMemberId),
+          ),
+        ),
+    ).toEqual([{ text: 'Here is a joke.', senderMemberId: fixture.aiMemberId }])
+    expect(
+      await db
+        .select({
+          assigneeMemberId: conversation.assigneeMemberId,
+          queueReason: conversation.queueReason,
+          routingConstraint: conversation.routingConstraint,
+        })
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId)),
+    ).toEqual([
+      {
+        assigneeMemberId: fixture.aiMemberId,
+        queueReason: null,
+        routingConstraint: 'ANY_MEMBER',
+      },
+    ])
+    expect(
+      await db
+        .select({ state: aiResponseRun.state, failureCode: aiResponseRun.failureCode })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, routed.aiResponseRunId)),
+    ).toEqual([{ state: 'COMPLETED', failureCode: null }])
+  })
+
   it('retries an AI queue delivery until the debounce delay elapses', async () => {
     const fixture = await createFixture(db)
     const received = await processFacebookInbound(db, {
