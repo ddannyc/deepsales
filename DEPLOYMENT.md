@@ -1,6 +1,6 @@
 # DeepSales 部署步骤
 
-本文档适用于当前 T08 版本：React SPA、Cloudflare Worker、Neon PostgreSQL、pgvector、Cloudflare Queues 和 Durable Object。应用部署不会自动执行数据库迁移。
+本文档适用于当前 T08 版本：React SPA、Cloudflare Worker、Neon PostgreSQL、pgvector、Cloudflare Queues 和 Durable Object。`pnpm run deploy` 会先部署 Worker，成功后再显式执行生产数据库迁移。
 
 ## 执行分类
 
@@ -9,8 +9,7 @@
 - `pnpm install --frozen-lockfile`
 - `wrangler login` / `wrangler whoami`
 - 创建 Hyperdrive、三个 Queues，并把 Hyperdrive ID 写入 `wrangler.jsonc`
-- 首次执行 `pnpm db:migrate`
-- 首次 `pnpm run deploy`（创建 Worker）
+- 首次 `pnpm run deploy`（先创建 Worker，成功后执行 `APP_ENV=production pnpm db:migrate`）
 - 配置 Worker Secrets
 - 配置 Meta OAuth 回调、Webhook 和 Page 订阅
 
@@ -21,8 +20,7 @@ pnpm install --frozen-lockfile   # 依赖或 lockfile 变更时执行
 pnpm typecheck
 pnpm lint
 pnpm test
-pnpm db:migrate                  # 有新的 migration 时执行
-pnpm run deploy
+pnpm run deploy # 部署成功后自动执行 APP_ENV=production pnpm db:migrate
 ```
 
 后续发布不需要重复创建 Hyperdrive、Queues、Durable Object，也不需要重复配置 Secrets 或 Meta 回调。只有更换数据库、Cloudflare 账号、Meta App 或密钥时，才重新执行对应的首次部署步骤。
@@ -74,9 +72,11 @@ pnpm exec wrangler r2 bucket create deepsales-objects
 
 ## 3. 执行数据库迁移
 
-迁移必须使用直连数据库 URL：
+迁移必须使用直连数据库 URL。`.env.local` 仅用于开发；将生产 Neon 连接信息放在被忽略的
+`.env.production.local`，然后显式选择生产环境：
 
 ```powershell
+$env:APP_ENV = 'production'
 pnpm db:migrate
 ```
 
@@ -84,7 +84,7 @@ pnpm db:migrate
 
 ## 4. 首次部署 Worker
 
-部署会同时构建 Web 静态资源和 Worker：
+部署会先构建 Web 静态资源和 Worker，Worker 部署成功后再执行生产数据库迁移：
 
 ```powershell
 pnpm run deploy

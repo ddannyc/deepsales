@@ -5,45 +5,30 @@ import { dirname, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { Pool } from 'pg'
+import { assertTestDatabaseUrl, loadAppEnv } from '../config/env'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const packageManager = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const readyTimeoutMs = 30_000
 
-function e2eDatabaseUrl() {
-  const raw = process.env.E2E_DATABASE_URL?.trim()
-  if (!raw) throw new Error('E2E_DATABASE_URL is required')
-
-  let url: URL
-  try {
-    url = new URL(raw)
-  } catch {
-    throw new Error('E2E_DATABASE_URL must be a PostgreSQL connection URL')
-  }
-
-  if (!['postgres:', 'postgresql:'].includes(url.protocol)) {
-    throw new Error('E2E_DATABASE_URL must use postgres:// or postgresql://')
-  }
-
-  const databaseName = decodeURIComponent(url.pathname.slice(1))
-  if (!isE2EDatabaseName(databaseName)) {
-    throw new Error('E2E_DATABASE_URL must point to a database whose name ends in _e2e or -e2e')
-  }
-
-  return raw
+function testDatabaseUrl() {
+  const { databaseUrl } = loadAppEnv('test')
+  if (!databaseUrl) throw new Error('Test DATABASE_URL is required')
+  assertTestDatabaseUrl(databaseUrl)
+  return databaseUrl
 }
 
-function isE2EDatabaseName(name: string) {
-  return name === 'e2e' || /(?:^|[-_])e2e$/i.test(name)
+function isTestDatabaseName(name: string) {
+  return /^(test|e2e)$/i.test(name) || /(?:[-_])(test|e2e)$/i.test(name)
 }
 
-async function resetE2EDatabase(connectionString: string) {
+async function resetTestDatabase(connectionString: string) {
   const pool = new Pool({ connectionString, max: 1 })
   try {
     const result = await pool.query<{ name: string }>('select current_database() as name')
     const name = result.rows[0]?.name
-    if (!name || !isE2EDatabaseName(name)) {
-      throw new Error('E2E_DATABASE_URL resolved to a non-E2E database')
+    if (!name || !isTestDatabaseName(name)) {
+      throw new Error('DATABASE_URL resolved to a non-test database')
     }
 
     await pool.query('drop extension if exists vector cascade')
@@ -148,7 +133,7 @@ function startWorker(
 
   const env = { ...process.env }
   delete env.DATABASE_URL
-  delete env.E2E_DATABASE_URL
+  delete env.DATABASE_URL_UNPOOLED
   env.CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE = connectionString
 
   return spawnPackageManager(args, {
@@ -313,11 +298,15 @@ async function stopWorker(worker: ChildProcess) {
 }
 
 async function main() {
-  const connectionString = e2eDatabaseUrl()
+  const connectionString = testDatabaseUrl()
   await run(['--filter', '@deepsales/web', 'build'])
-  await resetE2EDatabase(connectionString)
-  const migrationEnv: NodeJS.ProcessEnv = { ...process.env, DATABASE_URL: connectionString }
-  delete migrationEnv.E2E_DATABASE_URL
+  await resetTestDatabase(connectionString)
+  const migrationEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    APP_ENV: 'test',
+    DATABASE_URL: connectionString,
+    DATABASE_URL_UNPOOLED: connectionString,
+  }
   await run(['--filter', '@deepsales/db', 'db:migrate'], migrationEnv)
 
   const port = await freePort()
@@ -330,11 +319,11 @@ async function main() {
     await waitForReady(baseUrl, worker)
     const testEnv: NodeJS.ProcessEnv = {
       ...process.env,
+      APP_ENV: 'test',
       E2E_BASE_URL: baseUrl,
-      E2E_DATABASE_URL: connectionString,
+      DATABASE_URL: connectionString,
       E2E_FAKE_FACEBOOK_URL: fakeFacebook.baseUrl,
     }
-    delete testEnv.DATABASE_URL
     await run(['exec', 'playwright', 'test', ...process.argv.slice(2)], testEnv)
   } finally {
     await stopWorker(worker)

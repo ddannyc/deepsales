@@ -21,7 +21,7 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
   const workspace = (
     (await (await page.request.get('/api/me')).json()) as { workspace: { id: string } }
   ).workspace
-  const pool = new Pool({ connectionString: process.env.E2E_DATABASE_URL })
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL })
   const db = createDatabase(pool)
   try {
     const [createdChannel] = await db

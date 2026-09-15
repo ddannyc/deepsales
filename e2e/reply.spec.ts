@@ -30,7 +30,7 @@ test('human can take over, send a reply, and see SENT or FAILED', async ({ page 
     workspace: { id: string; memberId: string }
   }
   const workspace = me.workspace
-  const pool = new Pool({ connectionString: process.env.E2E_DATABASE_URL })
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL })
   const db = createDatabase(pool)
   const pageId = `e2e-reply-page-${suffix}`
   try {

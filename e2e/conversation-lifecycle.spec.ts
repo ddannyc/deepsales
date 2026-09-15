@@ -36,7 +36,7 @@ test('human can transfer, unassign, close, and receive a later message in a new 
     user: { id: string }
     workspace: { id: string; memberId: string }
   }
-  const pool = new Pool({ connectionString: process.env.E2E_DATABASE_URL })
+  const pool = new Pool({ connectionString: process.env.DATABASE_URL })
   const db = createDatabase(pool)
   const pageId = `e2e-lifecycle-page-${suffix}`
   const externalUserId = `e2e-lifecycle-customer-${suffix}`
