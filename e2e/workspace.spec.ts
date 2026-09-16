@@ -18,7 +18,7 @@ test('user can sign up, create a workspace, sign out, and sign back in', async (
   await page.getByLabel('工作区名称').fill('Analytical Engines')
   await page.getByRole('button', { name: '创建工作区' }).click()
 
-  await expect(page.getByRole('heading', { name: '收件箱已准备就绪' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
   await expect(page.getByText('Analytical Engines')).toBeVisible()
   expect(
     (await page.request.get('/api/workspaces/00000000-0000-4000-8000-000000000000')).status(),
@@ -30,5 +30,5 @@ test('user can sign up, create a workspace, sign out, and sign back in', async (
   await page.getByLabel('工作邮箱').fill(email)
   await page.getByLabel('密码').fill(password)
   await page.getByRole('button', { name: '登录', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '收件箱已准备就绪' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 })

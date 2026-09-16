@@ -1,5 +1,5 @@
-import { expect, test } from '@playwright/test'
 import { channel, createDatabase, createKnowledgeBase } from '@deepsales/db'
+import { expect, test } from '@playwright/test'
 import { Pool } from 'pg'
 
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
@@ -16,7 +16,7 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
   await page.getByRole('button', { name: '创建账户', exact: true }).click()
   await page.getByLabel('工作区名称').fill('AI member acceptance')
   await page.getByRole('button', { name: '创建工作区', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '收件箱已准备就绪' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
   const workspace = (
     (await (await page.request.get('/api/me')).json()) as { workspace: { id: string } }

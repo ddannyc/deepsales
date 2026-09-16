@@ -14,7 +14,7 @@ test('owner indexes inline and uploaded knowledge and shows failed documents', a
   await page.getByRole('button', { name: '创建账户', exact: true }).click()
   await page.getByLabel('工作区名称').fill('Knowledge acceptance')
   await page.getByRole('button', { name: '创建工作区', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '收件箱已准备就绪' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
   await page.goto('/knowledge')
   await expect(page.getByRole('heading', { name: '知识库', exact: true })).toBeVisible()

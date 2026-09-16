@@ -1,5 +1,4 @@
 import { createHmac, randomUUID } from 'node:crypto'
-import { expect, test, type Page } from '@playwright/test'
 import {
   channel,
   createDatabase,
@@ -11,6 +10,7 @@ import {
   user,
   workspaceUserAccess,
 } from '@deepsales/db'
+import { expect, type Page, test } from '@playwright/test'
 import { Pool } from 'pg'
 
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
@@ -30,7 +30,7 @@ test('human can transfer, unassign, close, and receive a later message in a new 
   await page.getByRole('button', { name: '创建账户', exact: true }).click()
   await page.getByLabel('工作区名称').fill('Lifecycle acceptance')
   await page.getByRole('button', { name: '创建工作区', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '收件箱已准备就绪' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
   const me = (await page.request.get('/api/me').then((response) => response.json())) as {
     user: { id: string }
@@ -118,17 +118,24 @@ test('human can transfer, unassign, close, and receive a later message in a new 
   if (!initialConversationId) throw new Error('Initial conversation was not listed')
   await page.getByRole('button', { name: '接管', exact: true }).click()
 
-  await page.getByRole('button', { name: '转接', exact: true }).click()
+  await page.getByRole('button', { name: '更多对话操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '转接', exact: true }).click()
   await page.getByLabel('选择转接成员').selectOption(targetMemberId)
   await page.getByRole('button', { name: '确认转接', exact: true }).click()
-  await expect(page.getByText('Grace Hopper', { exact: true }).first()).toBeVisible()
+  const transferWarning = page.getByRole('alertdialog').filter({ hasText: '跳过自动分配限制' })
+  if (await transferWarning.isVisible()) {
+    await transferWarning.getByRole('button', { name: '继续转接', exact: true }).click()
+  }
+  await expect(page.getByText('由 Grace Hopper 负责', { exact: true }).first()).toBeVisible()
 
-  await page.getByRole('button', { name: '取消分配', exact: true }).click()
+  await page.getByRole('button', { name: '更多对话操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '取消分配', exact: true }).click()
   const closeResponse = page.waitForResponse(
     (response) => response.url().includes('/close') && response.request().method() === 'POST',
   )
-  page.once('dialog', (dialog) => dialog.accept())
-  await page.getByRole('button', { name: '关闭对话', exact: true }).click()
+  await page.getByRole('button', { name: '更多对话操作', exact: true }).click()
+  await page.getByRole('menuitem', { name: '关闭对话', exact: true }).click()
+  await page.getByRole('alertdialog').getByRole('button', { name: '关闭对话', exact: true }).click()
 
   await closeResponse
   await sendInbound(

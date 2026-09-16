@@ -16,7 +16,7 @@ test('owner creates an AI member, edits it, and invites a teammate', async ({ br
   await page.getByRole('button', { name: '创建账户', exact: true }).click()
   await page.getByLabel('工作区名称').fill('Team acceptance')
   await page.getByRole('button', { name: '创建工作区' }).click()
-  await expect(page.getByRole('heading', { name: '收件箱已准备就绪' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
   await page.goto('/team')
   await expect(page.getByRole('heading', { name: '团队' })).toBeVisible()
@@ -46,7 +46,7 @@ test('owner creates an AI member, edits it, and invites a teammate', async ({ br
     await invitedPage.getByLabel('密码').fill(password)
     await invitedPage.getByRole('button', { name: '创建账户', exact: true }).click()
     await expect(invitedPage.getByRole('heading', { name: '团队' })).toBeVisible()
-    await expect(invitedPage.getByText('Grace Hopper')).toBeVisible()
+    await expect(invitedPage.locator('.team-page').getByText('Grace Hopper')).toBeVisible()
   } finally {
     await invitedContext.close()
   }

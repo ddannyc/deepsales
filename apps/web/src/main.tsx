@@ -1,4 +1,29 @@
 import {
+  AlertCircle,
+  ArrowLeft,
+  ArrowRightLeft,
+  BookOpen,
+  Bot,
+  CheckCircle2,
+  ChevronDown,
+  CircleAlert,
+  Clock3,
+  Inbox as InboxIcon,
+  ListFilter,
+  LogOut,
+  type LucideIcon,
+  MessageCircle,
+  MoreHorizontal,
+  RefreshCw,
+  Send,
+  Settings2,
+  UserRound,
+  UserRoundCheck,
+  UserRoundX,
+  UsersRound,
+  XCircle,
+} from 'lucide-react'
+import {
   type FormEvent,
   type InputHTMLAttributes,
   StrictMode,
@@ -8,8 +33,33 @@ import {
   useState,
 } from 'react'
 import { createRoot } from 'react-dom/client'
+import { toast } from 'sonner'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '#components/ui/alert-dialog'
+import { Avatar, AvatarFallback } from '#components/ui/avatar'
+import { Button } from '#components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '#components/ui/dropdown-menu'
+import { ScrollArea } from '#components/ui/scroll-area'
+import { Separator } from '#components/ui/separator'
+import { Skeleton } from '#components/ui/skeleton'
 import { Toaster } from '#components/ui/sonner'
-import { TooltipProvider } from '#components/ui/tooltip'
+import { StatusBadge } from '#components/ui/status-badge'
+import { Textarea } from '#components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 
 import './styles.css'
 
@@ -485,6 +535,13 @@ function WorkspaceSetup({
   )
 }
 
+const appNavItems = [
+  { href: '/inbox', label: '收件箱', icon: InboxIcon },
+  { href: '/team', label: '团队', icon: UsersRound },
+  { href: '/knowledge', label: '知识库', icon: BookOpen },
+  { href: '/settings/facebook', label: 'Facebook 设置', icon: Settings2 },
+] as const
+
 function Shell({
   me,
   onSignOut,
@@ -499,6 +556,14 @@ function Shell({
   const teamPage = pathname === '/team' || Boolean(aiMemberId)
   const knowledgePage = pathname === '/knowledge'
   const facebookPage = pathname === '/settings/facebook'
+  const activeHref = teamPage
+    ? '/team'
+    : knowledgePage
+      ? '/knowledge'
+      : facebookPage
+        ? '/settings/facebook'
+        : '/inbox'
+  const inboxPage = activeHref === '/inbox'
 
   async function signOut() {
     await request('/api/auth/sign-out', {})
@@ -508,71 +573,140 @@ function Shell({
   }
 
   return (
-    <div className="shell">
-      <header className="shell-header">
-        <a className="shell-mark" href="/inbox" aria-label="DeepSales 收件箱">
-          DS<span>●</span>
-        </a>
-        <div className="workspace-label">
-          <small>工作区</small>
-          {me.workspaces.length > 1 ? (
-            <select
-              aria-label="当前工作区"
-              value={me.workspace.id}
-              onChange={(event) => void onWorkspaceChange(event.currentTarget.value)}
-            >
-              {me.workspaces.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <strong>{me.workspace.name}</strong>
-          )}
-        </div>
-        <nav aria-label="主要导航">
-          <a
-            aria-current={!teamPage && !knowledgePage && !facebookPage ? 'page' : undefined}
-            href="/inbox"
-          >
-            收件箱
-          </a>
-          <a aria-current={teamPage ? 'page' : undefined} href="/team">
-            团队
-          </a>
-          <a aria-current={knowledgePage ? 'page' : undefined} href="/knowledge">
-            知识库
-          </a>
-          <a aria-current={facebookPage ? 'page' : undefined} href="/settings/facebook">
-            Facebook 设置
-          </a>
-        </nav>
-        <button className="text-button" type="button" onClick={signOut}>
-          退出登录
-        </button>
-      </header>
-      {aiMemberId ? (
-        <AiMemberPage workspace={me.workspace} memberId={aiMemberId} />
-      ) : teamPage ? (
-        <TeamPage workspace={me.workspace} />
-      ) : knowledgePage ? (
-        <KnowledgePage workspace={me.workspace} />
-      ) : facebookPage ? (
-        <FacebookSettingsPage workspace={me.workspace} />
-      ) : (
-        <InboxPage workspace={me.workspace} />
-      )}
+    <div className={`shell app-shell ${inboxPage ? 'app-shell-inbox' : ''}`}>
+      <AppSidebar
+        activeHref={activeHref}
+        me={me}
+        onSignOut={signOut}
+        onWorkspaceChange={onWorkspaceChange}
+      />
+      <div className={`app-content ${inboxPage ? 'app-content-inbox' : ''}`}>
+        {aiMemberId ? (
+          <AiMemberPage workspace={me.workspace} memberId={aiMemberId} />
+        ) : teamPage ? (
+          <TeamPage workspace={me.workspace} />
+        ) : knowledgePage ? (
+          <KnowledgePage workspace={me.workspace} />
+        ) : facebookPage ? (
+          <FacebookSettingsPage workspace={me.workspace} />
+        ) : (
+          <InboxPage workspace={me.workspace} />
+        )}
+      </div>
     </div>
   )
 }
 
-const inboxViews: Array<{ id: InboxView; label: string }> = [
-  { id: 'my', label: '我的对话' },
-  { id: 'waiting-human', label: '等待人工' },
-  { id: 'ai-handling', label: 'AI处理中' },
-  { id: 'unassigned', label: '未分配' },
-  { id: 'all-open', label: '全部进行中' },
+function AppSidebar({
+  activeHref,
+  me,
+  onSignOut,
+  onWorkspaceChange,
+}: {
+  activeHref: string
+  me: Me & { workspace: NonNullable<Me['workspace']> }
+  onSignOut: () => Promise<void>
+  onWorkspaceChange: (workspaceId: string) => Promise<void>
+}) {
+  const userInitial = (me.user.name || me.user.email).trim().charAt(0).toUpperCase() || 'U'
+
+  return (
+    <aside className="app-sidebar" aria-label="应用导航">
+      <div className="app-sidebar-top">
+        <a className="app-brand" href="/inbox" aria-label="DeepSales 收件箱">
+          <span className="app-brand-mark" aria-hidden="true">
+            DS<span>·</span>
+          </span>
+          <span className="app-brand-copy">
+            <strong>DeepSales</strong>
+            <small>共享收件箱</small>
+          </span>
+        </a>
+        <div className="workspace-switcher">
+          <span className="sidebar-kicker">工作区</span>
+          <span className="workspace-initial" aria-hidden="true">
+            {nameInitial(me.workspace.name, '工')}
+          </span>
+          {me.workspaces.length > 1 ? (
+            <label className="workspace-select-wrap">
+              <span className="sr-only">当前工作区</span>
+              <select
+                aria-label="当前工作区"
+                value={me.workspace.id}
+                onChange={(event) => void onWorkspaceChange(event.currentTarget.value)}
+              >
+                {me.workspaces.map((workspace) => (
+                  <option key={workspace.id} value={workspace.id}>
+                    {workspace.name}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown aria-hidden="true" />
+            </label>
+          ) : (
+            <strong>{me.workspace.name}</strong>
+          )}
+        </div>
+      </div>
+      <nav className="app-nav" aria-label="主要导航">
+        {appNavItems.map((item) => {
+          const Icon = item.icon
+          const active = activeHref === item.href
+          return (
+            <Tooltip key={item.href}>
+              <TooltipTrigger asChild>
+                <a
+                  aria-current={active ? 'page' : undefined}
+                  aria-label={item.label}
+                  className={active ? 'app-nav-link active' : 'app-nav-link'}
+                  href={item.href}
+                >
+                  <Icon aria-hidden="true" />
+                  <span className="app-sidebar-label">{item.label}</span>
+                </a>
+              </TooltipTrigger>
+              <TooltipContent side="right">{item.label}</TooltipContent>
+            </Tooltip>
+          )
+        })}
+      </nav>
+      <div className="app-sidebar-footer">
+        <Separator />
+        <div className="user-profile">
+          <Avatar size="sm">
+            <AvatarFallback>{userInitial}</AvatarFallback>
+          </Avatar>
+          <div className="user-profile-copy">
+            <strong>{me.user.name || '团队成员'}</strong>
+            <span>{roleLabel(me.workspace.role)}</span>
+          </div>
+        </div>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label="退出登录"
+              className="app-signout"
+              type="button"
+              variant="ghost"
+              onClick={onSignOut}
+            >
+              <LogOut aria-hidden="true" />
+              <span className="app-sidebar-label">退出登录</span>
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent side="right">退出登录</TooltipContent>
+        </Tooltip>
+      </div>
+    </aside>
+  )
+}
+
+const inboxViews: Array<{ id: InboxView; label: string; icon: LucideIcon }> = [
+  { id: 'my', label: '我的对话', icon: UserRoundCheck },
+  { id: 'waiting-human', label: '等待人工', icon: Clock3 },
+  { id: 'ai-handling', label: 'AI处理中', icon: Bot },
+  { id: 'unassigned', label: '未分配', icon: UserRoundX },
+  { id: 'all-open', label: '全部进行中', icon: ListFilter },
 ]
 
 function InboxPage({ workspace }: { workspace: Workspace }) {
@@ -582,11 +716,15 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [messages, setMessages] = useState<InboxMessage[]>([])
   const [loading, setLoading] = useState(true)
+  const [threadLoading, setThreadLoading] = useState(false)
   const [error, setError] = useState('')
   const [reply, setReply] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
   const [transferOpen, setTransferOpen] = useState(false)
   const [transferTargetId, setTransferTargetId] = useState('')
+  const [transferConfirmationOpen, setTransferConfirmationOpen] = useState(false)
+  const [closeDialogOpen, setCloseDialogOpen] = useState(false)
+  const [mobileThreadOpen, setMobileThreadOpen] = useState(false)
   const [clock, setClock] = useState(() => Date.now())
   const selectedIdRef = useRef<string | null>(null)
   const selectedConversation = conversations.find(({ id }) => id === selectedId)
@@ -605,6 +743,10 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       (workspace.role !== 'AGENT' || selectedConversation.assigneeMemberId === workspace.memberId),
   )
   const replyWindowEligibleUntil = selectedConversation?.replyWindowEligibleUntil ?? null
+  const replyWindowOpen = Boolean(
+    selectedConversation?.replyWindowOpen &&
+      (!replyWindowEligibleUntil || Date.parse(replyWindowEligibleUntil) > clock),
+  )
 
   const refresh = useCallback(async () => {
     const response = await fetch(
@@ -623,12 +765,17 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
 
   const refreshThread = useCallback(
     async (conversationId: string) => {
-      const response = await fetch(
-        `/api/workspaces/${workspace.id}/conversations/${conversationId}/messages`,
-      )
-      if (!response.ok) throw await responseError(response)
-      const data = (await response.json()) as { messages: InboxMessage[] }
-      setMessages(data.messages)
+      setThreadLoading(true)
+      try {
+        const response = await fetch(
+          `/api/workspaces/${workspace.id}/conversations/${conversationId}/messages`,
+        )
+        if (!response.ok) throw await responseError(response)
+        const data = (await response.json()) as { messages: InboxMessage[] }
+        setMessages(data.messages)
+      } finally {
+        setThreadLoading(false)
+      }
     },
     [workspace.id],
   )
@@ -650,6 +797,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       await refresh()
       await refreshThread(selectedId)
       setError('')
+      toast.success('已接管对话')
     } catch (cause) {
       setError(inboxErrorMessage(cause))
     } finally {
@@ -657,42 +805,38 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     }
   }, [refresh, refreshThread, selectedId, workspace.id])
 
-  const transfer = useCallback(async () => {
-    if (!selectedId || !transferTargetId) return
-    setActionLoading(true)
-    let confirmOverride = false
-    try {
-      for (;;) {
-        try {
-          await request(`/api/workspaces/${workspace.id}/conversations/${selectedId}/transfer`, {
-            targetMemberId: transferTargetId,
-            ...(confirmOverride ? { confirmOverride: true } : {}),
-          })
-          break
-        } catch (cause) {
-          if (
-            !confirmOverride &&
-            cause instanceof ApiError &&
-            cause.code === 'TRANSFER_CONFIRMATION_REQUIRED' &&
-            window.confirm('目标成员当前不可自动接收，是否仍然转接？')
-          ) {
-            confirmOverride = true
-            continue
-          }
-          throw cause
+  const transfer = useCallback(
+    async (confirmOverride = false) => {
+      if (!selectedId || !transferTargetId) return
+      setActionLoading(true)
+      try {
+        await request(`/api/workspaces/${workspace.id}/conversations/${selectedId}/transfer`, {
+          targetMemberId: transferTargetId,
+          ...(confirmOverride ? { confirmOverride: true } : {}),
+        })
+        setTransferOpen(false)
+        setTransferTargetId('')
+        setTransferConfirmationOpen(false)
+        await refresh()
+        await refreshThread(selectedId)
+        setError('')
+        toast.success('对话已转接')
+      } catch (cause) {
+        if (
+          !confirmOverride &&
+          cause instanceof ApiError &&
+          cause.code === 'TRANSFER_CONFIRMATION_REQUIRED'
+        ) {
+          setTransferConfirmationOpen(true)
+        } else {
+          setError(inboxErrorMessage(cause))
         }
+      } finally {
+        setActionLoading(false)
       }
-      setTransferOpen(false)
-      setTransferTargetId('')
-      await refresh()
-      await refreshThread(selectedId)
-      setError('')
-    } catch (cause) {
-      setError(inboxErrorMessage(cause))
-    } finally {
-      setActionLoading(false)
-    }
-  }, [refresh, refreshThread, selectedId, transferTargetId, workspace.id])
+    },
+    [refresh, refreshThread, selectedId, transferTargetId, workspace.id],
+  )
 
   const unassign = useCallback(async () => {
     if (!selectedId) return
@@ -702,6 +846,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       await refresh()
       await refreshThread(selectedId)
       setError('')
+      toast.success('已取消分配')
     } catch (cause) {
       setError(inboxErrorMessage(cause))
     } finally {
@@ -709,8 +854,8 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     }
   }, [refresh, refreshThread, selectedId, workspace.id])
 
-  const close = useCallback(async () => {
-    if (!selectedId || !window.confirm('确定关闭这段对话吗？')) return
+  const closeConversation = useCallback(async () => {
+    if (!selectedId) return
     setActionLoading(true)
     try {
       await request(`/api/workspaces/${workspace.id}/conversations/${selectedId}/close`, {})
@@ -718,6 +863,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       setTransferTargetId('')
       await refresh()
       setError('')
+      toast.success('对话已关闭')
     } catch (cause) {
       setError(inboxErrorMessage(cause))
     } finally {
@@ -772,8 +918,10 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     selectedIdRef.current = selectedId
     setTransferOpen(false)
     setTransferTargetId('')
+    setTransferConfirmationOpen(false)
     if (!selectedId) {
       setMessages([])
+      setThreadLoading(false)
       return
     }
     void refreshThread(selectedId).catch((cause) => setError(inboxErrorMessage(cause)))
@@ -823,259 +971,588 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     }
   }, [refresh, refreshThread, workspace.id])
 
+  const currentViewLabel = inboxViews.find((item) => item.id === view)?.label ?? '全部进行中'
+
   return (
-    <main className="inbox-page">
-      <aside className="inbox-views" aria-label="收件箱视图">
-        <p className="eyebrow">共享收件箱</p>
-        <h1>对话</h1>
-        <nav>
-          {inboxViews.map((item) => (
-            <button
-              className={view === item.id ? 'inbox-view active' : 'inbox-view'}
-              key={item.id}
-              type="button"
-              aria-pressed={view === item.id}
-              onClick={() => setView(item.id)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-      </aside>
-      <section className="conversation-list" aria-label="对话列表">
-        <div className="inbox-section-heading">
-          <div>
-            <p className="eyebrow">{inboxViews.find((item) => item.id === view)?.label}</p>
-            <h2>{conversations.length ? `${conversations.length} 个对话` : '收件箱已准备就绪'}</h2>
+    <main className={`inbox-page ${mobileThreadOpen ? 'mobile-thread-open' : ''}`}>
+      <aside className="inbox-pane" aria-label="收件箱视图和对话列表">
+        <div className="inbox-pane-header">
+          <div className="inbox-title-row">
+            <div>
+              <p className="eyebrow">共享收件箱</p>
+              <h1>对话</h1>
+            </div>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  aria-label="刷新对话"
+                  className="inbox-refresh"
+                  disabled={loading}
+                  size="icon-sm"
+                  type="button"
+                  variant="ghost"
+                  onClick={() =>
+                    void refresh().catch((cause) => setError(inboxErrorMessage(cause)))
+                  }
+                >
+                  <RefreshCw aria-hidden="true" className={loading ? 'spin' : ''} />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>刷新对话</TooltipContent>
+            </Tooltip>
           </div>
-          <button
-            className="secondary"
-            type="button"
-            onClick={() => void refresh().catch((cause) => setError(inboxErrorMessage(cause)))}
-          >
-            刷新
-          </button>
+          <nav className="inbox-view-nav" aria-label="收件箱视图">
+            {inboxViews.map((item) => {
+              const Icon = item.icon
+              const active = view === item.id
+              return (
+                <button
+                  aria-pressed={active}
+                  className={active ? 'inbox-view active' : 'inbox-view'}
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setMobileThreadOpen(false)
+                    setView(item.id)
+                  }}
+                >
+                  <Icon aria-hidden="true" />
+                  <span>{item.label}</span>
+                </button>
+              )
+            })}
+          </nav>
         </div>
-        {error && (
-          <p className="form-error" role="alert">
-            {error}
-          </p>
-        )}
-        {loading ? (
-          <p className="inbox-placeholder">正在加载对话…</p>
-        ) : conversations.length ? (
-          <div className="conversation-items">
-            {conversations.map((item) => (
-              <button
-                className={
-                  selectedId === item.id ? 'conversation-item selected' : 'conversation-item'
-                }
-                key={item.id}
-                type="button"
-                onClick={() => setSelectedId(item.id)}
-              >
-                <span className="conversation-item-topline">
-                  <strong>{item.customerName ?? '新客户'}</strong>
-                  <time dateTime={item.updatedAt}>{formatDate(item.updatedAt)}</time>
-                </span>
-                <span className="conversation-item-preview">
-                  {item.latestPreview ?? '暂无消息'}
-                </span>
-                <span className="conversation-item-meta">
-                  {item.assigneeName ?? queueReasonLabel(item.queueReason)}
-                  {item.aiGenerating && <em>AI 正在生成</em>}
-                  {item.failedMessage && <em>发送失败</em>}
-                </span>
-              </button>
-            ))}
+        <Separator />
+        <section className="conversation-list" aria-label="对话列表">
+          <div className="conversation-list-heading">
+            <div>
+              <span className="list-kicker">当前视图</span>
+              <h2>{currentViewLabel}</h2>
+            </div>
+            {conversations.length > 0 && (
+              <span className="conversation-count">{conversations.length}</span>
+            )}
           </div>
-        ) : (
-          <p className="inbox-placeholder">新的 Messenger 消息会显示在这里。</p>
-        )}
-      </section>
+          {error && (
+            <div className="inbox-error" role="alert">
+              <AlertCircle aria-hidden="true" />
+              <span>{error}</span>
+            </div>
+          )}
+          {loading ? (
+            <ConversationListSkeleton />
+          ) : conversations.length ? (
+            <div className="conversation-items">
+              {conversations.map((item) => (
+                <ConversationListItem
+                  item={item}
+                  key={item.id}
+                  selected={selectedId === item.id}
+                  onSelect={() => {
+                    setSelectedId(item.id)
+                    setMobileThreadOpen(true)
+                  }}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="inbox-placeholder inbox-empty-state">
+              <MessageCircle aria-hidden="true" />
+              <strong>{currentViewLabel}暂无对话</strong>
+              <span>新的 Messenger 消息会根据视图显示在这里。</span>
+            </div>
+          )}
+        </section>
+      </aside>
       <section className="inbox-thread" aria-label="对话详情">
-        {selectedId ? (
-          (() => {
-            const selected = selectedConversation
-            if (!selected) return <p className="inbox-placeholder">请选择一个对话。</p>
-            const replyWindowOpen =
-              selected.replyWindowOpen &&
-              (!selected.replyWindowEligibleUntil ||
-                Date.parse(selected.replyWindowEligibleUntil) > clock)
-            return (
-              <>
-                <header className="thread-heading">
-                  <div>
-                    <p className="eyebrow">{selected.channelName}</p>
-                    <h2>{selected.customerName ?? '新客户'}</h2>
-                    <p className="reply-window" role="status">
-                      {replyWindowOpen ? 'Messenger 回复窗口开放' : 'Messenger 回复窗口已关闭'}
-                    </p>
-                    {selected.aiGenerating && (
-                      <p className="reply-window" role="status">
-                        AI 正在生成回复…
-                      </p>
-                    )}
+        {selectedId && selectedConversation ? (
+          <div className="thread-layout">
+            <ConversationHeader
+              actionLoading={actionLoading}
+              canManage={canManageSelected}
+              conversation={selectedConversation}
+              replyWindowOpen={replyWindowOpen}
+              transferTargets={transferTargets}
+              onBack={() => setMobileThreadOpen(false)}
+              onClose={() => setCloseDialogOpen(true)}
+              onOpenTransfer={() => setTransferOpen(true)}
+              onTakeOver={() => void takeOver()}
+              onUnassign={() => void unassign()}
+            />
+            <div className="thread-context">
+              {error && (
+                <div className="thread-error" role="alert">
+                  <AlertCircle aria-hidden="true" />
+                  <span>{error}</span>
+                </div>
+              )}
+              {transferOpen && canManageSelected && (
+                <div className="transfer-controls">
+                  <div className="transfer-copy">
+                    <strong>转接对话</strong>
+                    <span>选择一个有权限处理此频道的成员。</span>
                   </div>
-                  <div className="thread-actions">
-                    <div className="thread-state">
-                      <strong>{selected.assigneeName ?? '未分配'}</strong>
-                      <span>{queueReasonLabel(selected.queueReason)}</span>
-                    </div>
-                    {(selected.assigneeMemberId === null || selected.assigneeType === 'AI') && (
-                      <button
-                        className="secondary"
-                        type="button"
-                        disabled={actionLoading}
-                        onClick={() => void takeOver()}
-                      >
-                        接管
-                      </button>
-                    )}
-                  </div>
-                </header>
-                {canManageSelected && (
-                  <div className="conversation-actions">
-                    {transferTargets.length > 0 && (
-                      <button
-                        className="secondary"
-                        type="button"
-                        disabled={actionLoading}
-                        onClick={() => setTransferOpen((open) => !open)}
-                      >
-                        转接
-                      </button>
-                    )}
-                    {selected.assigneeMemberId && (
-                      <button
-                        className="secondary"
-                        type="button"
-                        disabled={actionLoading}
-                        onClick={() => void unassign()}
-                      >
-                        取消分配
-                      </button>
-                    )}
-                    <button
-                      className="danger-button"
-                      type="button"
-                      disabled={actionLoading}
-                      onClick={() => void close()}
-                    >
-                      关闭对话
-                    </button>
-                  </div>
-                )}
-                {transferOpen && canManageSelected && (
-                  <div className="transfer-controls">
-                    <label htmlFor="transfer-target">转接给</label>
-                    <select
-                      id="transfer-target"
-                      aria-label="选择转接成员"
-                      value={transferTargetId}
-                      onChange={(event) => setTransferTargetId(event.currentTarget.value)}
-                      disabled={actionLoading}
-                    >
-                      <option value="">选择人工成员</option>
-                      {transferTargets.map((member) => (
-                        <option key={member.id} value={member.id}>
-                          {member.displayName ?? '未命名成员'}
-                        </option>
-                      ))}
-                    </select>
-                    <button
-                      className="secondary"
-                      type="button"
-                      disabled={!transferTargetId || actionLoading}
-                      onClick={() => void transfer()}
-                    >
-                      确认转接
-                    </button>
-                  </div>
-                )}
+                  <label htmlFor="transfer-target">转接给</label>
+                  <select
+                    id="transfer-target"
+                    aria-label="选择转接成员"
+                    value={transferTargetId}
+                    onChange={(event) => setTransferTargetId(event.currentTarget.value)}
+                    disabled={actionLoading}
+                  >
+                    <option value="">选择人工成员</option>
+                    {transferTargets.map((member) => (
+                      <option key={member.id} value={member.id}>
+                        {member.displayName ?? '未命名成员'}
+                      </option>
+                    ))}
+                  </select>
+                  <Button
+                    disabled={!transferTargetId || actionLoading}
+                    type="button"
+                    variant="outline"
+                    onClick={() => void transfer()}
+                  >
+                    确认转接
+                  </Button>
+                  <Button
+                    disabled={actionLoading}
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setTransferOpen(false)}
+                  >
+                    取消
+                  </Button>
+                </div>
+              )}
+            </div>
+            <ScrollArea className="message-scroll">
+              {threadLoading ? (
+                <MessageThreadSkeleton />
+              ) : (
                 <div className="message-list" aria-live="polite">
                   {messages.length ? (
                     messages.map((message) => (
-                      <article
-                        className={`message-bubble ${message.direction.toLowerCase()}`}
+                      <MessageBubble
                         key={message.id}
-                      >
-                        <p>{message.text ?? '附件消息'}</p>
-                        {message.attachments?.map((attachment) => (
-                          <AttachmentPreview
-                            attachment={attachment}
-                            key={attachment.id}
-                            workspaceId={workspace.id}
-                          />
-                        ))}
-                        <footer>
-                          <time dateTime={message.createdAt}>{formatDate(message.createdAt)}</time>
-                          {message.deliveryState && (
-                            <span>{deliveryStateLabel(message.deliveryState)}</span>
-                          )}
-                          {message.deliveryState === 'FAILED' && (
-                            <span className="delivery-failure">
-                              {deliveryFailureLabel(message.failureCode)}
-                            </span>
-                          )}
-                        </footer>
-                      </article>
+                        message={message}
+                        teamMembers={teamMembers}
+                        workspaceId={workspace.id}
+                      />
                     ))
                   ) : (
                     <p className="inbox-placeholder">暂无消息。</p>
                   )}
                 </div>
-                {selected.assigneeMemberId === workspace.memberId &&
-                selected.assigneeType === 'HUMAN' ? (
-                  <form className="reply-composer" onSubmit={sendReply}>
-                    <label htmlFor="reply-text">回复客户</label>
-                    <textarea
-                      id="reply-text"
-                      value={reply}
-                      maxLength={2_000}
-                      onChange={(event) => setReply(event.target.value)}
-                      placeholder="输入文字回复"
-                      disabled={!replyWindowOpen || actionLoading}
-                    />
-                    <button
-                      className="primary"
-                      type="submit"
-                      disabled={!replyWindowOpen || actionLoading || !reply.trim()}
-                    >
-                      {actionLoading ? '发送中…' : '发送回复'}
-                    </button>
-                  </form>
-                ) : (
-                  <p className="reply-hint">接管对话后即可回复客户。</p>
-                )}
-              </>
-            )
-          })()
+              )}
+            </ScrollArea>
+            <ConversationComposer
+              actionLoading={actionLoading}
+              canReply={
+                selectedConversation.assigneeMemberId === workspace.memberId &&
+                selectedConversation.assigneeType === 'HUMAN'
+              }
+              reply={reply}
+              replyWindowOpen={replyWindowOpen}
+              setReply={setReply}
+              onSubmit={sendReply}
+            />
+          </div>
+        ) : selectedId ? (
+          <div className="thread-empty">
+            <p>正在打开对话…</p>
+          </div>
         ) : (
           <div className="thread-empty">
+            <MessageCircle aria-hidden="true" />
             <p className="eyebrow">Messenger</p>
             <h2>选择一个对话</h2>
-            <p>从左侧列表打开客户消息。</p>
+            <p>从对话列表打开客户消息。</p>
           </div>
         )}
       </section>
+      <AlertDialog open={transferConfirmationOpen} onOpenChange={setTransferConfirmationOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>仍要转接？</AlertDialogTitle>
+            <AlertDialogDescription>
+              目标成员当前不可自动接收这段对话。确认后将跳过自动分配限制，直接转接给该成员。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void transfer(true)}>继续转接</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog open={closeDialogOpen} onOpenChange={setCloseDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>关闭这段对话？</AlertDialogTitle>
+            <AlertDialogDescription>
+              关闭后，这段对话会从进行中的视图移除。客户再次发消息时，系统会创建新的对话。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={() => void closeConversation()}>
+              关闭对话
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   )
 }
 
-function queueReasonLabel(reason: string | null) {
+type StatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'destructive'
+
+function conversationHandling(conversation: InboxConversation) {
+  if (conversation.assigneeType === 'AI') return { label: 'AI处理中', tone: 'info' as const }
+  if (conversation.assigneeMemberId) {
+    return { label: `由 ${conversation.assigneeName ?? '团队成员'} 负责`, tone: 'neutral' as const }
+  }
+  if (
+    conversation.routingConstraint === 'HUMAN_ONLY' ||
+    conversation.queueReason === 'AI_HANDOFF'
+  ) {
+    return { label: '等待人工', tone: 'warning' as const }
+  }
+  return { label: '未分配', tone: 'neutral' as const }
+}
+
+function nameInitial(name: string | null, fallback: string) {
+  return (name?.trim().charAt(0) || fallback).toUpperCase()
+}
+
+function ConversationListItem({
+  item,
+  selected,
+  onSelect,
+}: {
+  item: InboxConversation
+  selected: boolean
+  onSelect: () => void
+}) {
+  const handling = conversationHandling(item)
   return (
-    {
-      NEW_CONVERSATION: '等待分配',
-      AI_HANDOFF: '等待人工',
-      MANUAL_UNASSIGN: '手动取消分配',
-      MEMBER_DISABLED: '成员已停用',
-    }[reason ?? ''] ?? '处理中'
+    <button
+      aria-pressed={selected}
+      className={selected ? 'conversation-item selected' : 'conversation-item'}
+      type="button"
+      onClick={onSelect}
+    >
+      <Avatar size="sm">
+        <AvatarFallback>{nameInitial(item.customerName, '新')}</AvatarFallback>
+      </Avatar>
+      <span className="conversation-item-body">
+        <span className="conversation-item-topline">
+          <strong>{item.customerName ?? '新客户'}</strong>
+          <time dateTime={item.updatedAt} title={formatExactDate(item.updatedAt)}>
+            {formatDate(item.updatedAt)}
+          </time>
+        </span>
+        <span className="conversation-item-preview">{item.latestPreview ?? '暂无消息'}</span>
+        <span className="conversation-item-meta">
+          <span className="conversation-item-channel">
+            <MessageCircle aria-hidden="true" />
+            Messenger
+          </span>
+          <StatusBadge tone={handling.tone}>{handling.label}</StatusBadge>
+          {item.aiGenerating && <StatusBadge tone="info">AI 正在生成</StatusBadge>}
+          {item.failedMessage && <StatusBadge tone="destructive">发送失败</StatusBadge>}
+        </span>
+      </span>
+    </button>
   )
 }
 
-function deliveryStateLabel(state: NonNullable<InboxMessage['deliveryState']>) {
-  return { PENDING: '发送中', SENT: '已发送', FAILED: '发送失败' }[state]
+function ConversationListSkeleton() {
+  return (
+    <div className="conversation-items" aria-hidden="true">
+      {['one', 'two', 'three', 'four', 'five', 'six'].map((key) => (
+        <div className="conversation-skeleton" key={key}>
+          <Skeleton className="conversation-skeleton-avatar" />
+          <div className="conversation-skeleton-copy">
+            <Skeleton className="conversation-skeleton-name" />
+            <Skeleton className="conversation-skeleton-preview" />
+            <Skeleton className="conversation-skeleton-meta" />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function MessageThreadSkeleton() {
+  return (
+    <div className="message-list" aria-hidden="true">
+      <div className="message-skeleton inbound">
+        <Skeleton className="message-skeleton-label" />
+        <Skeleton className="message-skeleton-line wide" />
+        <Skeleton className="message-skeleton-line" />
+      </div>
+      <div className="message-skeleton outbound">
+        <Skeleton className="message-skeleton-label" />
+        <Skeleton className="message-skeleton-line" />
+        <Skeleton className="message-skeleton-line short" />
+      </div>
+      <div className="message-skeleton inbound">
+        <Skeleton className="message-skeleton-label" />
+        <Skeleton className="message-skeleton-line wide" />
+      </div>
+    </div>
+  )
+}
+
+function ConversationHeader({
+  actionLoading,
+  canManage,
+  conversation,
+  replyWindowOpen,
+  transferTargets,
+  onBack,
+  onClose,
+  onOpenTransfer,
+  onTakeOver,
+  onUnassign,
+}: {
+  actionLoading: boolean
+  canManage: boolean
+  conversation: InboxConversation
+  replyWindowOpen: boolean
+  transferTargets: TeamMember[]
+  onBack: () => void
+  onClose: () => void
+  onOpenTransfer: () => void
+  onTakeOver: () => void
+  onUnassign: () => void
+}) {
+  const handling = conversationHandling(conversation)
+  const canTakeOver = conversation.assigneeMemberId === null || conversation.assigneeType === 'AI'
+
+  return (
+    <header className="thread-heading">
+      <div className="thread-identity">
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              aria-label="返回对话列表"
+              className="thread-back"
+              size="icon-sm"
+              type="button"
+              variant="ghost"
+              onClick={onBack}
+            >
+              <ArrowLeft aria-hidden="true" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>返回对话列表</TooltipContent>
+        </Tooltip>
+        <Avatar size="lg">
+          <AvatarFallback>{nameInitial(conversation.customerName, '新')}</AvatarFallback>
+        </Avatar>
+        <div className="thread-identity-copy">
+          <div className="thread-channel">
+            <MessageCircle aria-hidden="true" />
+            <span>Messenger</span>
+            <span aria-hidden="true">·</span>
+            <span>{conversation.channelName}</span>
+          </div>
+          <h2>{conversation.customerName ?? '新客户'}</h2>
+          <div className="thread-statuses">
+            <StatusBadge tone={conversation.status === 'OPEN' ? 'success' : 'neutral'}>
+              {conversation.status}
+            </StatusBadge>
+            <StatusBadge tone={handling.tone}>{handling.label}</StatusBadge>
+            <ReplyWindowStatus open={replyWindowOpen} />
+          </div>
+        </div>
+      </div>
+      <div className="thread-actions">
+        {conversation.aiGenerating && (
+          <StatusBadge className="ai-generating" role="status" tone="info">
+            <Bot aria-hidden="true" />
+            AI 正在生成
+          </StatusBadge>
+        )}
+        {canTakeOver && (
+          <Button disabled={actionLoading} type="button" onClick={onTakeOver}>
+            <UserRoundCheck aria-hidden="true" />
+            接管
+          </Button>
+        )}
+        {canManage && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button aria-label="更多对话操作" size="icon" type="button" variant="outline">
+                <MoreHorizontal aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              {transferTargets.length > 0 && (
+                <DropdownMenuItem disabled={actionLoading} onSelect={onOpenTransfer}>
+                  <ArrowRightLeft aria-hidden="true" />
+                  转接
+                </DropdownMenuItem>
+              )}
+              {conversation.assigneeMemberId && (
+                <DropdownMenuItem disabled={actionLoading} onSelect={onUnassign}>
+                  <UserRoundX aria-hidden="true" />
+                  取消分配
+                </DropdownMenuItem>
+              )}
+              {(transferTargets.length > 0 || conversation.assigneeMemberId) && (
+                <DropdownMenuSeparator />
+              )}
+              <DropdownMenuItem disabled={actionLoading} variant="destructive" onSelect={onClose}>
+                <XCircle aria-hidden="true" />
+                关闭对话
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </div>
+    </header>
+  )
+}
+
+function ReplyWindowStatus({ open }: { open: boolean }) {
+  const Icon = open ? CheckCircle2 : CircleAlert
+  return (
+    <StatusBadge tone={open ? 'success' : 'warning'}>
+      <Icon aria-hidden="true" />
+      Messenger 回复窗口{open ? '开放' : '已关闭'}
+    </StatusBadge>
+  )
+}
+
+function MessageBubble({
+  message,
+  teamMembers,
+  workspaceId,
+}: {
+  message: InboxMessage
+  teamMembers: TeamMember[]
+  workspaceId: string
+}) {
+  const inbound = message.direction === 'INBOUND'
+  const senderMember = message.senderMemberId
+    ? teamMembers.find(({ id }) => id === message.senderMemberId)
+    : undefined
+  const senderName = inbound ? '客户' : (senderMember?.displayName ?? '团队成员')
+  const isAi = !inbound && senderMember?.type === 'AI'
+
+  return (
+    <article
+      aria-label={`${senderName}的消息`}
+      className={`message-bubble ${message.direction.toLowerCase()}`}
+    >
+      <div className="message-bubble-header">
+        <span className="message-sender">
+          {isAi ? <Bot aria-hidden="true" /> : <UserRound aria-hidden="true" />}
+          <strong>{senderName}</strong>
+          {isAi && <StatusBadge tone="info">AI</StatusBadge>}
+        </span>
+        <time dateTime={message.createdAt} title={formatExactDate(message.createdAt)}>
+          {formatDate(message.createdAt)}
+        </time>
+      </div>
+      {message.text ? <p>{message.text}</p> : !message.attachments.length && <p>附件消息</p>}
+      {message.attachments?.map((attachment) => (
+        <AttachmentPreview attachment={attachment} key={attachment.id} workspaceId={workspaceId} />
+      ))}
+      {message.deliveryState && <DeliveryStatus state={message.deliveryState} />}
+      {message.deliveryState === 'FAILED' && (
+        <span className="delivery-failure">{deliveryFailureLabel(message.failureCode)}</span>
+      )}
+    </article>
+  )
+}
+
+const deliveryStatusMeta: Record<
+  NonNullable<InboxMessage['deliveryState']>,
+  { label: string; tone: StatusTone; icon: LucideIcon }
+> = {
+  PENDING: { label: '发送中', tone: 'warning', icon: Clock3 },
+  SENT: { label: '已发送', tone: 'success', icon: CheckCircle2 },
+  FAILED: { label: '发送失败', tone: 'destructive', icon: CircleAlert },
+}
+
+function DeliveryStatus({ state }: { state: NonNullable<InboxMessage['deliveryState']> }) {
+  const meta = deliveryStatusMeta[state]
+  const Icon = meta.icon
+  return (
+    <StatusBadge className="message-delivery-status" tone={meta.tone}>
+      <Icon aria-hidden="true" />
+      {meta.label}
+    </StatusBadge>
+  )
+}
+
+function ConversationComposer({
+  actionLoading,
+  canReply,
+  reply,
+  replyWindowOpen,
+  setReply,
+  onSubmit,
+}: {
+  actionLoading: boolean
+  canReply: boolean
+  reply: string
+  replyWindowOpen: boolean
+  setReply: (value: string) => void
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void
+}) {
+  const disabled = actionLoading || !canReply || !replyWindowOpen
+  const hint = actionLoading
+    ? '正在处理，请稍候。'
+    : !canReply
+      ? '接管对话后即可回复客户。'
+      : !replyWindowOpen
+        ? 'Messenger 回复窗口已关闭，暂时无法发送新消息。'
+        : ''
+
+  return (
+    <div className="reply-composer-dock">
+      {hint && (
+        <p className="reply-hint" id="reply-help" role="status">
+          <CircleAlert aria-hidden="true" />
+          {hint}
+        </p>
+      )}
+      <form className="reply-composer" onSubmit={onSubmit}>
+        <div className="reply-composer-heading">
+          <label htmlFor="reply-text">回复客户</label>
+          <span>Enter 发送 · Shift+Enter 换行</span>
+        </div>
+        <Textarea
+          aria-describedby={hint ? 'reply-help' : undefined}
+          className="reply-textarea"
+          disabled={disabled}
+          id="reply-text"
+          maxLength={2_000}
+          placeholder="输入文字回复"
+          value={reply}
+          onChange={(event) => setReply(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+            event.preventDefault()
+            if (!disabled) event.currentTarget.form?.requestSubmit()
+          }}
+        />
+        <div className="reply-composer-footer">
+          <span>{reply.length.toLocaleString('zh-CN')}/2,000</span>
+          <Button disabled={disabled || !reply.trim()} type="submit">
+            <Send aria-hidden="true" />
+            {actionLoading ? '发送中…' : '发送回复'}
+          </Button>
+        </div>
+      </form>
+    </div>
+  )
 }
 
 function deliveryFailureLabel(code: string | null) {
@@ -1092,16 +1569,22 @@ function AttachmentPreview({
   const label = attachment.filename ?? attachmentKindLabel(attachment.kind)
   if (attachment.storageState === 'PENDING') {
     return (
-      <span className="attachment-state" role="status" aria-busy="true">
+      <StatusBadge className="attachment-state" role="status" tone="warning" aria-busy="true">
+        <Clock3 aria-hidden="true" />
         附件加载中…
-      </span>
+      </StatusBadge>
     )
   }
   if (attachment.storageState === 'FAILED') {
     return (
-      <span className="attachment-state attachment-state-failed" role="status">
+      <StatusBadge
+        className="attachment-state attachment-state-failed"
+        role="status"
+        tone="destructive"
+      >
+        <CircleAlert aria-hidden="true" />
         附件加载失败
-      </span>
+      </StatusBadge>
     )
   }
 
@@ -2493,8 +2976,41 @@ function knowledgeErrorMessage(cause: unknown): string {
   )
 }
 
+const compactTimeFormatter = new Intl.DateTimeFormat('zh-CN', {
+  hour: '2-digit',
+  minute: '2-digit',
+})
+const compactDateFormatter = new Intl.DateTimeFormat('zh-CN', {
+  day: 'numeric',
+  month: 'short',
+})
+const exactDateFormatter = new Intl.DateTimeFormat('zh-CN', {
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  month: '2-digit',
+  second: '2-digit',
+  year: 'numeric',
+})
+
 function formatDate(value: string) {
-  return new Date(value).toLocaleString('zh-CN')
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return '未知时间'
+  const now = new Date()
+  const time = compactTimeFormatter.format(date)
+  if (date.toDateString() === now.toDateString()) return time
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${time}`
+  const day = compactDateFormatter.format(date)
+  return date.getFullYear() === now.getFullYear()
+    ? `${day} ${time}`
+    : `${date.getFullYear()}年${day} ${time}`
+}
+
+function formatExactDate(value: string) {
+  const date = new Date(value)
+  return Number.isFinite(date.getTime()) ? exactDateFormatter.format(date) : value
 }
 
 function inviteToken() {
