@@ -45,14 +45,14 @@ A release is acceptable when a real workspace can:
 | Authentication | Better Auth email/password and database sessions; Drizzle adapter; no organization plugin |
 | Database provider | Neon PostgreSQL with `vector` extension |
 | Worker database path | Drizzle ORM over `pg` through a cache-disabled Hyperdrive binding |
-| Migration path | Drizzle Kit using a direct `DATABASE_URL`; generated SQL committed to the repository |
+| Migration path | Drizzle Kit using a direct `DATABASE_URL_UNPOOLED` (or direct `DATABASE_URL`); generated SQL committed to the repository |
 | Validation | Zod at HTTP, queue, provider, and AI-output trust boundaries |
 | Styling | Plain CSS with a small shared token file; no UI framework |
 | Client data | Native `fetch` and local React state; no global state or query library |
 | Durable jobs | Five Cloudflare Queues: `webhooks`, `outbound`, `ai`, `documents`, `maintenance`; one shared DLQ |
 | Realtime | One hibernating Durable Object per workspace; notifications only, followed by canonical API reads |
 | Object storage | Private Cloudflare R2 bucket |
-| AI provider | Alibaba Cloud International Model Studio through native `fetch`; T08 uses `qwen3.7-text-embedding` at 1,536 dimensions and T11 will use `qwen3.8-flash` |
+| AI provider | Alibaba Cloud International Model Studio through native `fetch`; embeddings use `qwen3.7-text-embedding` at 1,536 dimensions and responses use `qwen3.8-flash` |
 | Vector search | pgvector cosine distance, HNSW index |
 | PDF extraction | `unpdf` serverless build |
 | DOCX extraction | `mammoth.extractRawText` with `ArrayBuffer`; external file access remains disabled |
@@ -103,12 +103,12 @@ apps/
   web/                  React SPA
   worker/               Hono entrypoint, routes, queue/scheduled handlers, DO
 packages/
-  domain/               conversation, assignment, AI, and authorization rules
-  db/                   Drizzle schema, migrations, database creation, SQL helpers
-  shared/               queue and HTTP contracts shared by web/worker
+  db/                   Drizzle schema, migrations, database creation, and domain operations
 ```
 
-There is no `ui` package in V1; one web application does not justify it. There are no per-domain packages or microservices. Within `packages/domain`, folders follow the glossary modules: `identity`, `members`, `channels/facebook`, `customers`, `conversations`, `assignments`, `ai`, and `knowledge`.
+There are no per-domain packages or microservices in V1. The Worker and
+`packages/db` contain the glossary modules and keep provider-specific code at
+the infrastructure boundary.
 
 ## 6. Module seams
 
@@ -157,9 +157,8 @@ interface LlmProvider {
 }
 ```
 
-T08 has one `AlibabaEmbeddingProvider` production adapter and test fakes only.
-T11 will add the Alibaba LLM adapter behind `LlmProvider`; T08 does not implement
-that integration.
+The current implementation has one `AlibabaEmbeddingProvider` and one
+`AlibabaLlmProvider` production adapter, with test fakes at the provider seams.
 
 ### 6.3 Channel module
 
@@ -812,8 +811,8 @@ Required non-secret configuration:
 - `EMBEDDING_PROVIDER=alibaba`
 - `EMBEDDING_MODEL=qwen3.7-text-embedding`
 - `EMBEDDING_DIMENSIONS=1536`
-- `LLM_PROVIDER=alibaba` (used by T11)
-- `LLM_MODEL=qwen3.8-flash` (used by T11)
+- `LLM_PROVIDER=alibaba`
+- `LLM_MODEL=qwen3.8-flash`
 - `AI_RETRIEVAL_MAX_DISTANCE=0.35`
 - `AI_DEBOUNCE_SECONDS=2`
 
@@ -824,7 +823,7 @@ Required secrets:
 - `META_VERIFY_TOKEN`
 - `TOKEN_ENCRYPTION_KEY`
 - `AI_API_KEY`
-- direct `DATABASE_URL` only in migration/CI environments
+- `DATABASE_URL` and `DATABASE_URL_UNPOOLED` only in migration/CI environments
 
 Required bindings:
 

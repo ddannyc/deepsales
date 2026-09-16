@@ -4,7 +4,7 @@
 
 **Facebook AI Shared Inbox**
 
-Current phase: **Lean V1 implementation handoff**
+Current phase: **Lean V1 implementation and release preparation**
 
 This repository should implement the frozen Lean V1 product scope. Product decisions are already made. Do not reopen product discovery unless a contradiction blocks implementation.
 
@@ -178,7 +178,7 @@ Choose the lowest ratio.
 
 Tie-break by least recently auto-assigned.
 
-## What Codex Must Not Do
+## Implementation guardrails
 
 Do not:
 

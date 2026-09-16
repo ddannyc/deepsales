@@ -155,28 +155,3 @@ Examples:
 - production webhook requirements conflict with chosen deployment model
 
 Then revisit the relevant technical decision deliberately.
-
-## Suggested matt-skills Flow
-
-Because M0 is a narrow technical uncertainty, do not run the full V1 through `/to-spec` first.
-
-Recommended:
-
-```text
-/setup-matt-pocock-skills
-
-/prototype
-```
-
-or a small directly-scoped implementation ticket.
-
-After M0 returns GO:
-
-```text
-/to-spec
-/to-tickets
-```
-
-for the full Lean V1, in the same context between `to-spec` and `to-tickets`.
-
-Then implement each ticket in a fresh session.

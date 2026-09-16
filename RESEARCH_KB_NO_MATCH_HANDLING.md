@@ -15,9 +15,9 @@
 
 ## 当前项目观察
 
-项目规格已经定义了两条重要边界：普通问候可以不依赖知识库回答；任何公司特定事实都必须由检索到的知识支撑。[V1_IMPLEMENTATION_SPEC.md:571](V1_IMPLEMENTATION_SPEC.md:571) [V1_IMPLEMENTATION_SPEC.md:576](V1_IMPLEMENTATION_SPEC.md:576)
+项目规格已经定义了两条重要边界：普通问候可以不依赖知识库回答；任何公司特定事实都必须由检索到的知识支撑。[V1_IMPLEMENTATION_SPEC.md](V1_IMPLEMENTATION_SPEC.md#108-ai-debounce-and-response)
 
-当前实现大致是：先做配置化转人工检查，再做向量检索，最多取 6 个满足距离阈值的 chunk，最后让模型返回 `ANSWER | HANDOFF`。模型返回 `HANDOFF` 时，`handoffOnNoKnowledge` 会决定是否真正转人工；知识事实未被有效 chunk 支撑时，`enforceGrounding` 也会转人工或返回事实性兜底。[apps/worker/src/index.ts:1974](apps/worker/src/index.ts:1974) [apps/worker/src/index.ts:2010](apps/worker/src/index.ts:2010) [apps/worker/src/ai.ts:423](apps/worker/src/ai.ts:423) [apps/worker/src/ai.ts:461](apps/worker/src/ai.ts:461)
+当前实现大致是：先做配置化转人工检查，再做向量检索，最多取 6 个满足距离阈值的 chunk，最后让模型返回 `ANSWER | HANDOFF`。模型返回 `HANDOFF` 时，`handoffOnNoKnowledge` 会决定是否真正转人工；知识事实未被有效 chunk 支撑时，`enforceGrounding` 也会转人工或返回事实性兜底。[Worker route](apps/worker/src/index.ts#L1974) [AI response flow](apps/worker/src/index.ts#L2010) [`enforceGrounding`](apps/worker/src/ai.ts#L423) [`applyHandoffPolicy`](apps/worker/src/ai.ts#L461)
 
 问题在于，当前提示词明确强调“公司事实必须由知识块支持”，但没有同样明确地告诉模型“闲聊和创作请求可以在没有知识块时正常回答”。于是“讲个笑话”可能经历以下路径：
 

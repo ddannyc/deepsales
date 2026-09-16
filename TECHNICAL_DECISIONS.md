@@ -40,10 +40,10 @@ TypeScript monorepo.
 ### AI
 Alibaba Cloud International Model Studio.
 
-- LLM: `qwen3.8-flash` when T11 is implemented.
-- Embedding: `qwen3.7-text-embedding`, 1,536 dimensions for T08.
+- LLM: `qwen3.8-flash` for the AI response path.
+- Embedding: `qwen3.7-text-embedding`, 1,536 dimensions for knowledge indexing.
 - Vector store: PostgreSQL + pgvector.
-- T08 uses native `fetch`; the provider boundary remains provider-neutral.
+- AI integrations use native `fetch`; the provider boundary remains provider-neutral.
 
 ### Testing
 - TypeScript compiler
@@ -117,7 +117,7 @@ Logical modules:
 
 Avoid microservices.
 
-A reasonable monorepo shape is:
+A current Lean V1 monorepo shape is:
 
 ```text
 apps/
@@ -125,13 +125,12 @@ apps/
   worker/
 
 packages/
-  domain/
   db/
-  shared/
-  ui/
 ```
 
-Exact folders may be refined by `/to-spec`, but module boundaries must follow the domain.
+The Worker and database package contain the domain modules; one web application
+does not justify separate shared or UI packages. Module boundaries must follow
+the domain.
 
 ## 7. Cloudflare Isolation
 
@@ -224,7 +223,7 @@ Complex OCR/layout parsing is deferred unless real documents prove it necessary.
 
 Domain code must not call a provider SDK directly.
 
-T08 uses this provider-neutral application seam:
+Knowledge indexing and AI responses use provider-neutral application seams:
 
 ```ts
 interface EmbeddingProvider {
@@ -232,10 +231,9 @@ interface EmbeddingProvider {
 }
 ```
 
-The production T08 adapter is `AlibabaEmbeddingProvider`, implemented with native
-`fetch` against the configured Alibaba Cloud International Model Studio
-compatible embeddings endpoint. T11 will add an `LlmProvider` for
-`qwen3.8-flash`; it is not implemented in T08.
+The production adapters are `AlibabaEmbeddingProvider` and `AlibabaLlmProvider`,
+implemented with native `fetch` against the configured Alibaba Cloud
+International Model Studio compatible endpoints.
 
 Every KnowledgeBase records the provider, model, and dimensions of its active
 vectors. Ingestion and retrieval reject a mismatch, so different vector spaces
@@ -244,9 +242,8 @@ the active chunks and reindexing the retained source documents.
 
 ## 13. Authentication
 
-Use a mature TypeScript-compatible authentication approach that works cleanly on Cloudflare and PostgreSQL.
-
-`/to-spec` should select the concrete library after checking current runtime compatibility.
+The current implementation uses Better Auth with PostgreSQL sessions and a
+Drizzle adapter; it works cleanly on Cloudflare and PostgreSQL.
 
 Do not build a custom password/security framework from scratch.
 

@@ -10,12 +10,12 @@ Verdict: **GO**
 | Link | Result |
 | --- | --- |
 | Meta verification GET -> deployed Hono Worker | Verified at 2026-09-13 16:36:01 Asia/Hong_Kong |
-| Real Messenger text -> signed webhook -> Page/PSID/message parsing | Verified at 2026-09-13 16:37:01 Asia/Hong_Kong; inbound ID `m_ESGmK…Do0Vmwg` |
-| Deployed Worker -> Graph Send API | `send_succeeded`; outbound ID `m__ND_lq…WWIIFWWA` |
+| Real Messenger text -> signed webhook -> Page/PSID/message parsing | Verified at 2026-09-13 16:37:01 Asia/Hong_Kong; provider identifiers omitted |
+| Deployed Worker -> Graph Send API | `send_succeeded`; provider identifiers omitted |
 | Wrangler local Worker runtime -> health / verification / signed POST | Verified: `200`, challenge echo, `200 EVENT_RECEIVED` |
-| Deployed Cloudflare Worker -> public health | Verified `200` on 2026-09-13 at the private deployment URL (redacted) |
+| Deployed Cloudflare Worker -> health endpoint | Verified `200` on 2026-09-13; deployment URL omitted |
 | Deployed webhook without verify-token secret | Verified fail-closed: `403 Forbidden` |
-| Fixed reply -> real Facebook user | Tester confirmed receipt of `M0 received your message.` |
+| Fixed reply -> real Facebook user | Tester confirmed receipt of the configured test reply |
 
 The frozen M0 success loop completed against the deployed Worker:
 
@@ -41,8 +41,8 @@ message text were not recorded.
 - `pages_messaging` is required. The person issuing the Page token must be able
   to perform the Page `MESSAGE` task.
 - `pages_manage_metadata` is required when subscribing the app to Page
-  webhooks through the API. `pages_show_list` is needed only if the future V1
-  connection flow lists Pages; M0 can select the Page in the App Dashboard.
+  webhooks through the API. `pages_show_list` is required by the V1 connection
+  flow's Page picker; M0 could select the Page in the App Dashboard.
 - While the app is in Development mode, use a Facebook account with an app
   role and access to the Page. Serving people without app roles requires Live
   mode plus the applicable Advanced Access/App Review approval.
@@ -66,7 +66,8 @@ The historical fixed-page M0 harness used `META_APP_SECRET`,
 V1 flow stores selected Page credentials encrypted in the database; see
 [`DEPLOYMENT.md`](DEPLOYMENT.md) for the current Worker secrets. `META_APP_ID`
 is setup metadata, not a credential. `META_GRAPH_API_VERSION` is pinned to
-`v26.0`; `M0_FIXED_REPLY` is non-secret Worker configuration.
+`v26.0`; the historical fixed-reply setting is not part of the current V1
+configuration.
 
 ## Cloudflare findings and limits
 

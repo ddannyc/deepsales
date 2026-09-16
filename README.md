@@ -1,11 +1,11 @@
 # DeepSales
 
-DeepSales is an early-stage shared inbox for Facebook conversations. It is a
+DeepSales is an early-stage shared inbox for Facebook Messenger. It is a
 React SPA and Hono Cloudflare Worker backed by PostgreSQL/pgvector, Cloudflare
-Queues, Durable Objects, R2, and an Alibaba-compatible AI provider.
+Queues, Durable Objects, R2, and Alibaba-compatible AI APIs.
 
-This repository is source code for self-hosted development. It is not a hosted
-service and does not currently promise production readiness. Each deployment
+This repository is for self-hosted development. It is not a hosted service and
+does not currently promise production readiness or support. Each deployment
 needs its own Cloudflare, Neon/PostgreSQL, Meta, and AI-provider accounts.
 
 ## Repository layout
@@ -14,11 +14,34 @@ needs its own Cloudflare, Neon/PostgreSQL, Meta, and AI-provider accounts.
 - `apps/worker` — Hono API, queues, webhooks, authentication, and realtime.
 - `packages/db` — PostgreSQL schema, migrations, and domain operations.
 - `e2e` — Playwright end-to-end tests.
-- `scripts` — local setup and migration helpers.
+- `scripts` — local setup, migration, and test helpers.
 
 `apps/worker/wrangler.jsonc` contains non-secret deployment identifiers and
 configuration. Keep API keys, access tokens, database URLs, and auth/encryption
 secrets in ignored environment files or Cloudflare Worker Secrets.
+
+## Documentation
+
+Start with:
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — development and pull request checks.
+- [`DEPLOYMENT.md`](DEPLOYMENT.md) — production provisioning and deployment.
+- [`SECURITY.md`](SECURITY.md) — vulnerability reporting and data-handling rules.
+
+Product and engineering:
+
+- [`LEAN_V1_PRD.md`](LEAN_V1_PRD.md) — frozen product requirements.
+- [`CONTEXT.md`](CONTEXT.md) — project vocabulary and routing policy.
+- [`ARCHITECTURE_INVARIANTS.md`](ARCHITECTURE_INVARIANTS.md) — non-negotiable correctness rules.
+- [`TECHNICAL_DECISIONS.md`](TECHNICAL_DECISIONS.md) — stack and design decisions.
+- [`V1_IMPLEMENTATION_SPEC.md`](V1_IMPLEMENTATION_SPEC.md) — implementation contract.
+- [`DATABASE_ER.md`](DATABASE_ER.md) — database relationships.
+
+Research and planning:
+
+- [`M0_FACEBOOK_SPIKE.md`](M0_FACEBOOK_SPIKE.md) and [`M0_FINDINGS.md`](M0_FINDINGS.md) — historical Messenger feasibility work.
+- [`RESEARCH_HONO_TESTING.md`](RESEARCH_HONO_TESTING.md), [`RESEARCH_STACK_BEST_PRACTICES.md`](RESEARCH_STACK_BEST_PRACTICES.md), and [`RESEARCH_KB_NO_MATCH_HANDLING.md`](RESEARCH_KB_NO_MATCH_HANDLING.md) — research notes.
+- [`V1_TICKETS.md`](V1_TICKETS.md) — implementation ticket drafts retained until a project tracker is connected.
 
 ## Local setup
 
@@ -26,92 +49,54 @@ secrets in ignored environment files or Cloudflare Worker Secrets.
 pnpm install --frozen-lockfile
 Copy-Item apps/worker/.dev.vars.example apps/worker/.dev.vars
 Copy-Item .env.example .env.local
+# Edit both copied files with local, non-production values.
+# Set this to the same local URL used by .env.local.
+$env:CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE = 'postgresql://user:password@localhost:5432/deepsales'
 pnpm db:migrate
-$env:CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE = $env:DATABASE_URL
 pnpm dev
 ```
 
-Open `http://127.0.0.1:8787/login`. The Worker never reads `DATABASE_URL`; Wrangler's
-local Hyperdrive override connects local development to PostgreSQL.
+Open `http://127.0.0.1:8787/login`. The Worker reads local secrets from
+`apps/worker/.dev.vars` and uses the Hyperdrive override above for PostgreSQL;
+`DATABASE_URL` is used by the migration and test tooling, not by the Worker
+request path.
 
 ## Checks
 
 ```powershell
-pnpm build
-pnpm typecheck
-pnpm lint
 pnpm format:check
+pnpm lint
+pnpm typecheck
 pnpm test
-Copy-Item .env.example .env.test # edit DATABASE_URL to deepsales_test
+pnpm audit
+pnpm build
+```
+
+Integration and E2E tests need a separate local test database. Its name must end
+in `_test` or `_e2e`; the E2E runner resets the database before migrating it.
+Do not run integration tests concurrently with E2E tests.
+
+```powershell
+Copy-Item .env.example .env.test
+# Edit .env.test and use a database such as deepsales_test.
 $env:APP_ENV = 'test'
 pnpm db:migrate
 pnpm test:integration
-pnpm test:e2e          # resets/migrates the test database and owns the Worker lifecycle
+pnpm exec playwright install chromium
+pnpm test:e2e
 ```
-
-Use the same `DATABASE_URL` name in each environment file. Put the development
-connection in ignored `.env.local`, and the test connection in ignored
-`.env.test` (or the developer-specific `.env.test.local`). The shared loader selects the test file for Vitest, E2E, and
-`APP_ENV=test pnpm db:migrate`.
-
-Integration tests require a local test database. E2E resets the same test
-database before migrating it, so do not run integration tests concurrently with
-E2E. The database name must end in `_test` or `_e2e`.
 
 If a development database, or an approved production maintenance window,
 contains vectors from an older embedding model, apply the migration, then run
-`psql $env:DATABASE_URL -f scripts/reindex-knowledge.sql`. It preserves inline
-source text and R2 keys, removes all active chunks, resets processable documents
-to `UPLOADED`, and lets the scheduled documents queue reindex them with Alibaba
-embeddings. While metadata is unset, retrieval rejects queries, so old and new
-vectors are never mixed. Do not run this SQL as an online production migration.
+`scripts/reindex-knowledge.sql`. Do not run that script as an online
+production migration; see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
-## Deploy
+## Deployment
 
-Create Hyperdrive with caching disabled because authentication, authorization, and
-read-after-write flows require fresh reads:
-
-```powershell
-pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DATABASE_URL --caching-disabled
-```
-
-Replace the placeholder Hyperdrive ID and `APP_URL` in `apps/worker/wrangler.jsonc`, set
-`BETTER_AUTH_SECRET`, `META_APP_SECRET`, `META_VERIFY_TOKEN`,
-`TOKEN_ENCRYPTION_KEY`, and `AI_API_KEY` with Wrangler. Set `AI_BASE_URL` to the
-Alibaba Cloud International Model Studio region/workspace-compatible base URL, then keep the
-Alibaba embedding and LLM variables from `wrangler.jsonc`:
-
-```powershell
-$env:APP_ENV = 'production'
-pnpm db:migrate
-pnpm run deploy
-```
-
-`.env.local` is only for development. Put the production Neon URLs in ignored `.env.production.local`: use `DATABASE_URL` for the
-pooled URL and `DATABASE_URL_UNPOOLED` for the direct migration URL. Run the production migration
-separately before deployment with the direct URL.
-
-For an online Neon migration, set `APP_ENV=production` and run `pnpm db:migrate`
-(`$env:APP_ENV = 'production'; pnpm db:migrate` in PowerShell). For a test migration, use
-`APP_ENV=test pnpm db:migrate` (`$env:APP_ENV = 'test'; pnpm db:migrate` in PowerShell).
-
-## Contributing and security
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development and pull request
-guidance. Report vulnerabilities privately according to [`SECURITY.md`](SECURITY.md).
-
-## Before the first public push
-
-- Confirm the MIT license copyright holder and third-party dependency licenses.
-- Review `pnpm licenses list --prod` and retain any notices required by runtime
-  dependencies.
-- Enable branch protection with required CI and CodeQL checks.
-- Enable Dependabot alerts, security updates, secret scanning, and private
-  vulnerability reporting in GitHub.
-- Review the complete Git history for credentials, customer data, deployment
-  URLs, and personal author metadata.
-- Run the checks in [`CONTRIBUTING.md`](CONTRIBUTING.md) and complete a real
-  deployment smoke test with non-test accounts and data.
+See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the complete provisioning and release
+runbook. `pnpm run deploy` builds and deploys the Web assets and Worker; it does
+not run database migrations. Production migrations must be run separately with
+the direct database URL.
 
 ## License
 

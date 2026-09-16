@@ -2,7 +2,8 @@
 
 Status: **Ready-to-publish drafts**  
 Source: `V1_IMPLEMENTATION_SPEC.md`  
-Publication: no Git remote or configured project issue tracker is present in this repository, so issue bodies are retained here without inventing a destination or labels.
+These ticket bodies stay in the repository until a project tracker is connected;
+replace `Txx` references with real issue IDs when publishing.
 
 ## Story map
 
@@ -85,7 +86,7 @@ The first authenticated user can create a workspace and becomes both its OWNER W
 
 - [ ] The workspace has repeatable install, build, typecheck, lint, unit, integration, and optional E2E commands.
 - [ ] A committed Drizzle migration enables pgvector and creates Better Auth, workspace, access, and Member foundations from the implementation spec.
-- [ ] The Worker connects through a cache-disabled Hyperdrive binding using Drizzle and `pg`; migration tooling uses only the direct `DATABASE_URL`.
+- [ ] The Worker connects through a cache-disabled Hyperdrive binding using Drizzle and `pg`; migration tooling uses only a direct database URL.
 - [ ] A user can sign up, sign in, sign out, and create a workspace from `/login`.
 - [ ] Workspace creation atomically creates OWNER access and its HUMAN Member; retrying the request cannot create duplicates.
 - [ ] Protected API routes and the application shell reject missing sessions and workspace access.
