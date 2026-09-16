@@ -7,6 +7,8 @@ export const FACEBOOK_PERMISSIONS = [
 ] as const
 export const TOKEN_KEY_VERSION = 'v1'
 export const FACEBOOK_ATTACHMENT_SOURCE_TTL_MS = 60 * 60 * 1_000
+export const MAX_FACEBOOK_WEBHOOK_EVENTS = 100
+const FACEBOOK_PROVIDER_TIMEOUT_MS = 15_000
 
 type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 type TokenKeyUsage = 'encrypt' | 'decrypt'
@@ -38,6 +40,12 @@ export class FacebookProviderError extends Error {
     readonly providerMessage: string,
   ) {
     super('Facebook provider request failed')
+  }
+}
+
+export class FacebookWebhookPayloadError extends Error {
+  constructor(readonly code: 'TOO_MANY_EVENTS') {
+    super(code)
   }
 }
 
@@ -211,6 +219,16 @@ export async function decryptFacebookToken(
   return new TextDecoder().decode(plaintext)
 }
 
+export function isValidTokenEncryptionKey(value: string | undefined) {
+  if (!value?.trim()) return false
+  try {
+    decodeKeyMaterial(value)
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function redactedFacebookFailure(
   error: unknown,
   secrets: string[] = [],
@@ -331,6 +349,10 @@ export function normalizeFacebookWebhook(payload: unknown, expectedPageId?: stri
       const messageText = typeof text === 'string' && text.length ? text : null
       if (!messageText && !attachments.length) continue
 
+      if (events.length >= MAX_FACEBOOK_WEBHOOK_EVENTS) {
+        throw new FacebookWebhookPayloadError('TOO_MANY_EVENTS')
+      }
+
       const providerSentAt = providerTimestamp(rawEvent.timestamp)
       events.push({
         pageId: rawEntry.id,
@@ -378,7 +400,10 @@ export async function encryptFacebookAttachmentSources(
 async function graphRequest(fetcher: Fetcher, url: URL, init: RequestInit): Promise<unknown> {
   let response: Response
   try {
-    response = await fetcher(url, init)
+    response = await fetcher(url, {
+      ...init,
+      signal: AbortSignal.timeout(FACEBOOK_PROVIDER_TIMEOUT_MS),
+    })
   } catch {
     throw new FacebookProviderError(0, null, null, null, 'Network request failed')
   }

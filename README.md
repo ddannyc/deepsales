@@ -1,8 +1,24 @@
 # DeepSales
 
-Lean V1 is a React SPA and Hono Cloudflare Worker backed by PostgreSQL. T03 adds
-workspace-scoped Facebook OAuth, Page selection, encrypted Page tokens, and
-connection health on top of the authenticated workspace shell.
+DeepSales is an early-stage shared inbox for Facebook conversations. It is a
+React SPA and Hono Cloudflare Worker backed by PostgreSQL/pgvector, Cloudflare
+Queues, Durable Objects, R2, and an Alibaba-compatible AI provider.
+
+This repository is source code for self-hosted development. It is not a hosted
+service and does not currently promise production readiness. Each deployment
+needs its own Cloudflare, Neon/PostgreSQL, Meta, and AI-provider accounts.
+
+## Repository layout
+
+- `apps/web` — React frontend.
+- `apps/worker` — Hono API, queues, webhooks, authentication, and realtime.
+- `packages/db` — PostgreSQL schema, migrations, and domain operations.
+- `e2e` — Playwright end-to-end tests.
+- `scripts` — local setup and migration helpers.
+
+`apps/worker/wrangler.jsonc` contains non-secret deployment identifiers and
+configuration. Keep API keys, access tokens, database URLs, and auth/encryption
+secrets in ignored environment files or Cloudflare Worker Secrets.
 
 ## Local setup
 
@@ -26,8 +42,10 @@ pnpm typecheck
 pnpm lint
 pnpm format:check
 pnpm test
-pnpm test:integration # uses the local deepsales_test database by default
 Copy-Item .env.example .env.test # edit DATABASE_URL to deepsales_test
+$env:APP_ENV = 'test'
+pnpm db:migrate
+pnpm test:integration
 pnpm test:e2e          # resets/migrates the test database and owns the Worker lifecycle
 ```
 
@@ -76,3 +94,25 @@ separately before deployment with the direct URL.
 For an online Neon migration, set `APP_ENV=production` and run `pnpm db:migrate`
 (`$env:APP_ENV = 'production'; pnpm db:migrate` in PowerShell). For a test migration, use
 `APP_ENV=test pnpm db:migrate` (`$env:APP_ENV = 'test'; pnpm db:migrate` in PowerShell).
+
+## Contributing and security
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development and pull request
+guidance. Report vulnerabilities privately according to [`SECURITY.md`](SECURITY.md).
+
+## Before the first public push
+
+- Confirm the MIT license copyright holder and third-party dependency licenses.
+- Review `pnpm licenses list --prod` and retain any notices required by runtime
+  dependencies.
+- Enable branch protection with required CI and CodeQL checks.
+- Enable Dependabot alerts, security updates, secret scanning, and private
+  vulnerability reporting in GitHub.
+- Review the complete Git history for credentials, customer data, deployment
+  URLs, and personal author metadata.
+- Run the checks in [`CONTRIBUTING.md`](CONTRIBUTING.md) and complete a real
+  deployment smoke test with non-test accounts and data.
+
+## License
+
+This project is licensed under the MIT License. See [`LICENSE`](LICENSE).

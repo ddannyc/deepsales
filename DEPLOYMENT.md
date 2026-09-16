@@ -58,7 +58,7 @@ $env:DATABASE_URL = 'postgresql://...'
 pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DATABASE_URL --caching-disabled
 ```
 
-将返回的 Hyperdrive ID 写入 [apps/worker/wrangler.jsonc](apps/worker/wrangler.jsonc) 的 `hyperdrive[0].id`。如果配置中的 ID 已属于当前 Cloudflare 账号，可直接复用。
+将返回的 Hyperdrive ID 写入 [apps/worker/wrangler.jsonc](apps/worker/wrangler.jsonc) 的 `hyperdrive[0].id`，替换其中的占位值。
 
 创建队列；已存在的队列跳过：
 
@@ -125,7 +125,7 @@ pnpm --filter @deepsales/worker exec wrangler secret put AI_API_KEY
 - `AI_API_KEY` 用于生成知识库 embeddings；不要写入 `wrangler.jsonc`。
 - `AI_BASE_URL` 使用 Alibaba Cloud International Model Studio 对应区域和 workspace 的兼容 API base URL；不要在代码中硬编码 endpoint。
 - `EMBEDDING_PROVIDER=alibaba`、`EMBEDDING_MODEL=qwen3.7-text-embedding`、`EMBEDDING_DIMENSIONS=1536`、`LLM_PROVIDER=alibaba`、`LLM_MODEL=qwen3.8-flash` 保持为 Worker variables；LLM 变量仅供 T11 使用。
-- `META_APP_ID` 和 `META_GRAPH_API_VERSION` 已在 `wrangler.jsonc` 的 `vars` 中配置；如使用其他 Meta App，请先修改它们。
+- `META_APP_ID` 和 `META_GRAPH_API_VERSION` 已在 `wrangler.jsonc` 的 `vars` 中提供占位配置；部署前必须替换为目标 Meta App 的值。
 - 生产环境不要配置测试用的 `FACEBOOK_GRAPH_BASE_URL`。
 
 设置完 Secret 后首次部署或重新部署：

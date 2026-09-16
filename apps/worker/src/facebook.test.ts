@@ -10,6 +10,7 @@ import {
   facebookOutboundJobSchema,
   isFacebookReplyWindowOpen,
   isRetryableFacebookFailure,
+  isValidTokenEncryptionKey,
   normalizeFacebookWebhook,
   redactedFacebookFailure,
 } from './facebook'
@@ -248,6 +249,12 @@ describe('Facebook adapter', () => {
     expect(first.ciphertext).not.toContain('page-secret')
     expect(first.iv).not.toBe(second.iv)
     await expect(decryptFacebookToken(first, encryptionKey)).resolves.toBe('page-secret')
+  })
+
+  it('validates the token encryption key before readiness', () => {
+    expect(isValidTokenEncryptionKey(encryptionKey)).toBe(true)
+    expect(isValidTokenEncryptionKey('not-a-32-byte-key')).toBe(false)
+    expect(isValidTokenEncryptionKey(undefined)).toBe(false)
   })
 
   it('keeps provider tokens in authorization headers and exposes page summaries only', async () => {

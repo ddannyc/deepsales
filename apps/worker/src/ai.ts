@@ -5,6 +5,7 @@ export const DEFAULT_EMBEDDING_MODEL = 'qwen3.7-text-embedding'
 export const EMBEDDING_DIMENSIONS = 1_536
 export const ALIBABA_LLM_PROVIDER = 'alibaba'
 export const DEFAULT_LLM_MODEL = 'qwen3.8-flash'
+const AI_PROVIDER_TIMEOUT_MS = 15_000
 const ALIBABA_MAX_BATCH_SIZE = 20
 export const MAX_AI_RESPONSE_TEXT_LENGTH = 2_000
 
@@ -287,6 +288,7 @@ export class AlibabaEmbeddingProvider implements EmbeddingProvider {
     try {
       response = await this.fetcher(`${this.baseUrl}/embeddings`, {
         method: 'POST',
+        signal: AbortSignal.timeout(AI_PROVIDER_TIMEOUT_MS),
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',
@@ -379,6 +381,7 @@ export class AlibabaLlmProvider implements LlmProvider {
     try {
       response = await this.fetcher(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
+        signal: AbortSignal.timeout(AI_PROVIDER_TIMEOUT_MS),
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
           'Content-Type': 'application/json',

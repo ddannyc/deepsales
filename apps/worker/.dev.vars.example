@@ -7,7 +7,7 @@ META_APP_ID=your-meta-app-id
 META_APP_SECRET=your-meta-app-secret
 META_VERIFY_TOKEN=choose-a-long-random-value
 # Generate a base64-encoded 32-byte AES key for Page-token encryption.
-TOKEN_ENCRYPTION_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+TOKEN_ENCRYPTION_KEY=replace-with-base64-32-byte-key
 
 # AI settings. Keep the API key as a local secret. Set the region/workspace URL.
 AI_BASE_URL=

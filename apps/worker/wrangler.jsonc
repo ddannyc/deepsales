@@ -24,7 +24,7 @@
 	"hyperdrive": [
 		{
 			"binding": "HYPERDRIVE",
-			"id": "REDACTED_HYPERDRIVE_ID"
+			"id": "replace-with-hyperdrive-id"
 		}
 	],
 	"queues": {
@@ -129,7 +129,7 @@
 	},
 	"vars": {
 		"APP_URL": "https://replace-with-production-url.example.com",
-		"META_APP_ID": "REDACTED_META_APP_ID",
+		"META_APP_ID": "replace-with-meta-app-id",
 		"META_GRAPH_API_VERSION": "v26.0",
 		"AI_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
 		"EMBEDDING_PROVIDER": "alibaba",

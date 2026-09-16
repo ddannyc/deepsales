@@ -2,6 +2,7 @@
   "name": "facebook-ai-shared-inbox",
   "private": true,
   "packageManager": "pnpm@10.30.0",
+  "license": "MIT",
   "scripts": {
     "build": "pnpm --filter @deepsales/web build && pnpm --filter @deepsales/worker build",
     "db:generate": "pnpm --filter @deepsales/db db:generate",

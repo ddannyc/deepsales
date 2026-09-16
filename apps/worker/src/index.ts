@@ -54,6 +54,7 @@ import {
   listKnowledgeDocuments,
   KnowledgeError,
   KnowledgeProcessingError,
+  MAX_INLINE_KNOWLEDGE_CODE_POINTS,
   normalizeKnowledgeText,
   listUnclaimedOutboundMessageIds,
   deleteMember,
@@ -88,6 +89,7 @@ import { createAuth } from './auth'
 import type { Bindings } from './bindings'
 import {
   FacebookProviderError,
+  FacebookWebhookPayloadError,
   facebookOutboundJobSchema,
   facebookAttachmentJobSchema,
   facebookWebhookJobSchema,
@@ -99,6 +101,7 @@ import {
   redactedFacebookFailure,
   encryptFacebookAttachmentSources,
   isHttpUrl,
+  isValidTokenEncryptionKey,
 } from './facebook'
 import {
   beginFacebookOAuth,
@@ -129,6 +132,7 @@ import {
   isLlmProviderConfigurationUsable,
 } from './ai'
 import { knowledgeDocumentJobSchema, retrieveKnowledgeChunks } from './knowledge'
+import { MAX_FACEBOOK_WEBHOOK_BODY_BYTES } from './limits'
 import { aiResponseJobSchema, maintenanceRoutingJobSchema } from './routing'
 import {
   extractKnowledgeText,
@@ -140,12 +144,51 @@ import {
 } from './knowledge-files'
 
 const app = new Hono<{ Bindings: Bindings }>()
+const MAX_KNOWLEDGE_UPLOAD_BODY_BYTES = MAX_KNOWLEDGE_FILE_BYTES + 64 * 1024
+const MAX_INLINE_KNOWLEDGE_BODY_BYTES = 8 * 1024 * 1024
+const ATTACHMENT_SOURCE_TIMEOUT_MS = 30_000
+const safeRequestMethods = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+app.use('*', async (c, next) => {
+  await next()
+  c.header('X-Content-Type-Options', 'nosniff')
+  c.header('X-Frame-Options', 'DENY')
+  c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
+  c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  if (c.env.APP_URL?.startsWith('https://')) {
+    c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  }
+})
+
+app.use('/api/*', async (c, next) => {
+  if (safeRequestMethods.has(c.req.method)) return next()
+
+  const origin = c.req.header('origin')
+  if (!origin || !c.env.APP_URL) return next()
+
+  try {
+    if (new URL(origin).origin !== new URL(c.env.APP_URL).origin) {
+      return c.json(
+        { error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin is not allowed' } },
+        403,
+      )
+    }
+  } catch {
+    return c.json(
+      { error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin is not allowed' } },
+      403,
+    )
+  }
+
+  return next()
+})
 
 const workspaceInput = z.object({ name: z.string().trim().min(1).max(100) })
 const invitationInput = z.object({
   email: z
     .string()
     .trim()
+    .max(320)
     .email()
     .transform((email) => email.toLowerCase()),
   role: z.enum(['ADMIN', 'AGENT']),
@@ -203,7 +246,12 @@ const transferInput = z
   .strict()
 const knowledgeBaseInput = z.object({ name: z.string().trim().min(1).max(100) }).strict()
 const knowledgeTextInput = z
-  .object({ name: z.string().trim().min(1).max(100), text: z.string() })
+  .object({
+    name: z.string().trim().min(1).max(100),
+    text: z
+      .string()
+      .refine((value) => Array.from(value).length <= MAX_INLINE_KNOWLEDGE_CODE_POINTS),
+  })
   .strict()
 const aiMemberConfigInput = z
   .object({
@@ -480,6 +528,8 @@ app.post('/api/workspaces', async (c) => {
     const auth = createAuth(db, c.env)
     const session = await auth.api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `workspace-create:${session.user.id}`)
+    if (limited) return limited
 
     const input = workspaceInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success) {
@@ -668,7 +718,20 @@ app.post(
       if (!session) return unauthorized(c)
       const limited = await rateLimit(c, `knowledge-document:${session.user.id}`)
       if (limited) return limited
-      const input = knowledgeTextInput.safeParse(await c.req.json().catch(() => null))
+      const body = await readLimitedRequestBody(c.req.raw, MAX_INLINE_KNOWLEDGE_BODY_BYTES)
+      if (!body) {
+        return c.json(
+          { error: { code: 'TOO_LARGE', message: 'Document request is too large' } },
+          413,
+        )
+      }
+      let parsedBody: unknown = null
+      try {
+        parsedBody = JSON.parse(new TextDecoder().decode(body))
+      } catch {
+        parsedBody = null
+      }
+      const input = knowledgeTextInput.safeParse(parsedBody)
       if (!input.success) {
         return c.json({ error: { code: 'INVALID_REQUEST', message: 'Enter document text' } }, 400)
       }
@@ -715,7 +778,14 @@ app.post(
           knowledgeBaseId: c.req.param('knowledgeBaseId'),
           userId: session.user.id,
         })
-        const form = await c.req.raw.formData().catch(() => null)
+        const uploadBody = await readLimitedRequestBody(c.req.raw, MAX_KNOWLEDGE_UPLOAD_BODY_BYTES)
+        if (!uploadBody) {
+          return c.json(
+            { error: { code: 'TOO_LARGE', message: 'Upload request is too large' } },
+            413,
+          )
+        }
+        const form = await new Request(c.req.raw, { body: uploadBody }).formData().catch(() => null)
         const fileInput = z.object({ file: z.instanceof(File) }).safeParse({
           file: form?.get('file'),
         })
@@ -1147,6 +1217,8 @@ app.post('/api/workspaces/:workspaceId/invitations', async (c) => {
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `workspace-invitation:${session.user.id}`)
+    if (limited) return limited
 
     const input = invitationInput.safeParse(await c.req.json().catch(() => null))
     if (!input.success) {
@@ -1188,7 +1260,7 @@ app.post('/api/invitations/accept', async (c) => {
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
-    const limited = await rateLimit(c, `ai-trigger:${session.user.id}`)
+    const limited = await rateLimit(c, `invitation-accept:${session.user.id}`)
     if (limited) return limited
 
     const input = invitationAcceptInput.safeParse(await c.req.json().catch(() => null))
@@ -1335,18 +1407,20 @@ app.delete('/api/workspaces/:workspaceId/members/:memberId', async (c) => {
 function hasApplicationBindings(env: Bindings): boolean {
   return Boolean(
     hasAuthBindings(env) &&
-      env.META_APP_ID &&
-      env.META_APP_SECRET &&
-      env.META_VERIFY_TOKEN &&
-      env.META_GRAPH_API_VERSION &&
-      env.TOKEN_ENCRYPTION_KEY &&
-      env.AI_API_KEY &&
-      env.AI_BASE_URL &&
+      isConfigured(env.META_APP_ID) &&
+      isConfigured(env.META_APP_SECRET) &&
+      isConfigured(env.META_VERIFY_TOKEN) &&
+      isConfigured(env.META_GRAPH_API_VERSION) &&
+      isValidTokenEncryptionKey(env.TOKEN_ENCRYPTION_KEY) &&
+      isConfigured(env.AI_API_KEY) &&
+      isConfigured(env.AI_BASE_URL) &&
       env.EMBEDDING_PROVIDER === ALIBABA_EMBEDDING_PROVIDER &&
+      isConfigured(env.EMBEDDING_MODEL) &&
       env.EMBEDDING_MODEL === DEFAULT_EMBEDDING_MODEL &&
+      isConfigured(env.EMBEDDING_DIMENSIONS) &&
       env.EMBEDDING_DIMENSIONS === String(EMBEDDING_DIMENSIONS) &&
       env.LLM_PROVIDER === ALIBABA_LLM_PROVIDER &&
-      Boolean(env.LLM_MODEL?.trim()) &&
+      isConfigured(env.LLM_MODEL) &&
       env.AI_DEBOUNCE_SECONDS === '2' &&
       env.WEBHOOKS_QUEUE &&
       env.OUTBOUND_QUEUE &&
@@ -1362,21 +1436,35 @@ function hasApplicationBindings(env: Bindings): boolean {
 function hasFacebookBindings(env: Bindings): boolean {
   return Boolean(
     hasAuthBindings(env) &&
-      env.APP_URL &&
-      env.META_APP_ID &&
-      env.META_APP_SECRET &&
-      env.META_GRAPH_API_VERSION &&
-      env.TOKEN_ENCRYPTION_KEY,
+      isConfigured(env.META_APP_ID) &&
+      isConfigured(env.META_APP_SECRET) &&
+      isConfigured(env.META_GRAPH_API_VERSION) &&
+      isValidTokenEncryptionKey(env.TOKEN_ENCRYPTION_KEY),
   )
 }
 
 function hasAuthBindings(env: Bindings): boolean {
   return Boolean(
-    env.APP_URL &&
+    isUsableAppUrl(env.APP_URL) &&
       env.AUTH_RATE_LIMITER &&
-      env.BETTER_AUTH_SECRET &&
+      isConfigured(env.BETTER_AUTH_SECRET) &&
       env.HYPERDRIVE?.connectionString,
   )
+}
+
+function isConfigured(value: string | undefined) {
+  const normalized = value?.trim() ?? ''
+  return Boolean(normalized) && !/(replace-with|your-|choose-a-)/i.test(normalized)
+}
+
+function isUsableAppUrl(value: string | undefined) {
+  if (!isConfigured(value)) return false
+  try {
+    const url = new URL(value as string)
+    return url.protocol === 'https:' || url.hostname === 'localhost' || url.hostname === '127.0.0.1'
+  } catch {
+    return false
+  }
 }
 
 async function withDatabase<T>(env: Bindings, work: (db: Database) => T | Promise<T>): Promise<T> {
@@ -1664,7 +1752,8 @@ app.get('/webhooks/facebook', (c) => {
 })
 
 app.post('/webhooks/facebook', async (c) => {
-  const body = await c.req.arrayBuffer()
+  const body = await readLimitedRequestBody(c.req.raw, MAX_FACEBOOK_WEBHOOK_BODY_BYTES)
+  if (!body) return c.text('Payload Too Large', 413)
   if (
     !(await hasValidSignature(body, c.req.header('x-hub-signature-256'), c.env.META_APP_SECRET))
   ) {
@@ -1679,7 +1768,13 @@ app.post('/webhooks/facebook', async (c) => {
     return c.text('Bad Request', 400)
   }
 
-  const events = normalizeFacebookWebhook(payload)
+  let events: ReturnType<typeof normalizeFacebookWebhook>
+  try {
+    events = normalizeFacebookWebhook(payload)
+  } catch (error) {
+    if (error instanceof FacebookWebhookPayloadError) return c.text('Payload Too Large', 413)
+    throw error
+  }
   if (!events.length) return c.text('EVENT_RECEIVED')
 
   const queue = c.env.WEBHOOKS_QUEUE ? createJobQueue(c.env.WEBHOOKS_QUEUE) : undefined
@@ -1756,6 +1851,38 @@ async function hasValidSignature(
   if (!bytes) return false
   const signature = Uint8Array.from(bytes, (byte) => Number.parseInt(byte, 16))
   return crypto.subtle.verify('HMAC', key, signature, body)
+}
+
+async function readLimitedRequestBody(request: Request, maxBytes: number) {
+  const contentLength = Number(request.headers.get('content-length'))
+  if (Number.isFinite(contentLength) && contentLength > maxBytes) return null
+  if (!request.body) return new ArrayBuffer(0)
+
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let byteLength = 0
+  try {
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      byteLength += result.value.byteLength
+      if (byteLength > maxBytes) {
+        await reader.cancel().catch(() => {})
+        return null
+      }
+      chunks.push(result.value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+
+  const body = new Uint8Array(byteLength)
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return body.buffer
 }
 
 async function sha256Hex(body: ArrayBuffer) {
@@ -2399,7 +2526,9 @@ export async function handleDocumentsBatch(batch: MessageBatch<unknown>, env: Bi
 
       let response: Response
       try {
-        response = await fetch(sourceUrl)
+        response = await fetch(sourceUrl, {
+          signal: AbortSignal.timeout(ATTACHMENT_SOURCE_TIMEOUT_MS),
+        })
       } catch {
         throw new AttachmentRetryError('SOURCE_FETCH_FAILED')
       }

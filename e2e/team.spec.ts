@@ -4,8 +4,8 @@ test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales de
 
 test('owner creates an AI member, edits it, and invites a teammate', async ({ browser, page }) => {
   const suffix = Date.now()
-  const ownerEmail = `owner-${suffix}@example.com`
-  const invitedEmail = `agent-${suffix}@example.com`
+  const ownerEmail = `team-owner-${suffix}@example.com`
+  const invitedEmail = `team-agent-${suffix}@example.com`
   const password = 'correct-horse-battery-staple'
 
   await page.goto('/login')

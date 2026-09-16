@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Bindings } from './bindings'
 import { app } from './index'
+import { MAX_FACEBOOK_WEBHOOK_EVENTS } from './facebook'
+import { MAX_FACEBOOK_WEBHOOK_BODY_BYTES } from './limits'
 
 const bindings = {
   META_APP_ID: 'test-app-id',
@@ -52,6 +54,42 @@ describe('Facebook webhook', () => {
     vi.stubGlobal('fetch', send)
     const response = await deliver('{}', `sha256=${'0'.repeat(64)}`)
     expect(response.status).toBe(401)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('rejects an oversized body before signature verification', async () => {
+    const send = vi.fn()
+    const body = JSON.stringify({ payload: 'x'.repeat(MAX_FACEBOOK_WEBHOOK_BODY_BYTES) })
+    const response = await deliver(body, `sha256=${'0'.repeat(64)}`, {
+      ...bindings,
+      WEBHOOKS_QUEUE: { send } as unknown as Queue,
+    })
+
+    expect(response.status).toBe(413)
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('rejects an oversized event batch without partially publishing jobs', async () => {
+    const body = JSON.stringify({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: Array.from({ length: MAX_FACEBOOK_WEBHOOK_EVENTS + 1 }, (_, index) => ({
+            sender: { id: `customer-${index}` },
+            message: { mid: `mid-${index}`, text: 'hello' },
+          })),
+        },
+      ],
+    })
+    const signature = await sign(body, bindings.META_APP_SECRET)
+    const send = vi.fn()
+    const response = await deliver(body, signature, {
+      ...bindings,
+      WEBHOOKS_QUEUE: { send } as unknown as Queue,
+    })
+
+    expect(response.status).toBe(413)
     expect(send).not.toHaveBeenCalled()
   })
 
@@ -174,6 +212,43 @@ describe('application readiness', () => {
     expect(await response.json()).toEqual({ ok: true })
   })
 
+  it('adds baseline security headers and enables HSTS for HTTPS deployments', async () => {
+    const response = await app.request('/health', undefined, {
+      ...bindings,
+      APP_URL: 'https://app.example.com',
+    })
+
+    expect(response.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(response.headers.get('x-frame-options')).toBe('DENY')
+    expect(response.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin')
+    expect(response.headers.get('permissions-policy')).toBe(
+      'camera=(), microphone=(), geolocation=()',
+    )
+    expect(response.headers.get('strict-transport-security')).toBe(
+      'max-age=31536000; includeSubDomains',
+    )
+  })
+
+  it('rejects cross-origin cookie-authenticated mutations before opening the database', async () => {
+    const response = await app.request(
+      '/api/workspaces',
+      {
+        method: 'POST',
+        headers: {
+          Origin: 'https://attacker.example.com',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name: 'attacker workspace' }),
+      },
+      applicationBindings,
+    )
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toEqual({
+      error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin is not allowed' },
+    })
+  })
+
   it('reports a missing database binding without exposing configuration', async () => {
     const response = await app.request('/ready', undefined, bindings)
 
@@ -193,6 +268,26 @@ describe('application readiness', () => {
 
     expect(failedDatabase.status).toBe(503)
     expect(missingWebhookSecret.status).toBe(503)
+  })
+
+  it('fails closed when the deployment URL is still a placeholder', async () => {
+    const limit = vi.fn()
+    const response = await app.request(
+      '/api/auth/sign-in/email',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'owner@example.com', password: 'password' }),
+      },
+      {
+        ...applicationBindings,
+        APP_URL: 'https://replace-with-production-url.example.com',
+        AUTH_RATE_LIMITER: { limit } as unknown as RateLimit,
+      },
+    )
+
+    expect(response.status).toBe(503)
+    expect(limit).not.toHaveBeenCalled()
   })
 
   it('rate limits credential attempts before opening a database connection', async () => {

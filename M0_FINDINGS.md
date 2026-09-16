@@ -13,7 +13,7 @@ Verdict: **GO**
 | Real Messenger text -> signed webhook -> Page/PSID/message parsing | Verified at 2026-09-13 16:37:01 Asia/Hong_Kong; inbound ID `m_ESGmK…Do0Vmwg` |
 | Deployed Worker -> Graph Send API | `send_succeeded`; outbound ID `m__ND_lq…WWIIFWWA` |
 | Wrangler local Worker runtime -> health / verification / signed POST | Verified: `200`, challenge echo, `200 EVENT_RECEIVED` |
-| Deployed Cloudflare Worker -> public health | Verified `200` on 2026-09-13 at `https://redacted.invalid/health` |
+| Deployed Cloudflare Worker -> public health | Verified `200` on 2026-09-13 at the private deployment URL (redacted) |
 | Deployed webhook without verify-token secret | Verified fail-closed: `403 Forbidden` |
 | Fixed reply -> real Facebook user | Tester confirmed receipt of `M0 received your message.` |
 
@@ -61,9 +61,11 @@ retry, wait for the 24-hour window to expire, or test a public user without an
 app role. These are explicitly still unverified; none blocks the narrow M0
 feasibility result.
 
-Required deployed secrets: `META_APP_SECRET`, `META_VERIFY_TOKEN`,
-`META_PAGE_ID`, and `META_PAGE_ACCESS_TOKEN`. `META_APP_ID` is setup metadata,
-not needed by the request handler. `META_GRAPH_API_VERSION` is pinned to
+The historical fixed-page M0 harness used `META_APP_SECRET`,
+`META_VERIFY_TOKEN`, `META_PAGE_ID`, and `META_PAGE_ACCESS_TOKEN`. The current
+V1 flow stores selected Page credentials encrypted in the database; see
+[`DEPLOYMENT.md`](DEPLOYMENT.md) for the current Worker secrets. `META_APP_ID`
+is setup metadata, not a credential. `META_GRAPH_API_VERSION` is pinned to
 `v26.0`; `M0_FIXED_REPLY` is non-secret Worker configuration.
 
 ## Cloudflare findings and limits
@@ -94,8 +96,8 @@ deployment supports the frozen Messenger/Cloudflare direction, and the known
 M0 shortcuts already have V1 decisions: Cloudflare Queues for durable outbound
 work and PostgreSQL uniqueness for durable webhook idempotency.
 
-M0 is `GO`. Per the requested gate, stop here and wait for explicit confirmation
-before starting `/to-spec`, `/to-tickets`, or full V1 implementation.
+M0 is `GO`. This document records the historical feasibility gate; current
+development has continued beyond M0.
 
 ## Primary references
 

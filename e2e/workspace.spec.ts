@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test'
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
 
 test('user can sign up, create a workspace, sign out, and sign back in', async ({ page }) => {
-  const email = `owner-${Date.now()}@example.com`
+  const email = `workspace-owner-${Date.now()}@example.com`
   const password = 'correct-horse-battery-staple'
 
   expect((await page.request.get('/ready')).status()).toBe(200)

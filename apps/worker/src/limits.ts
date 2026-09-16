@@ -1,0 +1,1 @@
+export const MAX_FACEBOOK_WEBHOOK_BODY_BYTES = 1 * 1024 * 1024

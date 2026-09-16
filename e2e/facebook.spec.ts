@@ -9,7 +9,7 @@ test('owner can open Facebook settings', async ({ page }) => {
   await page.goto('/login')
   await page.getByRole('button', { name: '创建账户视图', exact: true }).click()
   await page.getByLabel('姓名').fill('Ada Lovelace')
-  await page.getByLabel('工作邮箱').fill(`owner-${suffix}@example.com`)
+  await page.getByLabel('工作邮箱').fill(`facebook-owner-${suffix}@example.com`)
   await page.getByLabel('密码').fill(password)
   await page.getByRole('button', { name: '创建账户', exact: true }).click()
   await page.getByLabel('工作区名称').fill('Facebook acceptance')
