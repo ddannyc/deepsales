@@ -154,34 +154,60 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     await expect(messageList).toHaveAttribute('data-poll-check', 'stable')
     expect(await messageViewport.evaluate((element) => element.scrollTop)).toBe(scrollTop)
 
+    const sendInboundMessage = async (text: string, messageId: string) => {
+      const inboundBody = JSON.stringify({
+        object: 'page',
+        entry: [
+          {
+            id: pageId,
+            messaging: [
+              {
+                timestamp: Date.now(),
+                sender: { id: 'e2e-customer-1' },
+                recipient: { id: pageId },
+                message: { mid: messageId, text },
+              },
+            ],
+          },
+        ],
+      })
+      const inboundResponse = await page.request.post('/webhooks/facebook', {
+        headers: { 'x-hub-signature-256': `sha256=${sign(inboundBody, 'e2e-meta-app-secret')}` },
+        data: inboundBody,
+      })
+      expect(inboundResponse.status()).toBe(200)
+    }
+
     const nextText = 'new Messenger message'
-    const nextBody = JSON.stringify({
-      object: 'page',
-      entry: [
-        {
-          id: pageId,
-          messaging: [
-            {
-              timestamp: Date.now(),
-              sender: { id: 'e2e-customer-1' },
-              recipient: { id: pageId },
-              message: { mid: `e2e-mid-next-${suffix}`, text: nextText },
-            },
-          ],
-        },
-      ],
-    })
-    const nextResponse = await page.request.post('/webhooks/facebook', {
-      headers: { 'x-hub-signature-256': `sha256=${sign(nextBody, 'e2e-meta-app-secret')}` },
-      data: nextBody,
-    })
-    expect(nextResponse.status()).toBe(200)
+    await sendInboundMessage(nextText, `e2e-mid-next-${suffix}`)
     await expect(page.locator('.message-bubble').nth(1)).toContainText(nextText, {
       timeout: 10_000,
     })
     await expect(messageList).toHaveAttribute('data-poll-check', 'stable')
     await expect(firstMessage).toHaveAttribute('data-poll-check', 'stable')
     expect(await messageViewport.evaluate((element) => element.scrollTop)).toBe(scrollTop)
+
+    await messageViewport.evaluate((element) => {
+      element.scrollTop = element.scrollHeight
+    })
+    expect(
+      await messageViewport.evaluate(
+        (element) => element.scrollHeight - element.clientHeight - element.scrollTop,
+      ),
+    ).toBeLessThanOrEqual(1)
+
+    const bottomText = 'message while at bottom'
+    await sendInboundMessage(bottomText, `e2e-mid-bottom-${suffix}`)
+    await expect(page.locator('.message-bubble').filter({ hasText: bottomText })).toBeVisible({
+      timeout: 10_000,
+    })
+    await expect
+      .poll(() =>
+        messageViewport.evaluate(
+          (element) => element.scrollHeight - element.clientHeight - element.scrollTop,
+        ),
+      )
+      .toBeLessThanOrEqual(1)
 
     await page.goto('/login')
     await expect(page).toHaveURL(/\/inbox$/)

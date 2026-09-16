@@ -31,6 +31,7 @@ import {
   StrictMode,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react'
@@ -953,6 +954,8 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [clock, setClock] = useState(() => Date.now())
   const selectedIdRef = useRef<string | null>(null)
   const messagesRef = useRef<InboxMessage[]>([])
+  const messageListRef = useRef<HTMLDivElement>(null)
+  const shouldScrollToBottomRef = useRef(false)
   const selectedConversation = conversations.find(({ id }) => id === selectedId)
   const transferTargets =
     selectedConversation?.assigneeType === 'HUMAN'
@@ -977,6 +980,35 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   useEffect(() => {
     messagesRef.current = messages
   }, [messages])
+
+  useLayoutEffect(() => {
+    if (!shouldScrollToBottomRef.current || threadLoading || !messages.length) return
+    const viewport = messageListRef.current?.closest('[data-slot="scroll-area-viewport"]')
+    if (!(viewport instanceof HTMLElement)) return
+    shouldScrollToBottomRef.current = false
+    viewport.scrollTop = viewport.scrollHeight
+  }, [messages.length, threadLoading])
+
+  const updateMessages = useCallback((incoming: InboxMessage[], followNewMessages = true) => {
+    const current = messagesRef.current
+    const next = mergeInboxMessages(current, incoming)
+    if (next === current) return
+
+    const currentIds = new Set(current.map(({ id }) => id))
+    const hasNewMessage = incoming.some(({ id }) => !currentIds.has(id))
+    const viewport = messageListRef.current?.closest('[data-slot="scroll-area-viewport"]')
+    if (
+      followNewMessages &&
+      hasNewMessage &&
+      viewport instanceof HTMLElement &&
+      viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= 80
+    ) {
+      shouldScrollToBottomRef.current = true
+    }
+
+    messagesRef.current = next
+    setMessages(next)
+  }, [])
 
   const refresh = useCallback(async () => {
     const response = await fetch(
@@ -1014,13 +1046,13 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
         if (!response.ok) throw await responseError(response)
         const data = (await response.json()) as { messages: InboxMessage[] }
         if (selectedIdRef.current === conversationId) {
-          setMessages((current) => mergeInboxMessages(current, data.messages))
+          updateMessages(data.messages, !showLoading)
         }
       } finally {
         if (showLoading && selectedIdRef.current === conversationId) setThreadLoading(false)
       }
     },
-    [workspace.id],
+    [updateMessages, workspace.id],
   )
 
   useEffect(() => {
@@ -1122,9 +1154,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
         `/api/workspaces/${workspace.id}/conversations/${selectedId}/replies`,
         { text: reply },
       )) as { message: InboxMessage }
-      setMessages((current) =>
-        current.some(({ id }) => id === result.message.id) ? current : [...current, result.message],
-      )
+      updateMessages([result.message])
       setReply('')
       await refresh()
       await refreshThread(selectedId)
@@ -1162,11 +1192,13 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     setTransferTargetId('')
     setTransferConfirmationOpen(false)
     if (!selectedId) {
+      shouldScrollToBottomRef.current = false
       messagesRef.current = []
       setMessages([])
       setThreadLoading(false)
       return
     }
+    shouldScrollToBottomRef.current = false
     messagesRef.current = []
     setMessages([])
     void refreshThread(selectedId, true).catch((cause) => setError(inboxErrorMessage(cause)))
@@ -1377,7 +1409,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
               {threadLoading ? (
                 <MessageThreadSkeleton />
               ) : (
-                <div className="message-list" aria-live="polite">
+                <div ref={messageListRef} className="message-list" aria-live="polite">
                   {messages.length ? (
                     messages.map((message) => (
                       <MessageBubble
