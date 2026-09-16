@@ -10,16 +10,16 @@ This specification translates the frozen product and architecture decisions into
 
 Authority, in descending order:
 
-1. `LEAN_V1_PRD.md`
-2. `ARCHITECTURE_INVARIANTS.md`
-3. `TECHNICAL_DECISIONS.md`
-4. `M0_FACEBOOK_SPIKE.md`
-5. `M0_FINDINGS.md`
+1. `../product/LEAN_V1_PRD.md`
+2. `../architecture/ARCHITECTURE_INVARIANTS.md`
+3. `../architecture/TECHNICAL_DECISIONS.md`
+4. `../research/M0_FACEBOOK_SPIKE.md`
+5. `../research/M0_FINDINGS.md`
 6. this specification
 
 If this document appears to conflict with a higher-authority document, the higher-authority document wins and implementation stops until the conflict is resolved explicitly.
 
-V1 delivers only the frozen Messenger shared-inbox loop. Every item listed as V1.1 in `CONTEXT.md` remains out of scope.
+V1 delivers only the frozen Messenger shared-inbox loop. Every item listed as V1.1 in `../architecture/CONTEXT.md` remains out of scope.
 
 ## 2. Release outcome
 
@@ -176,7 +176,7 @@ The Facebook adapter owns:
 
 ### 6.4 Infrastructure seams
 
-Use only the three thin interfaces already required by `TECHNICAL_DECISIONS.md`:
+Use only the three thin interfaces already required by `../architecture/TECHNICAL_DECISIONS.md`:
 
 - `JobQueue`
 - `RealtimePublisher`

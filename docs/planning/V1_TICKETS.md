@@ -1,7 +1,7 @@
 # Lean V1 implementation tickets
 
 Status: **Ready-to-publish drafts**  
-Source: `V1_IMPLEMENTATION_SPEC.md`  
+Source: `../implementation/V1_IMPLEMENTATION_SPEC.md`
 These ticket bodies stay in the repository until a project tracker is connected;
 replace `Txx` references with real issue IDs when publishing.
 

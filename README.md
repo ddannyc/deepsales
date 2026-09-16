@@ -22,26 +22,27 @@ secrets in ignored environment files or Cloudflare Worker Secrets.
 
 ## Documentation
 
-Start with:
+The full documentation index is in [`docs/README.md`](docs/README.md).
+
+Repository guides:
 
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development and pull request checks.
-- [`DEPLOYMENT.md`](DEPLOYMENT.md) — production provisioning and deployment.
 - [`SECURITY.md`](SECURITY.md) — vulnerability reporting and data-handling rules.
+- [`docs/operations/DEPLOYMENT.md`](docs/operations/DEPLOYMENT.md) — production provisioning and deployment.
 
-Product and engineering:
+Product and architecture:
 
-- [`LEAN_V1_PRD.md`](LEAN_V1_PRD.md) — frozen product requirements.
-- [`CONTEXT.md`](CONTEXT.md) — project vocabulary and routing policy.
-- [`ARCHITECTURE_INVARIANTS.md`](ARCHITECTURE_INVARIANTS.md) — non-negotiable correctness rules.
-- [`TECHNICAL_DECISIONS.md`](TECHNICAL_DECISIONS.md) — stack and design decisions.
-- [`V1_IMPLEMENTATION_SPEC.md`](V1_IMPLEMENTATION_SPEC.md) — implementation contract.
-- [`DATABASE_ER.md`](DATABASE_ER.md) — database relationships.
+- [`docs/product/LEAN_V1_PRD.md`](docs/product/LEAN_V1_PRD.md) — frozen product requirements.
+- [`docs/architecture/CONTEXT.md`](docs/architecture/CONTEXT.md) — project vocabulary and routing policy.
+- [`docs/architecture/ARCHITECTURE_INVARIANTS.md`](docs/architecture/ARCHITECTURE_INVARIANTS.md) — non-negotiable correctness rules.
+- [`docs/architecture/TECHNICAL_DECISIONS.md`](docs/architecture/TECHNICAL_DECISIONS.md) — stack and design decisions.
+- [`docs/architecture/DATABASE_ER.md`](docs/architecture/DATABASE_ER.md) — database relationships.
+- [`docs/implementation/V1_IMPLEMENTATION_SPEC.md`](docs/implementation/V1_IMPLEMENTATION_SPEC.md) — implementation contract.
 
-Research and planning:
+Research and planning are grouped under [`docs/`](docs/):
 
-- [`M0_FACEBOOK_SPIKE.md`](M0_FACEBOOK_SPIKE.md) and [`M0_FINDINGS.md`](M0_FINDINGS.md) — historical Messenger feasibility work.
-- [`RESEARCH_HONO_TESTING.md`](RESEARCH_HONO_TESTING.md), [`RESEARCH_STACK_BEST_PRACTICES.md`](RESEARCH_STACK_BEST_PRACTICES.md), and [`RESEARCH_KB_NO_MATCH_HANDLING.md`](RESEARCH_KB_NO_MATCH_HANDLING.md) — research notes.
-- [`V1_TICKETS.md`](V1_TICKETS.md) — implementation ticket drafts retained until a project tracker is connected.
+- `docs/research/` — Messenger feasibility and technical research notes.
+- `docs/planning/` — implementation ticket drafts retained until a project tracker is connected.
 
 ## Local setup
 
@@ -89,11 +90,11 @@ pnpm test:e2e
 If a development database, or an approved production maintenance window,
 contains vectors from an older embedding model, apply the migration, then run
 `scripts/reindex-knowledge.sql`. Do not run that script as an online
-production migration; see [`DEPLOYMENT.md`](DEPLOYMENT.md).
+production migration; see [`docs/operations/DEPLOYMENT.md`](docs/operations/DEPLOYMENT.md).
 
 ## Deployment
 
-See [`DEPLOYMENT.md`](DEPLOYMENT.md) for the complete provisioning and release
+See [`docs/operations/DEPLOYMENT.md`](docs/operations/DEPLOYMENT.md) for the complete provisioning and release
 runbook. `pnpm run deploy` builds and deploys the Web assets and Worker; it does
 not run database migrations. Production migrations must be run separately with
 the direct database URL.

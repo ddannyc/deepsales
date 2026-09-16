@@ -12,10 +12,10 @@ This repository should implement the frozen Lean V1 product scope. Product decis
 
 Read these before planning or implementation:
 
-1. `LEAN_V1_PRD.md`
+1. `../product/LEAN_V1_PRD.md`
 2. `ARCHITECTURE_INVARIANTS.md`
 3. `TECHNICAL_DECISIONS.md`
-4. `M0_FACEBOOK_SPIKE.md`
+4. `../research/M0_FACEBOOK_SPIKE.md`
 
 If implementation details conflict with these documents, the order above is authoritative unless the user explicitly changes a decision.
 

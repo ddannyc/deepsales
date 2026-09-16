@@ -58,7 +58,7 @@ $env:DEEPSALES_HYPERDRIVE_DATABASE_URL = 'postgresql://...'
 pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DEEPSALES_HYPERDRIVE_DATABASE_URL --caching-disabled
 ```
 
-将返回的 Hyperdrive ID 写入 [apps/worker/wrangler.jsonc](apps/worker/wrangler.jsonc) 的 `hyperdrive[0].id`，替换其中的占位值。
+将返回的 Hyperdrive ID 写入 [apps/worker/wrangler.jsonc](../../apps/worker/wrangler.jsonc) 的 `hyperdrive[0].id`，替换其中的占位值。
 
 创建队列；已存在的队列跳过：
 

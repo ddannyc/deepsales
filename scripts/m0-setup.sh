@@ -242,6 +242,6 @@ if ! confirm "Did the real user receive exactly one fixed reply?"; then
   warn "M0 is not complete. Keep the tail output, fix the shown Meta error, and rerun this stage."
   exit 1
 fi
-say "Record Worker URL, UTC timestamp, inbound/outbound message IDs, and tester confirmation in M0_FINDINGS.md."
+say "Record Worker URL, UTC timestamp, inbound/outbound message IDs, and tester confirmation in docs/research/M0_FINDINGS.md."
 
 finish

@@ -64,7 +64,7 @@ feasibility result.
 The historical fixed-page M0 harness used `META_APP_SECRET`,
 `META_VERIFY_TOKEN`, `META_PAGE_ID`, and `META_PAGE_ACCESS_TOKEN`. The current
 V1 flow stores selected Page credentials encrypted in the database; see
-[`DEPLOYMENT.md`](DEPLOYMENT.md) for the current Worker secrets. `META_APP_ID`
+[`DEPLOYMENT.md`](../operations/DEPLOYMENT.md) for the current Worker secrets. `META_APP_ID`
 is setup metadata, not a credential. `META_GRAPH_API_VERSION` is pinned to
 `v26.0`; the historical fixed-reply setting is not part of the current V1
 configuration.
@@ -92,7 +92,7 @@ configuration.
 
 ## Decision impact
 
-No change to `TECHNICAL_DECISIONS.md` or `LEAN_V1_PRD.md` is required. The real
+No change to `../architecture/TECHNICAL_DECISIONS.md` or `../product/LEAN_V1_PRD.md` is required. The real
 deployment supports the frozen Messenger/Cloudflare direction, and the known
 M0 shortcuts already have V1 decisions: Cloudflare Queues for durable outbound
 work and PostgreSQL uniqueness for durable webhook idempotency.

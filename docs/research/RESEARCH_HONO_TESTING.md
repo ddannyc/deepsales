@@ -17,7 +17,7 @@
 
 Hono 官方测试指南建议直接调用 `app.request()`，取得 `Response` 后断言状态码、响应体和 headers。测试请求可以传入 pathname、`Request` 或完整的 `RequestInit`。
 
-Hono 还支持把测试用的 `c.env` 作为 `app.request()` 第三个参数传入，因此可以直接注入 mock binding，例如 `DB`、密钥或其他 Worker 环境对象。当前仓库的 [`apps/worker/src/index.test.ts`](apps/worker/src/index.test.ts) 已采用这个方式。
+Hono 还支持把测试用的 `c.env` 作为 `app.request()` 第三个参数传入，因此可以直接注入 mock binding，例如 `DB`、密钥或其他 Worker 环境对象。当前仓库的 [`apps/worker/src/index.test.ts`](../../apps/worker/src/index.test.ts) 已采用这个方式。
 
 Hono 的官方文档只定义请求和 `env` 注入方式，并明确指出测试环境取决于运行时；没有定义 Rails 风格的数据库环境、`DATABASE_URL` 命名、migration 生命周期或清理约定。数据库测试配置应由 Vitest、数据库驱动和项目自己的测试 harness 负责。
 
@@ -40,8 +40,8 @@ Cloudflare 官方配置还支持通过 `globalSetup` 启动本地 TCP 服务，�
 
 ## 对本仓库的建议
 
-1. 保持 [`apps/worker/src/index.test.ts`](apps/worker/src/index.test.ts) 这类测试使用普通 Vitest + `app.request(path, init, bindings)`。它们不需要真实数据库，也不需要 Cloudflare test pool。
-2. 为数据库集成测试配置固定的 [`database.test.ts`](database.test.ts)，从被忽略的 `.env.test.local` 读取个人 `DATABASE_URL`，再在各自的 Vitest 配置中用 `test.env` 注入。测试命令即可直接运行，不再依赖开发者当前 shell 的 `DATABASE_URL`。
+1. 保持 [`apps/worker/src/index.test.ts`](../../apps/worker/src/index.test.ts) 这类测试使用普通 Vitest + `app.request(path, init, bindings)`。它们不需要真实数据库，也不需要 Cloudflare test pool。
+2. 为数据库集成测试配置固定的 [`database.test.ts`](../../database.test.ts)，从被忽略的 `.env.test.local` 读取个人 `DATABASE_URL`，再在各自的 Vitest 配置中用 `test.env` 注入。测试命令即可直接运行，不再依赖开发者当前 shell 的 `DATABASE_URL`。
 3. 继续要求测试 URL 指向本地 Postgres，并最好使用明确的测试数据库名，例如 `deepsales_test`；环境文件是默认值，不能取消本地 URL 守卫。
 4. 将 unit 与 `*.integration.test.ts` 分成不同 Vitest include/project。当前仓库已让 Worker 的 `test:unit` 排除集成测试，并提供独立的 `test:integration` 配置。
 5. 只有需要验证 Cloudflare runtime/binding 时，才新增独立的 Cloudflare Vitest 配置；届时使用 `@cloudflare/vitest-plugin`、`wrangler.jsonc` 和官方 Hyperdrive `provide`/`inject` 模式。不要把它当作 Rails 式数据库环境管理器。

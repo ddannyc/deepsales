@@ -1,6 +1,6 @@
 # Database ER Relationships
 
-当前图以 [`packages/db/src/schema.ts`](packages/db/src/schema.ts) 中的实际 Drizzle schema 为准。
+当前图以 [`packages/db/src/schema.ts`](../../packages/db/src/schema.ts) 中的实际 Drizzle schema 为准。
 
 ```mermaid
 erDiagram
