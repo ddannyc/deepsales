@@ -1354,13 +1354,13 @@ function ConversationHeader({
           <AvatarFallback>{nameInitial(conversation.customerName, '新')}</AvatarFallback>
         </Avatar>
         <div className="thread-identity-copy">
+          <h2>{conversation.customerName ?? '新客户'}</h2>
           <div className="thread-channel">
             <MessageCircle aria-hidden="true" />
             <span>Messenger</span>
             <span aria-hidden="true">·</span>
             <span>{conversation.channelName}</span>
           </div>
-          <h2>{conversation.customerName ?? '新客户'}</h2>
           <div className="thread-statuses">
             <StatusBadge tone={conversation.status === 'OPEN' ? 'success' : 'neutral'}>
               {conversation.status}
@@ -1423,7 +1423,7 @@ function ReplyWindowStatus({ open }: { open: boolean }) {
   return (
     <StatusBadge tone={open ? 'success' : 'warning'}>
       <Icon aria-hidden="true" />
-      Messenger 回复窗口{open ? '开放' : '已关闭'}
+      回复窗口{open ? '开放' : '已关闭'}
     </StatusBadge>
   )
 }

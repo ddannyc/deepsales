@@ -51,19 +51,19 @@
   background: var(--background);
   font-family: Aptos, "Segoe UI", sans-serif;
   font-synthesis: none;
-  --background: #edf3f7;
+  --background: #f3f5f6;
   --foreground: #10233f;
-  --card: #f9fbfc;
+  --card: #ffffff;
   --card-foreground: #10233f;
   --popover: #ffffff;
   --popover-foreground: #10233f;
   --primary: #246bfe;
   --primary-foreground: #ffffff;
-  --secondary: #e4edff;
+  --secondary: #eff2f5;
   --secondary-foreground: #10233f;
-  --muted: #edf3f7;
+  --muted: #edf1f3;
   --muted-foreground: #53687a;
-  --accent: #e4edff;
+  --accent: #edf1f5;
   --accent-foreground: #10233f;
   --destructive: #b42318;
   --destructive-foreground: #ffffff;
@@ -73,10 +73,10 @@
   --warning-foreground: #ffffff;
   --info: #245ac8;
   --info-foreground: #ffffff;
-  --surface: #f9fbfc;
+  --surface: #ffffff;
   --surface-foreground: #10233f;
-  --border: #c8d7e0;
-  --input: #b9cbd7;
+  --border: #d5dce2;
+  --input: #c3cdd4;
   --ring: #81a9ff;
   --sidebar: #10233f;
   --sidebar-foreground: #ffffff;
@@ -99,12 +99,12 @@
   --type-page-title-leading: 34px;
   --type-section-heading-size: 20px;
   --type-section-heading-leading: 26px;
-  --type-body-size: 15px;
-  --type-body-leading: 24px;
+  --type-body-size: 16px;
+  --type-body-leading: 26px;
   --type-meta-size: 13px;
   --type-meta-leading: 18px;
-  --type-dense-size: 13px;
-  --type-dense-leading: 18px;
+  --type-dense-size: 14px;
+  --type-dense-leading: 20px;
 
   /* Legacy page styles stay source-compatible while migrating to semantic roles. */
   --ink: var(--foreground);
@@ -417,13 +417,13 @@ form {
 }
 .app-sidebar-top {
   display: grid;
-  gap: 28px;
+  gap: var(--space-6);
   padding: 24px 16px 20px;
 }
 .app-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-2);
   color: var(--sidebar-foreground);
   text-decoration: none;
 }
@@ -446,21 +446,27 @@ form {
   min-width: 0;
 }
 .app-brand-copy strong {
-  font-size: 15px;
+  font-size: 16px;
   letter-spacing: -0.01em;
 }
-.app-brand-copy small,
+.app-brand-copy small {
+  color: var(--sidebar-foreground);
+  font-size: 12px;
+  line-height: 16px;
+  opacity: 0.68;
+}
 .sidebar-kicker {
-  color: var(--sidebar-primary);
+  color: var(--sidebar-foreground);
   font:
-    700 10px / 1.2 ui-monospace,
+    700 11px / 1.2 ui-monospace,
     monospace;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
+  opacity: 0.62;
 }
 .workspace-switcher {
   display: grid;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 0;
   position: relative;
   padding-top: 14px;
@@ -469,7 +475,7 @@ form {
 .workspace-switcher > strong {
   overflow: hidden;
   color: var(--sidebar-foreground);
-  font-size: 13px;
+  font-size: var(--type-dense-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -487,7 +493,7 @@ form {
   padding: 0 22px 8px 0;
   color: var(--sidebar-foreground);
   background: transparent;
-  font-size: 13px;
+  font-size: var(--type-dense-size);
   font-weight: 700;
   cursor: pointer;
 }
@@ -496,28 +502,29 @@ form {
   right: 0;
   bottom: 9px;
   pointer-events: none;
-  color: var(--sidebar-primary);
+  color: var(--sidebar-foreground);
   width: 15px;
   height: 15px;
+  opacity: 0.7;
 }
 .workspace-initial {
   display: none;
 }
 .app-nav {
   display: grid;
-  gap: 4px;
+  gap: var(--space-1);
   padding: 0 12px;
 }
 .app-nav-link {
   display: flex;
   align-items: center;
-  gap: 11px;
-  min-height: 38px;
+  gap: var(--space-3);
+  min-height: 40px;
   border-left: 2px solid transparent;
-  padding: 8px 10px;
+  padding: 8px 12px;
   color: var(--sidebar-foreground);
-  font-size: 13px;
-  font-weight: 700;
+  font-size: var(--type-dense-size);
+  font-weight: 600;
   text-decoration: none;
   opacity: 0.72;
 }
@@ -548,7 +555,7 @@ form {
 .user-profile {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: var(--space-3);
   min-width: 0;
   padding: 2px 6px;
 }
@@ -560,13 +567,14 @@ form {
 .user-profile-copy strong {
   overflow: hidden;
   color: var(--sidebar-foreground);
-  font-size: 12px;
+  font-size: var(--type-meta-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .user-profile-copy span {
-  color: var(--sidebar-primary);
-  font-size: 11px;
+  color: var(--sidebar-foreground);
+  font-size: 12px;
+  opacity: 0.7;
 }
 .app-signout {
   justify-content: flex-start;
@@ -616,6 +624,8 @@ form {
 }
 .inbox-title-row .eyebrow {
   margin-bottom: 7px;
+  color: var(--muted-foreground);
+  font-size: 12px;
 }
 .inbox-title-row h1 {
   margin: 0;
@@ -633,17 +643,17 @@ form {
 }
 .inbox-view-nav {
   display: grid;
-  gap: 2px;
-  margin-top: 20px;
+  gap: var(--space-1);
+  margin-top: var(--space-4);
 }
 .inbox-view {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-height: 35px;
+  gap: var(--space-3);
+  min-height: 40px;
   border: 0;
   border-left: 2px solid transparent;
-  padding: 8px 10px;
+  padding: 8px 12px;
   color: var(--muted-foreground);
   background: transparent;
   font-size: var(--type-dense-size);
@@ -685,15 +695,15 @@ form {
 .list-kicker {
   color: var(--muted-foreground);
   font:
-    700 10px / 1.2 ui-monospace,
+    700 12px / 1.3 ui-monospace,
     monospace;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 .conversation-list-heading h2 {
-  margin: 5px 0 0;
-  font-size: 15px;
-  line-height: 20px;
+  margin: 4px 0 0;
+  font-size: 16px;
+  line-height: 22px;
 }
 .conversation-count {
   display: inline-flex;
@@ -740,7 +750,7 @@ form {
 .conversation-item {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
+  gap: var(--space-3);
   width: 100%;
   min-width: 0;
   border: 0;
@@ -766,43 +776,43 @@ form {
   display: grid;
   min-width: 0;
   flex: 1;
-  gap: 6px;
+  gap: var(--space-2);
 }
 .conversation-item-topline {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: 10px;
+  gap: var(--space-3);
   min-width: 0;
 }
 .conversation-item-topline strong {
   overflow: hidden;
-  font-size: 13px;
+  font-size: var(--type-dense-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .conversation-item-topline time {
   flex: 0 0 auto;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: var(--type-meta-size);
 }
 .conversation-item-preview {
   display: -webkit-box;
   overflow: hidden;
   color: var(--muted-foreground);
   font-size: var(--type-dense-size);
-  line-height: 18px;
+  line-height: var(--type-dense-leading);
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
 }
 .conversation-item-meta {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   min-width: 0;
   flex-wrap: wrap;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: var(--type-meta-size);
 }
 .conversation-item-channel {
   display: inline-flex;
@@ -810,11 +820,8 @@ form {
   gap: 4px;
 }
 .conversation-item-channel svg {
-  width: 13px;
-  height: 13px;
-}
-.conversation-item-meta [data-slot="badge"] {
-  font-size: 11px;
+  width: 14px;
+  height: 14px;
 }
 .conversation-skeleton {
   display: flex;
@@ -865,7 +872,7 @@ form {
 }
 .inbox-empty-state strong {
   color: var(--foreground);
-  font-size: 13px;
+  font-size: var(--type-dense-size);
 }
 .inbox-empty-state span {
   font-size: var(--type-meta-size);
@@ -888,7 +895,7 @@ form {
   gap: 24px;
   min-width: 0;
   border-bottom: 1px solid var(--border);
-  padding: 16px 24px;
+  padding: 12px 24px;
   background: var(--surface);
 }
 .thread-identity {
@@ -903,16 +910,17 @@ form {
 .thread-identity-copy {
   display: grid;
   min-width: 0;
-  gap: 5px;
+  gap: 4px;
 }
 .thread-channel {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-1);
   overflow: hidden;
   color: var(--muted-foreground);
-  font-size: 11px;
-  font-weight: 700;
+  font-size: var(--type-meta-size);
+  font-weight: 600;
+  line-height: var(--type-meta-leading);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -920,24 +928,24 @@ form {
   flex: 0 0 auto;
   width: 14px;
   height: 14px;
-  color: var(--primary);
+  color: var(--muted-foreground);
 }
 .thread-identity-copy h2 {
   overflow: hidden;
   margin: 0;
-  font-size: 18px;
-  line-height: 24px;
+  font-size: var(--type-section-heading-size);
+  line-height: var(--type-section-heading-leading);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .thread-statuses {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 .thread-statuses [data-slot="badge"] {
-  font-size: 11px;
+  font-size: 12px;
 }
 .ai-generating svg,
 .message-sender svg,
@@ -955,7 +963,7 @@ form {
   flex: 0 0 auto;
 }
 .ai-generating {
-  font-size: 11px;
+  font-size: 12px;
 }
 .thread-context {
   min-width: 0;
@@ -985,7 +993,7 @@ form {
 .transfer-copy span {
   overflow: hidden;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1009,41 +1017,41 @@ form {
 }
 .message-list {
   display: flex;
-  width: min(760px, calc(100% - 48px));
+  width: min(720px, calc(100% - 48px));
   min-height: 100%;
   flex-direction: column;
   align-items: stretch;
-  gap: 18px;
+  gap: var(--space-4);
   margin: 0 auto;
-  padding: 24px 0 28px;
+  padding: 24px 0;
 }
 .message-bubble {
   align-self: flex-start;
-  max-width: min(620px, 84%);
+  max-width: min(600px, 88%);
   border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  padding: 12px 14px;
+  border-radius: var(--radius-lg);
+  padding: 12px 16px;
   background: var(--surface);
 }
 .message-bubble.outbound {
   align-self: flex-end;
-  margin-left: 12%;
-  border-color: var(--ring);
-  background: var(--accent);
+  border-color: var(--border);
+  background: var(--secondary);
 }
 .message-bubble-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
+  gap: var(--space-3);
   margin-bottom: 8px;
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
 }
 .message-sender {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-1);
   min-width: 0;
 }
 .message-sender svg {
@@ -1052,13 +1060,13 @@ form {
 .message-sender strong {
   overflow: hidden;
   color: var(--foreground);
-  font-size: 12px;
+  font-size: var(--type-dense-size);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .message-sender [data-slot="badge"] {
   padding-inline: 6px;
-  font-size: 10px;
+  font-size: 12px;
 }
 .message-bubble-header time {
   flex: 0 0 auto;
@@ -1066,7 +1074,8 @@ form {
 .message-bubble p {
   margin: 0;
   color: var(--foreground);
-  line-height: 1.6;
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-leading);
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
@@ -1077,7 +1086,7 @@ form {
   display: block;
   margin-top: 6px;
   color: var(--destructive);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 .attachment-state {
@@ -1089,7 +1098,7 @@ form {
   overflow: hidden;
   margin-top: 12px;
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--background);
 }
 .attachment-image-link img {
@@ -1105,12 +1114,12 @@ form {
   gap: 16px;
   min-width: 220px;
   margin-top: 12px;
-  border: 1px solid var(--ring);
-  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 10px 12px;
   color: var(--foreground);
   background: var(--surface);
-  font-size: 13px;
+  font-size: var(--type-dense-size);
   font-weight: 700;
   text-decoration: none;
 }
@@ -1119,7 +1128,7 @@ form {
 }
 .attachment-download span:last-child {
   color: var(--primary);
-  font-size: 11px;
+  font-size: 12px;
 }
 .reply-composer-dock {
   border-top: 1px solid var(--border);
@@ -1130,7 +1139,7 @@ form {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  max-width: 760px;
+  max-width: 720px;
   margin: 0 auto;
   padding: 10px 0 0;
   color: var(--muted-foreground);
@@ -1143,10 +1152,10 @@ form {
 }
 .reply-composer {
   display: grid;
-  max-width: 760px;
-  gap: 10px;
+  max-width: 720px;
+  gap: var(--space-3);
   margin: 0 auto;
-  padding-top: 14px;
+  padding-top: 12px;
 }
 .reply-composer-heading,
 .reply-composer-footer {
@@ -1157,16 +1166,16 @@ form {
 }
 .reply-composer-heading label {
   color: var(--foreground);
-  font-size: 13px;
+  font-size: var(--type-dense-size);
   font-weight: 700;
 }
 .reply-composer-heading span,
 .reply-composer-footer > span {
   color: var(--muted-foreground);
-  font-size: 11px;
+  font-size: 12px;
 }
 .reply-textarea {
-  min-height: 82px;
+  min-height: 88px;
   max-height: 180px;
   resize: vertical;
   background: var(--background);
@@ -1200,7 +1209,7 @@ form {
 .thread-empty h2 {
   margin: 0;
   color: var(--foreground);
-  font-size: 20px;
+  font-size: var(--type-section-heading-size);
 }
 .thread-empty p {
   margin: 0;
@@ -2040,10 +2049,7 @@ form {
   .thread-statuses [data-slot="badge"] {
     max-width: 100%;
     padding-inline: 6px;
-    font-size: 10px;
-  }
-  .thread-statuses [data-slot="badge"]:last-child {
-    display: none;
+    font-size: 12px;
   }
   .thread-error {
     margin-right: 16px;
@@ -2063,9 +2069,9 @@ form {
     grid-column: 2;
   }
   .message-list {
-    width: min(100% - 32px, 760px);
-    gap: 14px;
-    padding-top: 18px;
+    width: min(720px, calc(100% - 32px));
+    gap: var(--space-4);
+    padding-top: var(--space-4);
   }
   .message-bubble {
     max-width: 90%;
