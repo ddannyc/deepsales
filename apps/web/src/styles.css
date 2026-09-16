@@ -1,26 +1,134 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-surface: var(--surface);
+  --color-surface-foreground: var(--surface-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
 :root {
-  color: #10233f;
-  background: #edf3f7;
+  color: var(--foreground);
+  background: var(--background);
   font-family: Aptos, "Segoe UI", sans-serif;
   font-synthesis: none;
-  --ink: #10233f;
-  --signal: #246bfe;
-  --paper: #f9fbfc;
-  --mist: #dce7ee;
-  --coral: #d84b48;
+  --background: #edf3f7;
+  --foreground: #10233f;
+  --card: #f9fbfc;
+  --card-foreground: #10233f;
+  --popover: #ffffff;
+  --popover-foreground: #10233f;
+  --primary: #246bfe;
+  --primary-foreground: #ffffff;
+  --secondary: #e4edff;
+  --secondary-foreground: #10233f;
+  --muted: #edf3f7;
+  --muted-foreground: #53687a;
+  --accent: #e4edff;
+  --accent-foreground: #10233f;
+  --destructive: #b42318;
+  --destructive-foreground: #ffffff;
+  --success: #16754c;
+  --success-foreground: #ffffff;
+  --warning: #925c00;
+  --warning-foreground: #ffffff;
+  --info: #245ac8;
+  --info-foreground: #ffffff;
+  --surface: #f9fbfc;
+  --surface-foreground: #10233f;
+  --border: #c8d7e0;
+  --input: #b9cbd7;
+  --ring: #81a9ff;
+  --sidebar: #10233f;
+  --sidebar-foreground: #ffffff;
+  --sidebar-primary: #81a9ff;
+  --sidebar-primary-foreground: #10233f;
+  --sidebar-accent: #263b58;
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: #38506b;
+  --sidebar-ring: #81a9ff;
+  --radius: 6px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --type-page-title-size: 28px;
+  --type-page-title-leading: 34px;
+  --type-section-heading-size: 20px;
+  --type-section-heading-leading: 26px;
+  --type-body-size: 15px;
+  --type-body-leading: 24px;
+  --type-meta-size: 13px;
+  --type-meta-leading: 18px;
+  --type-dense-size: 13px;
+  --type-dense-leading: 18px;
+
+  /* Legacy page styles stay source-compatible while migrating to semantic roles. */
+  --ink: var(--foreground);
+  --signal: var(--primary);
+  --paper: var(--surface);
+  --mist: var(--muted);
+  --coral: var(--destructive);
 }
 
 * {
   box-sizing: border-box;
 }
+
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
+  color: var(--foreground);
+  background: var(--background);
 }
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 button,
@@ -30,10 +138,49 @@ a {
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
-select:focus-visible {
-  outline: 3px solid #81a9ff;
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--ring);
   outline-offset: 3px;
 }
+
+.ds-page-title,
+.ds-section-heading,
+.ds-body,
+.ds-meta,
+.ds-dense {
+  margin: 0;
+}
+
+.ds-page-title {
+  font-size: var(--type-page-title-size);
+  font-weight: 700;
+  line-height: var(--type-page-title-leading);
+  letter-spacing: -0.02em;
+}
+
+.ds-section-heading {
+  font-size: var(--type-section-heading-size);
+  font-weight: 700;
+  line-height: var(--type-section-heading-leading);
+}
+
+.ds-body {
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-leading);
+}
+
+.ds-meta {
+  color: var(--muted-foreground);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+}
+
+.ds-dense {
+  font-size: var(--type-dense-size);
+  line-height: var(--type-dense-leading);
+}
+
 .workspace-label select {
   max-width: 180px;
   border: 0;
