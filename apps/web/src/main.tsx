@@ -187,6 +187,60 @@ type InboxAttachment = {
 }
 type InboxPageData = { conversations: InboxConversation[]; nextCursor: string | null }
 
+function encodeMessageCursor(message: Pick<InboxMessage, 'createdAt' | 'id'>) {
+  return btoa(JSON.stringify({ createdAt: message.createdAt, id: message.id }))
+}
+
+function mergeInboxMessages(current: InboxMessage[], incoming: InboxMessage[]) {
+  const messagesById = new Map(current.map((message) => [message.id, message]))
+  let changed = false
+
+  for (const message of incoming) {
+    const previous = messagesById.get(message.id)
+    if (previous && sameInboxMessage(previous, message)) continue
+    messagesById.set(message.id, message)
+    changed = true
+  }
+
+  return changed
+    ? [...messagesById.values()].sort(
+        (first, second) =>
+          first.createdAt.localeCompare(second.createdAt) || first.id.localeCompare(second.id),
+      )
+    : current
+}
+
+function sameInboxMessage(first: InboxMessage, second: InboxMessage) {
+  return (
+    first.id === second.id &&
+    first.direction === second.direction &&
+    first.senderType === second.senderType &&
+    first.senderMemberId === second.senderMemberId &&
+    first.messageType === second.messageType &&
+    first.text === second.text &&
+    first.externalMessageId === second.externalMessageId &&
+    first.providerSentAt === second.providerSentAt &&
+    first.deliveryState === second.deliveryState &&
+    first.failureCode === second.failureCode &&
+    first.failureMessage === second.failureMessage &&
+    first.createdAt === second.createdAt &&
+    first.attachments.length === second.attachments.length &&
+    first.attachments.every((attachment, index) => {
+      const next = second.attachments[index]
+      return (
+        next !== undefined &&
+        attachment.id === next.id &&
+        attachment.kind === next.kind &&
+        attachment.filename === next.filename &&
+        attachment.mimeType === next.mimeType &&
+        attachment.byteSize === next.byteSize &&
+        attachment.storageState === next.storageState &&
+        attachment.failureCode === next.failureCode
+      )
+    })
+  )
+}
+
 type Invitation = {
   url: string
   email: string
@@ -463,6 +517,16 @@ function App() {
   useEffect(() => {
     void load()
   }, [load])
+
+  useEffect(() => {
+    if (me === undefined) return
+    const pathname = window.location.pathname
+    if (me === null && pathname !== '/login' && pathname !== '/invite') {
+      history.replaceState(null, '', '/login')
+    } else if (me && pathname === '/login') {
+      history.replaceState(null, '', '/inbox')
+    }
+  }, [me])
 
   if (loadError) return <Unavailable message={loadError} onRetry={load} />
   if (me === undefined) return <Loading />
@@ -888,6 +952,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [mobileThreadOpen, setMobileThreadOpen] = useState(false)
   const [clock, setClock] = useState(() => Date.now())
   const selectedIdRef = useRef<string | null>(null)
+  const messagesRef = useRef<InboxMessage[]>([])
   const selectedConversation = conversations.find(({ id }) => id === selectedId)
   const transferTargets =
     selectedConversation?.assigneeType === 'HUMAN'
@@ -909,6 +974,10 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       (!replyWindowEligibleUntil || Date.parse(replyWindowEligibleUntil) > clock),
   )
 
+  useEffect(() => {
+    messagesRef.current = messages
+  }, [messages])
+
   const refresh = useCallback(async () => {
     const response = await fetch(
       `/api/workspaces/${workspace.id}/conversations?view=${encodeURIComponent(view)}`,
@@ -925,17 +994,30 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   }, [view, workspace.id])
 
   const refreshThread = useCallback(
-    async (conversationId: string) => {
-      setThreadLoading(true)
+    async (conversationId: string, showLoading = false) => {
+      if (showLoading) setThreadLoading(true)
       try {
+        const currentMessages = messagesRef.current
+        const latestMessage = currentMessages.at(-1)
+        const pendingUpdate = currentMessages.some(
+          (message) =>
+            message.deliveryState === 'PENDING' ||
+            message.attachments.some((attachment) => attachment.storageState === 'PENDING'),
+        )
+        const cursor =
+          !showLoading && latestMessage && !pendingUpdate
+            ? `?cursor=${encodeURIComponent(encodeMessageCursor(latestMessage))}`
+            : ''
         const response = await fetch(
-          `/api/workspaces/${workspace.id}/conversations/${conversationId}/messages`,
+          `/api/workspaces/${workspace.id}/conversations/${conversationId}/messages${cursor}`,
         )
         if (!response.ok) throw await responseError(response)
         const data = (await response.json()) as { messages: InboxMessage[] }
-        setMessages(data.messages)
+        if (selectedIdRef.current === conversationId) {
+          setMessages((current) => mergeInboxMessages(current, data.messages))
+        }
       } finally {
-        setThreadLoading(false)
+        if (showLoading && selectedIdRef.current === conversationId) setThreadLoading(false)
       }
     },
     [workspace.id],
@@ -1080,15 +1162,19 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     setTransferTargetId('')
     setTransferConfirmationOpen(false)
     if (!selectedId) {
+      messagesRef.current = []
       setMessages([])
       setThreadLoading(false)
       return
     }
-    void refreshThread(selectedId).catch((cause) => setError(inboxErrorMessage(cause)))
+    messagesRef.current = []
+    setMessages([])
+    void refreshThread(selectedId, true).catch((cause) => setError(inboxErrorMessage(cause)))
   }, [refreshThread, selectedId])
 
   useEffect(() => {
     const refreshVisible = () => {
+      if (document.hidden) return
       void refresh()
         .then(() => {
           if (selectedIdRef.current) return refreshThread(selectedIdRef.current)

@@ -6,6 +6,7 @@ import { Pool } from 'pg'
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
 
 test('fake Messenger text appears in the inbox without reloading', async ({ page }) => {
+  await page.clock.install()
   const suffix = Date.now()
   const password = 'correct-horse-battery-staple'
 
@@ -15,8 +16,10 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
   await page.getByLabel('工作邮箱').fill(`inbox-${suffix}@example.com`)
   await page.getByLabel('密码').fill(password)
   await page.getByRole('button', { name: '创建账户', exact: true }).click()
+  await expect(page).toHaveURL(/\/inbox$/)
   await page.getByLabel('工作区名称').fill('Inbox acceptance')
   await page.getByRole('button', { name: '创建工作区' }).click()
+  await expect(page).toHaveURL(/\/inbox$/)
   await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
   const workspace = (
@@ -42,6 +45,7 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     })
 
     const currentUrl = page.url()
+    const inboundText = `hello from Messenger ${'long conversation history '.repeat(250)}`
     const body = JSON.stringify({
       object: 'page',
       entry: [
@@ -54,7 +58,7 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
               recipient: { id: pageId },
               message: {
                 mid: `e2e-mid-${suffix}`,
-                text: 'hello from Messenger',
+                text: inboundText,
                 ...(process.env.E2E_FAKE_FACEBOOK_URL
                   ? {
                       attachments: ['image', 'file', 'audio', 'video'].map((kind) => ({
@@ -78,7 +82,7 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     })
     expect(response.status()).toBe(200)
 
-    await expect(page.getByText('hello from Messenger', { exact: true }).first()).toBeVisible({
+    await expect(page.locator('.message-bubble').first()).toContainText('hello from Messenger', {
       timeout: 10_000,
     })
     if (process.env.E2E_FAKE_FACEBOOK_URL) {
@@ -90,6 +94,108 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
       }
     }
     expect(page.url()).toBe(currentUrl)
+
+    const messageList = page.locator('.message-list')
+    const firstMessage = page.locator('.message-bubble').first()
+    const messageViewport = page.locator('.message-scroll [data-slot="scroll-area-viewport"]')
+    await messageList.evaluate((element) => element.setAttribute('data-poll-check', 'stable'))
+    await firstMessage.evaluate((element) => element.setAttribute('data-poll-check', 'stable'))
+    const maxScroll = await messageViewport.evaluate(
+      (element) => element.scrollHeight - element.clientHeight,
+    )
+    expect(maxScroll).toBeGreaterThan(0)
+    await messageViewport.evaluate((element) => {
+      element.scrollTop = Math.floor((element.scrollHeight - element.clientHeight) / 2)
+    })
+    const scrollTop = await messageViewport.evaluate((element) => element.scrollTop)
+
+    let holdNextMessageRequest = false
+    let releaseMessageRequest: (() => void) | undefined
+    let resolveMessageRequestStarted: (() => void) | undefined
+    let heldMessageRequestUrl = ''
+    const messageRequestStarted = new Promise<void>((resolve) => {
+      resolveMessageRequestStarted = resolve
+    })
+    const isMessageRequest = (url: string) => new URL(url).pathname.endsWith('/messages')
+    await page.route(
+      /\/api\/workspaces\/[^/]+\/conversations\/[^/]+\/messages(?:\?.*)?$/,
+      async (route) => {
+        if (holdNextMessageRequest) {
+          holdNextMessageRequest = false
+          heldMessageRequestUrl = route.request().url()
+          resolveMessageRequestStarted?.()
+          await new Promise<void>((resolve) => {
+            releaseMessageRequest = resolve
+          })
+        }
+        await route.continue()
+      },
+    )
+    holdNextMessageRequest = true
+    await page.clock.fastForward(30_001)
+    await messageRequestStarted
+    expect(new URL(heldMessageRequestUrl).searchParams.has('cursor')).toBe(true)
+    await expect(messageList).toBeVisible()
+    await expect(messageList).toHaveAttribute('data-poll-check', 'stable')
+    await expect(page.locator('.message-skeleton')).toHaveCount(0)
+    expect(await messageViewport.evaluate((element) => element.scrollTop)).toBe(scrollTop)
+
+    const pollResponse = page.waitForResponse(
+      (response) => isMessageRequest(response.url()) && response.request().method() === 'GET',
+    )
+    releaseMessageRequest?.()
+    expect((await pollResponse).status()).toBe(200)
+
+    const nextPollResponse = page.waitForResponse(
+      (response) => isMessageRequest(response.url()) && response.request().method() === 'GET',
+    )
+    await page.clock.fastForward(30_001)
+    expect((await nextPollResponse).status()).toBe(200)
+    await expect(messageList).toHaveAttribute('data-poll-check', 'stable')
+    expect(await messageViewport.evaluate((element) => element.scrollTop)).toBe(scrollTop)
+
+    const nextText = 'new Messenger message'
+    const nextBody = JSON.stringify({
+      object: 'page',
+      entry: [
+        {
+          id: pageId,
+          messaging: [
+            {
+              timestamp: Date.now(),
+              sender: { id: 'e2e-customer-1' },
+              recipient: { id: pageId },
+              message: { mid: `e2e-mid-next-${suffix}`, text: nextText },
+            },
+          ],
+        },
+      ],
+    })
+    const nextResponse = await page.request.post('/webhooks/facebook', {
+      headers: { 'x-hub-signature-256': `sha256=${sign(nextBody, 'e2e-meta-app-secret')}` },
+      data: nextBody,
+    })
+    expect(nextResponse.status()).toBe(200)
+    await expect(page.locator('.message-bubble').nth(1)).toContainText(nextText, {
+      timeout: 10_000,
+    })
+    await expect(messageList).toHaveAttribute('data-poll-check', 'stable')
+    await expect(firstMessage).toHaveAttribute('data-poll-check', 'stable')
+    expect(await messageViewport.evaluate((element) => element.scrollTop)).toBe(scrollTop)
+
+    await page.goto('/login')
+    await expect(page).toHaveURL(/\/inbox$/)
+    await page.reload()
+    await expect(page.locator('.shell')).toBeVisible()
+    await page.getByRole('button', { name: '退出登录' }).click()
+    await expect(page).toHaveURL(/\/login$/)
+    await page.goto('/inbox')
+    await expect(page).toHaveURL(/\/login$/)
+    await page.getByLabel('工作邮箱').fill(`inbox-${suffix}@example.com`)
+    await page.getByLabel('密码').fill(password)
+    await page.getByRole('button', { name: '登录', exact: true }).click()
+    await expect(page).toHaveURL(/\/inbox$/)
+    await expect(page.locator('.shell')).toBeVisible()
   } finally {
     await pool.end()
   }
