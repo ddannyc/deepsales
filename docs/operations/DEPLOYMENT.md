@@ -8,7 +8,7 @@
 
 - `pnpm install --frozen-lockfile`
 - `wrangler login` / `wrangler whoami`
-- 创建 Hyperdrive、五个工作 Queues 和共享 DLQ，并把 Hyperdrive ID 写入 `wrangler.jsonc`
+- 创建 Hyperdrive、五个工作 Queues 和共享 DLQ，并把 Hyperdrive ID 写入本地未跟踪的 `apps/worker/wrangler.jsonc`
 - 配置 Worker Secrets
 - 首次单独执行生产数据库迁移，然后 `pnpm run deploy`
 - 配置 Meta OAuth 回调、Webhook 和 Page 订阅
@@ -36,6 +36,14 @@ pnpm run deploy
 
 所有命令均在仓库根目录执行。
 
+首次部署前，如果本地配置文件还不存在，从示例复制一份。真实配置文件已被 Git 忽略，不要提交：
+
+```powershell
+if (-not (Test-Path apps/worker/wrangler.jsonc)) {
+  Copy-Item apps/worker/wrangler.jsonc.example apps/worker/wrangler.jsonc
+}
+```
+
 ## 1. 安装依赖并登录 Cloudflare
 
 ```powershell
@@ -58,7 +66,7 @@ $env:DEEPSALES_HYPERDRIVE_DATABASE_URL = 'postgresql://...'
 pnpm exec wrangler hyperdrive create deepsales --connection-string=$env:DEEPSALES_HYPERDRIVE_DATABASE_URL --caching-disabled
 ```
 
-将返回的 Hyperdrive ID 写入 [apps/worker/wrangler.jsonc](../../apps/worker/wrangler.jsonc) 的 `hyperdrive[0].id`，替换其中的占位值。
+将返回的 Hyperdrive ID 写入本地 `apps/worker/wrangler.jsonc` 的 `hyperdrive[0].id`，替换其中的占位值。仓库提交的是 [apps/worker/wrangler.jsonc.example](../../apps/worker/wrangler.jsonc.example)。
 
 创建队列；已存在的队列跳过：
 
@@ -89,7 +97,7 @@ pnpm db:migrate
 
 ## 4. 配置 Worker Secrets
 
-先在 `apps/worker/wrangler.jsonc` 中替换 `APP_URL`、`META_APP_ID` 和其他目标环境占位配置。
+先在本地未跟踪的 `apps/worker/wrangler.jsonc` 中替换 `APP_URL`、`META_APP_ID` 和其他目标环境占位配置。
 `AI_BASE_URL` 应使用目标 Alibaba Cloud International Model Studio 区域和 workspace 的兼容地址。
 
 逐项执行，命令会提示输入值：
@@ -102,7 +110,7 @@ pnpm --filter @deepsales/worker exec wrangler secret put TOKEN_ENCRYPTION_KEY
 pnpm --filter @deepsales/worker exec wrangler secret put AI_API_KEY
 ```
 
-`APP_URL` 在 `apps/worker/wrangler.jsonc` 中配置，必须是最终 HTTPS 地址且不带结尾 `/`。
+`APP_URL` 在本地 `apps/worker/wrangler.jsonc` 中配置，必须是最终 HTTPS 地址且不带结尾 `/`。
 
 要求：
 
@@ -113,7 +121,7 @@ pnpm --filter @deepsales/worker exec wrangler secret put AI_API_KEY
 - `AI_API_KEY` 用于 embeddings 和 LLM 请求；不要写入 `wrangler.jsonc`。
 - `AI_BASE_URL` 使用 Alibaba Cloud International Model Studio 对应区域和 workspace 的兼容 API base URL；不要在代码中硬编码 endpoint。
 - `EMBEDDING_PROVIDER=alibaba`、`EMBEDDING_MODEL=qwen3.7-text-embedding`、`EMBEDDING_DIMENSIONS=1536`、`LLM_PROVIDER=alibaba`、`LLM_MODEL=qwen3.8-flash` 保持为 Worker variables。
-- `META_APP_ID` 和 `META_GRAPH_API_VERSION` 已在 `wrangler.jsonc` 的 `vars` 中提供占位配置；部署前必须替换为目标 Meta App 的值。
+- `META_APP_ID` 和 `META_GRAPH_API_VERSION` 已在 `wrangler.jsonc.example` 的 `vars` 中提供占位配置；部署前必须在本地 `wrangler.jsonc` 中替换为目标 Meta App 的值。
 - 生产环境不要配置测试用的 `FACEBOOK_GRAPH_BASE_URL`。
 
 ## 5. 首次部署 Worker
