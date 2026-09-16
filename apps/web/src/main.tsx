@@ -8,6 +8,7 @@ import {
   ChevronDown,
   CircleAlert,
   Clock3,
+  Copy,
   Inbox as InboxIcon,
   ListFilter,
   LogOut,
@@ -26,6 +27,7 @@ import {
 import {
   type FormEvent,
   type InputHTMLAttributes,
+  type ReactNode,
   StrictMode,
   useCallback,
   useEffect,
@@ -45,7 +47,17 @@ import {
   AlertDialogTitle,
 } from '#components/ui/alert-dialog'
 import { Avatar, AvatarFallback } from '#components/ui/avatar'
+import { Badge } from '#components/ui/badge'
 import { Button } from '#components/ui/button'
+import { Checkbox } from '#components/ui/checkbox'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '#components/ui/dialog'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -53,11 +65,21 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '#components/ui/dropdown-menu'
+import { Input } from '#components/ui/input'
 import { ScrollArea } from '#components/ui/scroll-area'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '#components/ui/select'
 import { Separator } from '#components/ui/separator'
 import { Skeleton } from '#components/ui/skeleton'
 import { Toaster } from '#components/ui/sonner'
 import { StatusBadge } from '#components/ui/status-badge'
+import { Switch } from '#components/ui/switch'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '#components/ui/table'
 import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 
@@ -250,18 +272,9 @@ const roleLabels: Record<Workspace['role'], string> = {
   ADMIN: '管理员',
   AGENT: '客服',
 }
-const memberTypeLabels: Record<TeamMember['type'], string> = {
-  HUMAN: '人工',
-  AI: 'AI',
-}
 const lifecycleLabels: Record<TeamMember['status'], string> = {
   ACTIVE: '启用',
   DISABLED: '停用',
-}
-const configurationStatusLabels: Record<NonNullable<TeamMember['configurationStatus']>, string> = {
-  UNPUBLISHED: '未发布',
-  USABLE: '可用',
-  UNHEALTHY: '需检查',
 }
 const runtimeStatusLabels: Record<AiMemberConfig['runtimeStatus'], string> = {
   UNPUBLISHED: '未发布',
@@ -271,6 +284,150 @@ const runtimeStatusLabels: Record<AiMemberConfig['runtimeStatus'], string> = {
 
 function roleLabel(role: Workspace['role'] | null) {
   return role ? roleLabels[role] : ''
+}
+
+function PageHeader({
+  title,
+  description,
+  eyebrow,
+  actions,
+  backHref,
+}: {
+  title: string
+  description?: string
+  eyebrow?: string
+  actions?: ReactNode
+  backHref?: string
+}) {
+  return (
+    <header className="page-header">
+      <div className="page-header-copy">
+        {backHref && (
+          <Button asChild className="page-back-link" size="sm" variant="ghost">
+            <a href={backHref}>
+              <ArrowLeft aria-hidden="true" />
+              返回团队
+            </a>
+          </Button>
+        )}
+        {eyebrow && <p className="page-eyebrow">{eyebrow}</p>}
+        <h1>{title}</h1>
+        {description && <p className="page-description">{description}</p>}
+      </div>
+      {actions && <div className="page-header-actions">{actions}</div>}
+    </header>
+  )
+}
+
+function EmptyState({
+  title,
+  description,
+  action,
+}: {
+  title: string
+  description: string
+  action?: ReactNode
+}) {
+  return (
+    <section className="empty-state">
+      <h2>{title}</h2>
+      <p>{description}</p>
+      {action && <div className="empty-state-action">{action}</div>}
+    </section>
+  )
+}
+
+function OperationalListSkeleton() {
+  return (
+    <div aria-hidden="true" className="operational-skeleton">
+      {[0, 1, 2].map((row) => (
+        <div className="operational-skeleton-row" key={row}>
+          <Skeleton className="operational-skeleton-main" />
+          <Skeleton className="operational-skeleton-meta" />
+          <Skeleton className="operational-skeleton-action" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function StateBadge({
+  status,
+  label,
+  className,
+  'data-runtime-status': runtimeStatus,
+}: {
+  status: string
+  label: string
+  className?: string
+  'data-runtime-status'?: string
+}) {
+  return (
+    <StatusBadge
+      className={className}
+      data-runtime-status={runtimeStatus}
+      data-status={status}
+      tone={statusTone(status)}
+    >
+      {label}
+    </StatusBadge>
+  )
+}
+
+function ConfirmActionDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  confirmLabel,
+  busyLabel,
+  busy,
+  error,
+  onConfirm,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  title: string
+  description: string
+  confirmLabel: string
+  busyLabel: string
+  busy: boolean
+  error: string
+  onConfirm: () => Promise<void>
+}) {
+  return (
+    <AlertDialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!busy) onOpenChange(nextOpen)
+      }}
+    >
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>{title}</AlertDialogTitle>
+          <AlertDialogDescription>{description}</AlertDialogDescription>
+        </AlertDialogHeader>
+        {error && (
+          <p className="inline-error" role="alert">
+            {error}
+          </p>
+        )}
+        <AlertDialogFooter>
+          <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={busy}
+            variant="destructive"
+            onClick={(event) => {
+              event.preventDefault()
+              void onConfirm()
+            }}
+          >
+            {busy ? busyLabel : confirmLabel}
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  )
 }
 
 function App() {
@@ -368,62 +525,46 @@ function Auth({
 
   const signingUp = mode === 'sign-up'
   return (
-    <main className="auth-layout">
-      <SignalRail />
-      <section className="auth-intro" aria-labelledby="welcome-title">
-        <p className="eyebrow">Facebook 共享收件箱</p>
-        <h1 id="welcome-title">让每一段客户对话都尽在掌握。</h1>
-        <p className="intro-copy">
-          DeepSales 为人工与 AI 团队提供一个清晰的空间，集中处理 Messenger 消息。
-        </p>
-        <ol className="flow">
-          <li>
-            <span>消息到达</span>
-            <small>Facebook Messenger</small>
-          </li>
-          <li>
-            <span>最合适的成员回复</span>
-            <small>人工或 AI</small>
-          </li>
-          <li>
-            <span>团队始终掌控全局</span>
-            <small>统一记录</small>
-          </li>
-        </ol>
-      </section>
-      <section className="auth-panel" aria-labelledby="auth-title">
-        <div className="wordmark">
-          DEEP<span>SALES</span>
+    <main className="auth-page">
+      <section aria-labelledby="auth-title" className="auth-card">
+        <div className="auth-brand">
+          <span className="auth-brand-mark">DS</span>
+          <span>DeepSales</span>
         </div>
-        <div className="mode-switch">
-          <button
-            type="button"
+        <div className="auth-heading">
+          <h1 id="auth-title">{signingUp ? '创建账户' : '登录'}</h1>
+          <p>
+            {invited
+              ? signingUp
+                ? '请使用受邀工作邮箱创建账户以加入团队。'
+                : '请使用受邀工作邮箱登录以加入团队。'
+              : signingUp
+                ? '创建账户后即可设置团队工作区。'
+                : '登录 DeepSales 团队收件箱。'}
+          </p>
+        </div>
+        <fieldset className="auth-mode-switch">
+          <legend className="sr-only">账户操作</legend>
+          <Button
             aria-label="登录视图"
             aria-pressed={!signingUp}
+            size="sm"
+            variant={signingUp ? 'ghost' : 'secondary'}
             onClick={() => setMode('sign-in')}
           >
             登录
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
             aria-label="创建账户视图"
             aria-pressed={signingUp}
+            size="sm"
+            variant={signingUp ? 'secondary' : 'ghost'}
             onClick={() => setMode('sign-up')}
           >
             创建账户
-          </button>
-        </div>
-        <h2 id="auth-title">{signingUp ? '创建账户' : '登录'}</h2>
-        <p className="form-lede">
-          {invited
-            ? signingUp
-              ? '请使用受邀工作邮箱创建账户以加入团队。'
-              : '请使用受邀工作邮箱登录以加入团队。'
-            : signingUp
-              ? '开始创建团队工作区。'
-              : '返回团队收件箱。'}
-        </p>
-        <form onSubmit={submit}>
+          </Button>
+        </fieldset>
+        <form className="auth-form" onSubmit={submit}>
           {signingUp && <Field label="姓名" name="name" autoComplete="name" />}
           <Field label="工作邮箱" name="email" type="email" autoComplete="email" />
           <Field
@@ -434,13 +575,13 @@ function Auth({
             minLength={8}
           />
           {error && (
-            <p className="form-error" role="alert">
+            <p className="inline-error" role="alert">
               {error}
             </p>
           )}
-          <button className="primary" disabled={busy} type="submit">
+          <Button aria-busy={busy} className="auth-submit" disabled={busy} type="submit">
             {busy ? '正在处理…' : signingUp ? '创建账户' : '登录'}
-          </button>
+          </Button>
         </form>
       </section>
     </main>
@@ -477,13 +618,29 @@ function Field({
   label,
   name,
   type = 'text',
+  id = name,
+  description,
   ...props
-}: InputHTMLAttributes<HTMLInputElement> & { label: string; name: string }) {
+}: InputHTMLAttributes<HTMLInputElement> & {
+  label: string
+  name: string
+  description?: string
+}) {
+  const descriptionId = description ? `${id}-description` : undefined
+
   return (
-    <label className="field">
-      <span>{label}</span>
-      <input name={name} type={type} required {...props} />
-    </label>
+    <div className="form-field">
+      <label className="form-field-label" htmlFor={id}>
+        {label}
+        {props.required === false && <span className="field-optional">可选</span>}
+      </label>
+      <Input aria-describedby={descriptionId} id={id} name={name} required type={type} {...props} />
+      {description && (
+        <span className="field-description" id={descriptionId}>
+          {description}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -513,28 +670,32 @@ function WorkspaceSetup({
   }
 
   return (
-    <main className="setup-layout">
-      <SignalRail />
-      <section className="setup-card">
-        <p className="eyebrow">欢迎，{userName}</p>
-        <h1>为工作区命名</h1>
-        <p>这里是团队与已连接 Facebook 公共主页的共享工作区。</p>
-        <form onSubmit={submit}>
+    <main className="auth-page">
+      <section aria-labelledby="workspace-setup-title" className="auth-card">
+        <div className="auth-brand">
+          <span className="auth-brand-mark">DS</span>
+          <span>DeepSales</span>
+        </div>
+        <p className="auth-greeting">欢迎，{userName}</p>
+        <div className="auth-heading">
+          <h1 id="workspace-setup-title">为工作区命名</h1>
+          <p>设置团队共享 Messenger 收件箱的工作区名称。</p>
+        </div>
+        <form className="auth-form" onSubmit={submit}>
           <Field label="工作区名称" name="name" maxLength={100} autoFocus />
           {error && (
-            <p className="form-error" role="alert">
+            <p className="inline-error" role="alert">
               {error}
             </p>
           )}
-          <button className="primary" disabled={busy} type="submit">
+          <Button aria-busy={busy} className="auth-submit" disabled={busy} type="submit">
             {busy ? '创建中…' : '创建工作区'}
-          </button>
+          </Button>
         </form>
       </section>
     </main>
   )
 }
-
 const appNavItems = [
   { href: '/inbox', label: '收件箱', icon: InboxIcon },
   { href: '/team', label: '团队', icon: UsersRound },
@@ -797,7 +958,6 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       await refresh()
       await refreshThread(selectedId)
       setError('')
-      toast.success('已接管对话')
     } catch (cause) {
       setError(inboxErrorMessage(cause))
     } finally {
@@ -1207,6 +1367,14 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
 }
 
 type StatusTone = 'neutral' | 'info' | 'success' | 'warning' | 'destructive'
+
+function statusTone(status: string): StatusTone {
+  if (['ACTIVE', 'USABLE', 'READY'].includes(status)) return 'success'
+  if (['ACTION_REQUIRED', 'UNHEALTHY', 'FAILED'].includes(status)) return 'destructive'
+  if (['PROCESSING', 'UPLOADED', 'PENDING'].includes(status)) return 'warning'
+  if (status === 'AI') return 'info'
+  return 'neutral'
+}
 
 function conversationHandling(conversation: InboxConversation) {
   if (conversation.assigneeType === 'AI') return { label: 'AI处理中', tone: 'info' as const }
@@ -1622,28 +1790,42 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
   const [pages, setPages] = useState<FacebookPageOption[]>()
   const [selectedPageIds, setSelectedPageIds] = useState<string[]>([])
   const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
   const [busy, setBusy] = useState('')
+  const [disablingChannel, setDisablingChannel] = useState<FacebookChannel | null>(null)
   const canManage = workspace.role !== 'AGENT'
 
   const refresh = useCallback(async () => {
     const response = await fetch(`/api/workspaces/${workspace.id}/channels`)
     if (!response.ok) throw await responseError(response)
     setChannels(((await response.json()) as { channels: FacebookChannel[] }).channels)
+    setLoadError('')
   }, [workspace.id])
 
   useEffect(() => {
-    void refresh().catch((cause) => setError(facebookErrorMessage(cause)))
+    void refresh().catch((cause) => setLoadError(facebookErrorMessage(cause)))
   }, [refresh])
+
+  const loadPageOptions = useCallback(async () => {
+    if (!pendingStateId) return
+    setPages(undefined)
+    setSelectedPageIds([])
+    setError('')
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspace.id}/facebook/oauth/${pendingStateId}/pages`,
+      )
+      if (!response.ok) throw await responseError(response)
+      setPages(((await response.json()) as { pages: FacebookPageOption[] }).pages)
+    } catch (cause) {
+      setError(facebookErrorMessage(cause))
+    }
+  }, [pendingStateId, workspace.id])
 
   useEffect(() => {
     if (!canManage || !pendingStateId) return
-    void fetch(`/api/workspaces/${workspace.id}/facebook/oauth/${pendingStateId}/pages`)
-      .then(async (response) => {
-        if (!response.ok) throw await responseError(response)
-        setPages(((await response.json()) as { pages: FacebookPageOption[] }).pages)
-      })
-      .catch((cause) => setError(facebookErrorMessage(cause)))
-  }, [canManage, pendingStateId, workspace.id])
+    void loadPageOptions()
+  }, [canManage, loadPageOptions, pendingStateId])
 
   async function connect() {
     setBusy('connect')
@@ -1652,7 +1834,9 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
       const result = (await request(
         `/api/workspaces/${workspace.id}/facebook/oauth/start`,
         {},
-      )) as { authorizationUrl: string }
+      )) as {
+        authorizationUrl: string
+      }
       window.location.assign(result.authorizationUrl)
     } catch (cause) {
       setError(facebookErrorMessage(cause))
@@ -1667,6 +1851,7 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
     try {
       await request(`/api/workspaces/${workspace.id}/channels/${channel.id}/recheck`, {})
       await refresh()
+      toast.success('Page 连接状态已更新')
     } catch (cause) {
       setError(facebookErrorMessage(cause))
     } finally {
@@ -1684,10 +1869,8 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
         pageIds: selectedPageIds,
       })
       await refresh()
-      setPages(undefined)
-      setSelectedPageIds([])
-      setPendingStateId(null)
-      history.replaceState(null, '', '/settings/facebook')
+      closePagePicker()
+      toast.success('Facebook Page 已连接')
     } catch (cause) {
       setError(facebookErrorMessage(cause))
     } finally {
@@ -1695,13 +1878,22 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
     }
   }
 
+  function closePagePicker() {
+    setPages(undefined)
+    setSelectedPageIds([])
+    setError('')
+    setPendingStateId(null)
+    history.replaceState(null, '', '/settings/facebook')
+  }
+
   async function disable(channel: FacebookChannel) {
-    if (!window.confirm(`确定要停用“${channel.displayName}”吗？`)) return
     setBusy(channel.id)
     setError('')
     try {
       await request(`/api/workspaces/${workspace.id}/channels/${channel.id}/disable`, {})
       await refresh()
+      setDisablingChannel(null)
+      toast.success('Facebook Page 已停用')
     } catch (cause) {
       setError(facebookErrorMessage(cause))
     } finally {
@@ -1710,125 +1902,241 @@ function FacebookSettingsPage({ workspace }: { workspace: Workspace }) {
   }
 
   return (
-    <main className="facebook-page">
-      <div className="team-heading">
-        <div>
-          <p className="eyebrow">工作区 / Facebook</p>
-          <h1>Facebook Page</h1>
-          <p>连接 Page，检查 Messenger 订阅和访问权限。</p>
-        </div>
-        {canManage && (
-          <button
-            className="primary"
-            disabled={busy === 'connect'}
-            type="button"
-            onClick={() => void connect()}
-          >
-            {busy === 'connect' ? '正在打开…' : '连接 Facebook Page'}
-          </button>
-        )}
-      </div>
+    <main className="workspace-page facebook-page">
+      <PageHeader
+        actions={
+          canManage && (
+            <Button disabled={busy === 'connect'} onClick={() => void connect()}>
+              {busy === 'connect' ? '正在打开…' : '连接 Page'}
+            </Button>
+          )
+        }
+        description="管理已连接的 Messenger Page 与连接状态。"
+        eyebrow="工作区设置"
+        title="Facebook / Messenger"
+      />
 
-      {error && (
-        <p className="form-error" role="alert">
+      {loadError && (
+        <div className="page-error" role="alert">
+          <p>{loadError}</p>
+          <Button size="sm" variant="outline" onClick={() => void refresh()}>
+            重试
+          </Button>
+        </div>
+      )}
+      {error && !pendingStateId && !disablingChannel && (
+        <p className="inline-error" role="alert">
           {error}
         </p>
       )}
-      {pendingStateId && canManage && (
-        <section className="facebook-picker">
-          <p className="card-label">授权完成</p>
-          <h2>选择要连接的 Page</h2>
+
+      <section aria-labelledby="facebook-pages-title">
+        <div className="list-heading">
+          <h2 id="facebook-pages-title">已连接的 Page</h2>
+          {channels && <span>{channels.length} 个</span>}
+        </div>
+        {!channels ? (
+          <OperationalListSkeleton />
+        ) : channels.length ? (
+          <Table aria-labelledby="facebook-pages-title" className="ops-table facebook-table">
+            <TableHeader>
+              <TableRow>
+                <TableHead>Page</TableHead>
+                <TableHead>状态</TableHead>
+                <TableHead>最近检查</TableHead>
+                <TableHead>连接信息</TableHead>
+                {canManage && <TableHead className="actions-column">操作</TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {channels.map((channel) => (
+                <TableRow className="facebook-row" key={channel.id}>
+                  <TableCell data-column="page" data-label="Page">
+                    <strong>{channel.displayName}</strong>
+                    <span className="table-subtitle">Facebook Messenger</span>
+                  </TableCell>
+                  <TableCell data-column="status" data-label="状态">
+                    <StateBadge
+                      status={channel.connectionStatus}
+                      label={facebookStatusLabels[channel.connectionStatus]}
+                    />
+                  </TableCell>
+                  <TableCell data-column="checked" data-label="最近检查">
+                    {channel.lastCheckedAt ? (
+                      <time
+                        dateTime={channel.lastCheckedAt}
+                        title={formatExactDate(channel.lastCheckedAt)}
+                      >
+                        {formatDate(channel.lastCheckedAt)}
+                      </time>
+                    ) : (
+                      <span className="table-muted">尚未检查</span>
+                    )}
+                  </TableCell>
+                  <TableCell data-column="message" data-label="连接信息">
+                    {channel.connectionStatus === 'ACTION_REQUIRED' ? (
+                      <div className="connection-failure">
+                        <span>
+                          {channel.lastErrorMessage ?? '连接需要处理，请重新连接或检查 Page 权限。'}
+                        </span>
+                        {channel.lastErrorCode && (
+                          <span className="table-muted">代码：{channel.lastErrorCode}</span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="table-muted">—</span>
+                    )}
+                  </TableCell>
+                  {canManage && (
+                    <TableCell data-column="actions" data-label="操作">
+                      <div className="facebook-row-actions">
+                        {channel.connectionStatus === 'ACTIVE' ? (
+                          <Button
+                            disabled={Boolean(busy)}
+                            size="sm"
+                            variant="outline"
+                            onClick={() => void recheck(channel)}
+                          >
+                            {busy === channel.id ? '检查中…' : '重新检查'}
+                          </Button>
+                        ) : (
+                          <Button
+                            disabled={busy === 'connect'}
+                            size="sm"
+                            onClick={() => void connect()}
+                          >
+                            重新连接
+                          </Button>
+                        )}
+                        {channel.connectionStatus !== 'DISABLED' && (
+                          <DropdownMenu>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <DropdownMenuTrigger asChild>
+                                  <Button
+                                    aria-label={`${channel.displayName} 的更多操作`}
+                                    disabled={Boolean(busy)}
+                                    size="icon-sm"
+                                    variant="ghost"
+                                  >
+                                    <MoreHorizontal aria-hidden="true" />
+                                  </Button>
+                                </DropdownMenuTrigger>
+                              </TooltipTrigger>
+                              <TooltipContent>更多 Page 操作</TooltipContent>
+                            </Tooltip>
+                            <DropdownMenuContent align="end">
+                              <DropdownMenuItem
+                                className="text-destructive"
+                                onSelect={() => setDisablingChannel(channel)}
+                              >
+                                停用 Page
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
+                      </div>
+                    </TableCell>
+                  )}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <EmptyState
+            description="连接 Facebook Page 后，团队即可在收件箱中处理 Messenger 对话。"
+            title="还没有连接 Page"
+          />
+        )}
+      </section>
+
+      <Dialog
+        open={Boolean(pendingStateId && canManage)}
+        onOpenChange={(open) => {
+          if (!open) closePagePicker()
+        }}
+      >
+        <DialogContent className="ui-dialog-content">
+          <DialogHeader>
+            <DialogTitle>选择要连接的 Page</DialogTitle>
+            <DialogDescription>
+              选择要接收 Messenger 对话的 Page。访问凭据会由 DeepSales 安全保存。
+            </DialogDescription>
+          </DialogHeader>
+          {error && (
+            <p className="inline-error" role="alert">
+              {error}
+            </p>
+          )}
           {!pages ? (
-            <p>正在加载可用 Page…</p>
+            <>
+              <div aria-hidden="true" className="dialog-loading">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+              </div>
+              {error && (
+                <Button size="sm" variant="outline" onClick={() => void loadPageOptions()}>
+                  重试
+                </Button>
+              )}
+            </>
           ) : pages.length ? (
-            <form onSubmit={selectPages}>
+            <form className="dialog-form" onSubmit={selectPages}>
               <div className="facebook-page-options">
                 {pages.map((page) => (
-                  <label key={page.id}>
-                    <input
-                      type="checkbox"
+                  <div className="facebook-page-option" key={page.id}>
+                    <Checkbox
+                      aria-label={page.name}
                       checked={selectedPageIds.includes(page.id)}
-                      onChange={(event) =>
+                      onCheckedChange={(checked) =>
                         setSelectedPageIds((current) =>
-                          event.target.checked
+                          checked === true
                             ? [...current, page.id]
                             : current.filter((id) => id !== page.id),
                         )
                       }
                     />
-                    {page.name}
-                  </label>
+                    <span>{page.name}</span>
+                  </div>
                 ))}
               </div>
-              <button className="primary" disabled={busy === 'select'} type="submit">
-                {busy === 'select' ? '正在连接…' : '连接所选 Page'}
-              </button>
+              <DialogFooter>
+                <Button disabled={!selectedPageIds.length || busy === 'select'} type="submit">
+                  {busy === 'select' ? '正在连接…' : '连接所选 Page'}
+                </Button>
+              </DialogFooter>
             </form>
           ) : (
-            <p>没有可连接的 Facebook Page。</p>
+            <>
+              <p className="table-muted">此 Facebook 账户下没有可连接的 Page。</p>
+              <DialogFooter>
+                <Button variant="outline" onClick={closePagePicker}>
+                  关闭
+                </Button>
+              </DialogFooter>
+            </>
           )}
-        </section>
-      )}
-      {!channels ? (
-        <p>正在加载 Facebook 连接…</p>
-      ) : channels.length ? (
-        <div className="facebook-list">
-          {channels.map((channel) => (
-            <section className="facebook-card" key={channel.id}>
-              <div>
-                <p className="card-label">Facebook Page</p>
-                <h2>{channel.displayName}</h2>
-                <p className="facebook-meta">
-                  {facebookStatusLabels[channel.connectionStatus]}
-                  {channel.lastCheckedAt && ` · 最近检查 ${formatDate(channel.lastCheckedAt)}`}
-                </p>
-                {(channel.lastErrorCode || channel.lastErrorMessage) && (
-                  <p className="form-error">
-                    连接需要处理 · {channel.lastErrorCode ?? 'FACEBOOK_CHECK_FAILED'}
-                  </p>
-                )}
-              </div>
-              {canManage && (
-                <div className="member-actions">
-                  <button
-                    className="secondary"
-                    disabled={Boolean(busy)}
-                    type="button"
-                    onClick={() => void connect()}
-                  >
-                    重新连接
-                  </button>
-                  <button
-                    className="secondary"
-                    disabled={Boolean(busy)}
-                    type="button"
-                    onClick={() => void recheck(channel)}
-                  >
-                    重新检查
-                  </button>
-                  <button
-                    className="danger-button"
-                    disabled={Boolean(busy) || channel.connectionStatus === 'DISABLED'}
-                    type="button"
-                    onClick={() => void disable(channel)}
-                  >
-                    停用
-                  </button>
-                </div>
-              )}
-            </section>
-          ))}
-        </div>
-      ) : (
-        <section className="facebook-empty">
-          <p className="card-label">尚未连接</p>
-          <p>连接第一个 Facebook Page，开始接收 Messenger 对话。</p>
-        </section>
-      )}
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmActionDialog
+        busy={busy === disablingChannel?.id}
+        busyLabel="正在停用…"
+        confirmLabel="停用 Page"
+        description={`停用“${disablingChannel?.displayName ?? ''}”后，它将不再接收新的 Messenger 对话。`}
+        error={error}
+        onConfirm={async () => {
+          if (disablingChannel) await disable(disablingChannel)
+        }}
+        onOpenChange={(open) => {
+          if (!open) setDisablingChannel(null)
+        }}
+        open={Boolean(disablingChannel)}
+        title="停用 Facebook Page？"
+      />
     </main>
   )
 }
-
 const knowledgeStatusLabels: Record<KnowledgeDocument['status'], string> = {
   UPLOADED: '已上传',
   PROCESSING: '处理中',
@@ -1859,8 +2167,13 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
   const [bases, setBases] = useState<KnowledgeBase[]>()
   const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null)
   const [documents, setDocuments] = useState<KnowledgeDocument[]>()
-  const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
+  const [formError, setFormError] = useState('')
   const [busy, setBusy] = useState('')
+  const [addBaseOpen, setAddBaseOpen] = useState(false)
+  const [addTextOpen, setAddTextOpen] = useState(false)
+  const [uploadOpen, setUploadOpen] = useState(false)
+  const [deletingDocument, setDeletingDocument] = useState<KnowledgeDocument | null>(null)
   const canManage = workspace.role !== 'AGENT'
   const selectedBase = bases?.find(({ id }) => id === selectedBaseId)
 
@@ -1869,6 +2182,7 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
     if (!response.ok) throw await responseError(response)
     const next = ((await response.json()) as { knowledgeBases: KnowledgeBase[] }).knowledgeBases
     setBases(next)
+    setLoadError('')
     setSelectedBaseId((current) =>
       current && next.some(({ id }) => id === current) ? current : (next[0]?.id ?? null),
     )
@@ -1881,12 +2195,13 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
       )
       if (!response.ok) throw await responseError(response)
       setDocuments(((await response.json()) as { documents: KnowledgeDocument[] }).documents)
+      setLoadError('')
     },
     [workspace.id],
   )
 
   useEffect(() => {
-    void refreshBases().catch((cause) => setError(knowledgeErrorMessage(cause)))
+    void refreshBases().catch((cause) => setLoadError(knowledgeErrorMessage(cause)))
   }, [refreshBases])
 
   useEffect(() => {
@@ -1895,9 +2210,13 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
       return
     }
     setDocuments(undefined)
-    void refreshDocuments(selectedBaseId).catch((cause) => setError(knowledgeErrorMessage(cause)))
+    void refreshDocuments(selectedBaseId).catch((cause) =>
+      setLoadError(knowledgeErrorMessage(cause)),
+    )
     const timer = window.setInterval(() => {
-      void refreshDocuments(selectedBaseId).catch((cause) => setError(knowledgeErrorMessage(cause)))
+      void refreshDocuments(selectedBaseId).catch((cause) =>
+        setLoadError(knowledgeErrorMessage(cause)),
+      )
     }, 2_000)
     return () => window.clearInterval(timer)
   }, [refreshDocuments, selectedBaseId])
@@ -1906,17 +2225,19 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
     event.preventDefault()
     const form = event.currentTarget
     setBusy('base')
-    setError('')
+    setFormError('')
     try {
-      const data = new FormData(event.currentTarget)
+      const data = new FormData(form)
       const result = (await request(`/api/workspaces/${workspace.id}/knowledge-bases`, {
         name: data.get('name'),
       })) as { knowledgeBase: KnowledgeBase }
       form.reset()
       await refreshBases()
       setSelectedBaseId(result.knowledgeBase.id)
+      setAddBaseOpen(false)
+      toast.success('知识库已创建')
     } catch (cause) {
-      setError(knowledgeErrorMessage(cause))
+      setFormError(knowledgeErrorMessage(cause))
     } finally {
       setBusy('')
     }
@@ -1927,17 +2248,23 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
     if (!selectedBaseId) return
     const form = event.currentTarget
     setBusy('document')
-    setError('')
+    setFormError('')
     try {
-      const data = new FormData(event.currentTarget)
+      const data = new FormData(form)
       const result = (await request(
-        `/api/workspaces/${workspace.id}/knowledge-bases/${selectedBaseId}/documents/text`,
+        '/api/workspaces/' +
+          workspace.id +
+          '/knowledge-bases/' +
+          selectedBaseId +
+          '/documents/text',
         { name: data.get('name'), text: data.get('text') },
       )) as { document: KnowledgeDocument }
       form.reset()
       setDocuments((current) => (current ? [...current, result.document] : [result.document]))
+      setAddTextOpen(false)
+      toast.success('文本已添加，正在处理')
     } catch (cause) {
-      setError(knowledgeErrorMessage(cause))
+      setFormError(knowledgeErrorMessage(cause))
     } finally {
       setBusy('')
     }
@@ -1950,195 +2277,390 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
     const data = new FormData(form)
     if (!(data.get('file') instanceof File)) return
     setBusy('document')
-    setError('')
+    setFormError('')
     try {
       const response = await fetch(
-        `/api/workspaces/${workspace.id}/knowledge-bases/${selectedBaseId}/documents/upload`,
+        '/api/workspaces/' +
+          workspace.id +
+          '/knowledge-bases/' +
+          selectedBaseId +
+          '/documents/upload',
         { method: 'POST', body: data },
       )
       if (!response.ok) throw await responseError(response)
       const result = (await response.json()) as { document: KnowledgeDocument }
       form.reset()
       setDocuments((current) => (current ? [...current, result.document] : [result.document]))
+      setUploadOpen(false)
+      toast.success('文档已上传，正在处理')
     } catch (cause) {
-      setError(knowledgeErrorMessage(cause))
+      setFormError(knowledgeErrorMessage(cause))
     } finally {
       setBusy('')
     }
   }
 
   async function removeDocument(document: KnowledgeDocument) {
-    if (!selectedBaseId || !window.confirm(`删除“${document.name}”？`)) return
+    if (!selectedBaseId) return
     setBusy(document.id)
-    setError('')
+    setFormError('')
     try {
       await request(
-        `/api/workspaces/${workspace.id}/knowledge-bases/${selectedBaseId}/documents/${document.id}`,
+        '/api/workspaces/' +
+          workspace.id +
+          '/knowledge-bases/' +
+          selectedBaseId +
+          '/documents/' +
+          document.id,
         {},
         'DELETE',
       )
       await refreshDocuments(selectedBaseId)
+      setDeletingDocument(null)
+      toast.success('文档已删除')
     } catch (cause) {
-      setError(knowledgeErrorMessage(cause))
+      setFormError(knowledgeErrorMessage(cause))
     } finally {
       setBusy('')
     }
   }
 
-  return (
-    <main className="knowledge-page">
-      <div className="team-heading">
-        <div>
-          <p className="eyebrow">工作区 / 知识库</p>
-          <h1>知识库</h1>
-          <p>添加业务文本或文件，让后续 AI 回复有可验证的依据。</p>
-        </div>
-        <span className="role-pill">{roleLabel(workspace.role)}</span>
-      </div>
+  function openDocumentDialog(kind: 'text' | 'upload') {
+    setFormError('')
+    if (kind === 'text') setAddTextOpen(true)
+    else setUploadOpen(true)
+  }
 
-      {error && (
-        <p className="form-error" role="alert">
-          {error}
-        </p>
-      )}
-      {canManage && (
-        <form className="knowledge-create" onSubmit={createBase}>
-          <Field label="知识库名称" name="name" maxLength={100} />
-          <button className="primary" disabled={busy === 'base'} type="submit">
-            {busy === 'base' ? '创建中…' : '创建知识库'}
-          </button>
-        </form>
+  return (
+    <main className="workspace-page knowledge-page">
+      <PageHeader
+        actions={
+          canManage &&
+          selectedBase && (
+            <>
+              <Button variant="outline" onClick={() => openDocumentDialog('upload')}>
+                上传文档
+              </Button>
+              <Button onClick={() => openDocumentDialog('text')}>添加文本</Button>
+            </>
+          )
+        }
+        description="维护供 AI 回复使用的业务文本与文件。"
+        eyebrow="工作区"
+        title="知识库"
+      />
+
+      {loadError && (
+        <div className="page-error" role="alert">
+          <p>{loadError}</p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() =>
+              void (selectedBaseId ? refreshDocuments(selectedBaseId) : refreshBases()).catch(
+                (cause) => setLoadError(knowledgeErrorMessage(cause)),
+              )
+            }
+          >
+            重试
+          </Button>
+        </div>
       )}
 
       {!bases ? (
-        <p className="muted">正在加载知识库…</p>
+        loadError ? null : (
+          <OperationalListSkeleton />
+        )
       ) : !bases.length ? (
-        <section className="knowledge-empty">
-          <p className="card-label">尚未创建</p>
-          <p>创建一个知识库，然后添加第一段业务文本。</p>
-        </section>
+        <EmptyState
+          action={
+            canManage ? <Button onClick={() => setAddBaseOpen(true)}>创建知识库</Button> : undefined
+          }
+          description="创建知识库后，可添加文本或 PDF、DOCX、TXT、Markdown 文档。"
+          title="还没有知识库"
+        />
       ) : (
         <>
-          <label className="knowledge-selector">
-            <span>当前知识库</span>
-            <select
-              value={selectedBaseId ?? ''}
-              onChange={(event) => setSelectedBaseId(event.currentTarget.value)}
-            >
-              {bases.map((base) => (
-                <option key={base.id} value={base.id}>
-                  {base.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="knowledge-base-toolbar">
+            <div className="form-field">
+              <label className="form-field-label" htmlFor="knowledge-base-select">
+                知识库
+              </label>
+              <Select
+                value={selectedBaseId ?? ''}
+                onValueChange={(value) => setSelectedBaseId(value)}
+              >
+                <SelectTrigger aria-label="知识库" id="knowledge-base-select">
+                  <SelectValue placeholder="选择知识库" />
+                </SelectTrigger>
+                <SelectContent>
+                  {bases.map((base) => (
+                    <SelectItem key={base.id} value={base.id}>
+                      {base.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {canManage && (
+              <Button size="sm" variant="outline" onClick={() => setAddBaseOpen(true)}>
+                新建知识库
+              </Button>
+            )}
+          </div>
           {selectedBase && (
-            <>
-              {canManage && (
-                <form className="knowledge-card" onSubmit={addText}>
-                  <p className="card-label">添加文本</p>
-                  <Field label="文档名称" name="name" maxLength={100} />
-                  <label className="field">
-                    <span>文本内容</span>
-                    <textarea name="text" required rows={9} />
-                  </label>
-                  <button className="primary" disabled={busy === 'document'} type="submit">
-                    {busy === 'document' ? '提交中…' : '添加文本'}
-                  </button>
-                </form>
-              )}
-              {canManage && (
-                <form className="knowledge-card knowledge-upload" onSubmit={addFile}>
-                  <p className="card-label">上传文件</p>
-                  <p className="muted">PDF、DOCX、TXT 或 Markdown，最大 10 MiB。</p>
-                  <label className="field">
-                    <span>文件</span>
-                    <input
-                      accept=".pdf,.docx,.txt,.md,.markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
-                      name="file"
-                      required
-                      type="file"
-                    />
-                  </label>
-                  <button className="primary" disabled={busy === 'document'} type="submit">
-                    {busy === 'document' ? '上传中…' : '上传文件'}
-                  </button>
-                </form>
-              )}
-              <section className="knowledge-documents">
-                <div className="section-heading">
-                  <h2>{selectedBase.name} 的文档</h2>
-                  <span>{documents?.length ?? 0} 个</span>
-                </div>
-                {!documents ? (
-                  <p className="muted">正在加载文档…</p>
-                ) : documents.length ? (
-                  <div className="knowledge-document-list">
+            <section aria-labelledby="knowledge-documents-title" className="knowledge-documents">
+              <div className="list-heading">
+                <h2 id="knowledge-documents-title">{selectedBase.name} 的文档</h2>
+                {documents && <span>{documents.length} 个</span>}
+              </div>
+              {!documents ? (
+                <OperationalListSkeleton />
+              ) : documents.length ? (
+                <Table
+                  aria-labelledby="knowledge-documents-title"
+                  className="ops-table knowledge-table"
+                >
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>文档</TableHead>
+                      <TableHead>类型</TableHead>
+                      <TableHead>状态</TableHead>
+                      <TableHead>更新时间</TableHead>
+                      {canManage && <TableHead className="actions-column">操作</TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
                     {documents.map((document) => (
-                      <article
+                      <TableRow
                         className="knowledge-document"
                         data-source-type={document.sourceType}
                         data-status={document.status}
                         key={document.id}
                       >
-                        <div>
+                        <TableCell data-column="document" data-label="文档">
                           <strong>{document.name}</strong>
-                          <p>
-                            {knowledgeSourceLabels[document.sourceType]} ·{' '}
-                            {knowledgeStatusLabels[document.status]}
-                          </p>
-                          {document.failureCode && (
-                            <p className="form-error">
-                              {knowledgeFailureLabels[document.failureCode] ?? '处理失败'}
-                            </p>
+                          {document.status === 'FAILED' && (
+                            <span className="document-failure">
+                              {knowledgeFailureLabels[document.failureCode ?? ''] ??
+                                '处理失败，请重试或重新上传。'}
+                            </span>
                           )}
-                        </div>
-                        {canManage && (
-                          <button
-                            className="danger-button"
-                            disabled={busy === document.id}
-                            type="button"
-                            onClick={() => void removeDocument(document)}
+                        </TableCell>
+                        <TableCell data-column="type" data-label="类型">
+                          {knowledgeSourceLabels[document.sourceType]}
+                        </TableCell>
+                        <TableCell data-column="status" data-label="状态">
+                          <StateBadge
+                            status={document.status}
+                            label={knowledgeStatusLabels[document.status]}
+                          />
+                          {document.status === 'PROCESSING' && (
+                            <span className="table-subtitle">后台处理中</span>
+                          )}
+                        </TableCell>
+                        <TableCell data-column="updated" data-label="更新时间">
+                          <time
+                            dateTime={document.updatedAt}
+                            title={formatExactDate(document.updatedAt)}
                           >
-                            删除
-                          </button>
+                            {formatDate(document.updatedAt)}
+                          </time>
+                        </TableCell>
+                        {canManage && (
+                          <TableCell data-column="actions" data-label="操作">
+                            <DropdownMenu>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      aria-label={`${document.name} 的更多操作`}
+                                      disabled={Boolean(busy)}
+                                      size="icon-sm"
+                                      variant="ghost"
+                                    >
+                                      <MoreHorizontal aria-hidden="true" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                </TooltipTrigger>
+                                <TooltipContent>更多文档操作</TooltipContent>
+                              </Tooltip>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem
+                                  className="text-destructive"
+                                  onSelect={() => {
+                                    setFormError('')
+                                    setDeletingDocument(document)
+                                  }}
+                                >
+                                  删除文档
+                                </DropdownMenuItem>
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </TableCell>
                         )}
-                      </article>
+                      </TableRow>
                     ))}
-                  </div>
-                ) : (
-                  <p className="muted">还没有文档。</p>
-                )}
-              </section>
-            </>
+                  </TableBody>
+                </Table>
+              ) : (
+                <EmptyState
+                  description="添加业务文本或上传受支持的文件，供 AI 回复时检索。"
+                  title="此知识库还没有文档"
+                />
+              )}
+            </section>
           )}
         </>
       )}
+
+      <Dialog
+        open={addBaseOpen}
+        onOpenChange={(open) => {
+          setAddBaseOpen(open)
+          if (open) setFormError('')
+        }}
+      >
+        <DialogContent className="ui-dialog-content">
+          <DialogHeader>
+            <DialogTitle>创建知识库</DialogTitle>
+            <DialogDescription>知识库会收纳供 AI 成员检索的业务文档。</DialogDescription>
+          </DialogHeader>
+          <form className="dialog-form" onSubmit={createBase}>
+            <Field label="知识库名称" name="name" maxLength={100} />
+            {formError && (
+              <p className="inline-error" role="alert">
+                {formError}
+              </p>
+            )}
+            <DialogFooter>
+              <Button disabled={busy === 'base'} type="submit">
+                {busy === 'base' ? '正在创建…' : '创建知识库'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={addTextOpen}
+        onOpenChange={(open) => {
+          setAddTextOpen(open)
+          if (open) setFormError('')
+        }}
+      >
+        <DialogContent className="ui-dialog-content">
+          <DialogHeader>
+            <DialogTitle>添加文本</DialogTitle>
+            <DialogDescription>文本提交后会在后台处理，再用于 AI 回复。</DialogDescription>
+          </DialogHeader>
+          <form className="dialog-form" onSubmit={addText}>
+            <Field label="文档名称" name="name" maxLength={100} />
+            <label className="form-field" htmlFor="knowledge-document-text">
+              <span className="form-field-label">文本内容</span>
+              <Textarea id="knowledge-document-text" name="text" required rows={8} />
+            </label>
+            {formError && (
+              <p className="inline-error" role="alert">
+                {formError}
+              </p>
+            )}
+            <DialogFooter>
+              <Button disabled={busy === 'document'} type="submit">
+                {busy === 'document' ? '正在提交…' : '添加文本'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={uploadOpen}
+        onOpenChange={(open) => {
+          setUploadOpen(open)
+          if (open) setFormError('')
+        }}
+      >
+        <DialogContent className="ui-dialog-content">
+          <DialogHeader>
+            <DialogTitle>上传文档</DialogTitle>
+            <DialogDescription>支持 PDF、DOCX、TXT 和 Markdown，最大 10 MiB。</DialogDescription>
+          </DialogHeader>
+          <form className="dialog-form" onSubmit={addFile}>
+            <label className="form-field" htmlFor="knowledge-document-file">
+              <span className="form-field-label">文件</span>
+              <Input
+                accept=".pdf,.docx,.txt,.md,.markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+                id="knowledge-document-file"
+                name="file"
+                required
+                type="file"
+              />
+            </label>
+            {formError && (
+              <p className="inline-error" role="alert">
+                {formError}
+              </p>
+            )}
+            <DialogFooter>
+              <Button disabled={busy === 'document'} type="submit">
+                {busy === 'document' ? '正在上传…' : '上传文档'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmActionDialog
+        busy={busy === deletingDocument?.id}
+        busyLabel="正在删除…"
+        confirmLabel="删除文档"
+        description={`删除“${deletingDocument?.name ?? ''}”后，AI 将无法再检索其中内容。`}
+        error={formError}
+        onConfirm={async () => {
+          if (deletingDocument) await removeDocument(deletingDocument)
+        }}
+        onOpenChange={(open) => {
+          if (!open) setDeletingDocument(null)
+        }}
+        open={Boolean(deletingDocument)}
+        title="删除此文档？"
+      />
     </main>
   )
 }
-
 function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId: string }) {
   const [config, setConfig] = useState<AiMemberConfig>()
   const [draft, setDraft] = useState<AiMemberDraft>()
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
+  const [memberChannels, setMemberChannels] = useState<string[]>([])
   const [loadError, setLoadError] = useState('')
-  const [message, setMessage] = useState('')
+  const [formError, setFormError] = useState('')
+  const [feedback, setFeedback] = useState('')
   const [busy, setBusy] = useState(false)
   const canManage = workspace.role !== 'AGENT'
 
   const load = useCallback(async () => {
-    const configResponse = await fetch(
-      `/api/workspaces/${workspace.id}/ai-members/${memberId}/config`,
-    )
+    const [configResponse, basesResponse, teamResponse] = await Promise.all([
+      fetch(`/api/workspaces/${workspace.id}/ai-members/${memberId}/config`),
+      fetch(`/api/workspaces/${workspace.id}/knowledge-bases`),
+      fetch(`/api/workspaces/${workspace.id}/team`),
+    ])
     if (!configResponse.ok) throw await responseError(configResponse)
-    const nextConfig = ((await configResponse.json()) as { config: AiMemberConfig }).config
-    const basesResponse = await fetch(`/api/workspaces/${workspace.id}/knowledge-bases`)
     if (!basesResponse.ok) throw await responseError(basesResponse)
+    if (!teamResponse.ok) throw await responseError(teamResponse)
+    const nextConfig = ((await configResponse.json()) as { config: AiMemberConfig }).config
     const bases = (await basesResponse.json()) as { knowledgeBases: KnowledgeBase[] }
+    const team = (await teamResponse.json()) as Team
+    const aiMember = team.members.find((member) => member.id === memberId)
     setConfig(nextConfig)
     setDraft(aiDraftFromConfig(nextConfig))
     setKnowledgeBases(bases.knowledgeBases)
+    setMemberChannels(
+      team.channels
+        .filter((channel) => aiMember?.channelIds.includes(channel.id))
+        .map(({ displayName }) => displayName),
+    )
   }, [memberId, workspace.id])
 
   useEffect(() => {
@@ -2147,40 +2669,39 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
     void load().catch((cause) => setLoadError(aiMemberErrorMessage(cause)))
   }, [canManage, load])
 
+  const draftDirty = Boolean(config && draft && !sameAiDraft(draft, aiDraftFromConfig(config)))
+  const draftUnpublished = Boolean(
+    config?.publishedSnapshot && !sameAiDraft(aiDraftFromConfig(config), config.publishedSnapshot),
+  )
+
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!draft) return
     setBusy(true)
-    setMessage('')
-    const data = new FormData(event.currentTarget)
+    setFormError('')
+    setFeedback('')
     try {
       const result = (await request(
         `/api/workspaces/${workspace.id}/ai-members/${memberId}/config`,
-        {
-          instructions: String(data.get('instructions') ?? ''),
-          responseLanguage: String(data.get('responseLanguage') ?? ''),
-          knowledgeBaseId: String(data.get('knowledgeBaseId') ?? '') || null,
-          handoffOnCustomerRequest: data.get('handoffOnCustomerRequest') === 'on',
-          handoffOnNoKnowledge: data.get('handoffOnNoKnowledge') === 'on',
-          handoffOnNegativeSentiment: data.get('handoffOnNegativeSentiment') === 'on',
-          handoffOnUnableToAnswer: data.get('handoffOnUnableToAnswer') === 'on',
-          handoffKeywords: String(data.get('handoffKeywords') ?? '').split(/[,\n]/),
-        },
+        { ...draft },
         'PATCH',
       )) as { config: AiMemberConfig }
       setConfig(result.config)
       setDraft(aiDraftFromConfig(result.config))
-      setMessage('草稿已保存')
+      setFeedback('草稿已保存')
+      toast.success('草稿已保存')
     } catch (cause) {
-      setMessage(aiMemberErrorMessage(cause))
+      setFormError(aiMemberErrorMessage(cause))
     } finally {
       setBusy(false)
     }
   }
 
   async function publish() {
+    if (!config || !draft || draftDirty) return
     setBusy(true)
-    setMessage('')
+    setFormError('')
+    setFeedback('')
     try {
       const result = (await request(
         `/api/workspaces/${workspace.id}/ai-members/${memberId}/publish`,
@@ -2188,9 +2709,10 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
       )) as { config: AiMemberConfig }
       setConfig(result.config)
       setDraft(aiDraftFromConfig(result.config))
-      setMessage('已发布运行快照')
+      setFeedback('运行配置已发布')
+      toast.success('运行配置已发布')
     } catch (cause) {
-      setMessage(aiMemberErrorMessage(cause))
+      setFormError(aiMemberErrorMessage(cause))
     } finally {
       setBusy(false)
     }
@@ -2198,234 +2720,348 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
 
   if (!canManage) {
     return (
-      <main className="ai-member-page" role="alert">
-        <a className="back-link" href="/team">
-          ← 返回团队
-        </a>
-        <p className="form-error">你没有管理 AI 成员配置的权限。</p>
+      <main className="workspace-page ai-member-page">
+        <PageHeader backHref="/team" eyebrow="AI 成员" title="无权查看配置" />
+        <p className="inline-error" role="alert">
+          你没有管理 AI 成员配置的权限。
+        </p>
       </main>
     )
   }
   if (loadError && !config) {
     return (
-      <main className="ai-member-page" role="alert">
-        <a className="back-link" href="/team">
-          ← 返回团队
-        </a>
-        <p className="form-error">{loadError}</p>
+      <main className="workspace-page ai-member-page">
+        <PageHeader backHref="/team" eyebrow="AI 成员" title="配置加载失败" />
+        <div className="page-error" role="alert">
+          <p>{loadError}</p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void load().catch((cause) => setLoadError(aiMemberErrorMessage(cause)))}
+          >
+            重试
+          </Button>
+        </div>
       </main>
     )
   }
-  if (!config || !draft) return <main className="ai-member-page">正在加载 AI 配置…</main>
+  if (!config || !draft) {
+    return (
+      <main className="workspace-page ai-member-page">
+        <PageHeader backHref="/team" eyebrow="AI 成员" title="正在加载…" />
+        <div aria-hidden="true" className="ai-skeleton">
+          <Skeleton className="ai-skeleton-title" />
+          <Skeleton className="ai-skeleton-field" />
+          <Skeleton className="ai-skeleton-field" />
+          <Skeleton className="ai-skeleton-field" />
+        </div>
+      </main>
+    )
+  }
+
+  const draftStateLabel = draftDirty
+    ? '有未保存的草稿更改'
+    : !config.publishedSnapshot
+      ? '尚未发布'
+      : draftUnpublished
+        ? '草稿尚未发布'
+        : '草稿与运行配置一致'
 
   return (
-    <main className="ai-member-page">
-      <div className="ai-member-heading">
-        <div>
-          <a className="back-link" href="/team">
-            ← 返回团队
-          </a>
-          <p className="eyebrow">工作区 / AI 成员</p>
-          <h1>AI 成员配置</h1>
-          <p>{config.memberDisplayName ?? '未命名成员'} 的草稿与运行快照。</p>
-        </div>
-        <span
-          className="runtime-status"
-          data-runtime-status={config.runtimeStatus}
-          data-status={config.runtimeStatus}
-        >
-          {runtimeStatusLabels[config.runtimeStatus]}
-        </span>
+    <main className="workspace-page ai-member-page">
+      <PageHeader
+        actions={
+          <>
+            <StateBadge
+              data-runtime-status={config.runtimeStatus}
+              status={config.runtimeStatus}
+              label={runtimeStatusLabels[config.runtimeStatus]}
+            />
+            <Button disabled={busy || draftDirty} onClick={() => void publish()}>
+              {busy ? '正在处理…' : '发布'}
+            </Button>
+          </>
+        }
+        backHref="/team"
+        description="编辑草稿并单独发布。已发布运行配置保持不变，直到再次发布。"
+        eyebrow="AI 成员"
+        title={config.memberDisplayName ?? '未命名成员'}
+      />
+
+      <div className="ai-member-status-line">
+        <StateBadge
+          status={config.memberStatus}
+          label={config.memberStatus === 'ACTIVE' ? '成员已启用' : '成员已停用'}
+        />
+        <Badge variant="outline">{draftStateLabel}</Badge>
       </div>
 
-      {message && (
-        <p
-          className={
-            message === '已发布运行快照' || message === '草稿已保存' ? 'success' : 'form-error'
-          }
-          role="status"
-        >
-          {message}
-        </p>
-      )}
       <div className="ai-member-layout">
-        <form className="ai-member-card ai-member-form" onSubmit={save}>
-          <div className="section-heading">
-            <p className="card-label">当前草稿</p>
-            <span>可编辑</span>
-          </div>
-          <label className="field ai-field-wide" htmlFor="ai-instructions">
-            <span>指令</span>
-            <textarea
-              id="ai-instructions"
-              name="instructions"
-              value={draft.instructions}
-              maxLength={20_000}
-              onChange={(event) => {
-                const value = event.currentTarget.value
-                setDraft((current) => (current ? { ...current, instructions: value } : current))
-              }}
-            />
-          </label>
-          <div className="ai-config-grid">
-            <label className="field" htmlFor="ai-response-language">
-              <span>回复语言</span>
-              <input
-                id="ai-response-language"
-                name="responseLanguage"
-                value={draft.responseLanguage}
-                maxLength={100}
+        <form className="ai-config-form" onSubmit={save}>
+          <section aria-labelledby="ai-draft-title" className="ai-config-section">
+            <div className="section-heading">
+              <div>
+                <h2 id="ai-draft-title">可编辑草稿</h2>
+                <p>这些设置只有在发布后才会影响 AI 回复。</p>
+              </div>
+              <Badge variant="outline">草稿</Badge>
+            </div>
+            <label className="form-field" htmlFor="ai-instructions">
+              <span className="form-field-label">指令</span>
+              <Textarea
+                id="ai-instructions"
+                name="instructions"
+                value={draft.instructions}
+                maxLength={20_000}
                 onChange={(event) => {
                   const value = event.currentTarget.value
-                  setDraft((current) =>
-                    current ? { ...current, responseLanguage: value } : current,
-                  )
+                  setDraft((current) => (current ? { ...current, instructions: value } : current))
                 }}
               />
+              <span className="field-description">
+                发布前需要填写。说明 AI 应如何回答客户问题。
+              </span>
             </label>
-            <label className="field" htmlFor="ai-knowledge-base">
-              <span>知识库</span>
-              <select
-                id="ai-knowledge-base"
-                name="knowledgeBaseId"
-                value={draft.knowledgeBaseId ?? ''}
-                onChange={(event) => {
-                  const value = event.currentTarget.value || null
-                  setDraft((current) =>
-                    current ? { ...current, knowledgeBaseId: value } : current,
-                  )
-                }}
-              >
-                <option value="">请选择知识库</option>
-                {knowledgeBases.map((knowledgeBase) => (
-                  <option key={knowledgeBase.id} value={knowledgeBase.id}>
-                    {knowledgeBase.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label className="field ai-field-wide" htmlFor="ai-handoff-keywords">
-            <span>转人工关键词</span>
-            <input
+            <div className="form-grid-two">
+              <label className="form-field" htmlFor="ai-response-language">
+                <span className="form-field-label">回复语言</span>
+                <Input
+                  id="ai-response-language"
+                  name="responseLanguage"
+                  value={draft.responseLanguage}
+                  maxLength={100}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value
+                    setDraft((current) =>
+                      current ? { ...current, responseLanguage: value } : current,
+                    )
+                  }}
+                />
+                <span className="field-description">发布前需要填写。</span>
+              </label>
+              <div className="form-field">
+                <span className="form-field-label" id="ai-knowledge-base-label">
+                  知识库
+                </span>
+                <Select
+                  name="knowledgeBaseId"
+                  value={draft.knowledgeBaseId ?? ''}
+                  onValueChange={(value) =>
+                    setDraft((current) =>
+                      current ? { ...current, knowledgeBaseId: value || null } : current,
+                    )
+                  }
+                >
+                  <SelectTrigger aria-labelledby="ai-knowledge-base-label" id="ai-knowledge-base">
+                    <SelectValue placeholder="选择知识库" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {knowledgeBases.map((knowledgeBase) => (
+                      <SelectItem key={knowledgeBase.id} value={knowledgeBase.id}>
+                        {knowledgeBase.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <span className="field-description">
+                  {knowledgeBases.length ? (
+                    '发布前需要选择一个知识库。'
+                  ) : (
+                    <a href="/knowledge">先创建知识库</a>
+                  )}
+                </span>
+              </div>
+            </div>
+          </section>
+
+          <Separator />
+
+          <section aria-labelledby="ai-handoff-title" className="ai-config-section">
+            <div className="section-heading">
+              <div>
+                <h2 id="ai-handoff-title">转人工策略</h2>
+                <p>选择 AI 在这些情况下应交由人工客服继续处理。</p>
+              </div>
+            </div>
+            <div className="handoff-switch-grid">
+              {(
+                [
+                  ['handoffOnCustomerRequest', '客户要求人工时转接'],
+                  ['handoffOnNoKnowledge', '缺少相关知识时转接'],
+                  ['handoffOnNegativeSentiment', '检测到负面情绪时转接'],
+                  ['handoffOnUnableToAnswer', '无法回答时转接'],
+                ] as const
+              ).map(([key, label]) => (
+                <div className="switch-field" key={key}>
+                  <span>{label}</span>
+                  <Switch
+                    aria-label={label}
+                    checked={draft[key]}
+                    disabled={busy}
+                    name={key}
+                    onCheckedChange={(checked) =>
+                      setDraft((current) => (current ? { ...current, [key]: checked } : current))
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+            <Field
+              description="用逗号分隔多个关键词。客户消息包含关键词时会触发转人工。"
               id="ai-handoff-keywords"
+              label="转人工关键词"
               name="handoffKeywords"
               value={draft.handoffKeywords.join(', ')}
-              placeholder="人工, 客服"
               maxLength={10_000}
+              placeholder="人工, 客服"
+              required={false}
               onChange={(event) => {
                 const handoffKeywords = event.currentTarget.value.split(/[,\n]/)
                 setDraft((current) => (current ? { ...current, handoffKeywords } : current))
               }}
             />
-          </label>
-          <fieldset className="ai-handoff-fields">
-            <legend>转人工行为</legend>
-            <label className="check-field">
-              <input
-                name="handoffOnCustomerRequest"
-                type="checkbox"
-                checked={draft.handoffOnCustomerRequest}
-                onChange={(event) => {
-                  const checked = event.currentTarget.checked
-                  setDraft((current) =>
-                    current ? { ...current, handoffOnCustomerRequest: checked } : current,
-                  )
-                }}
-              />
-              客户要求人工时转接
-            </label>
-            <label className="check-field">
-              <input
-                name="handoffOnNoKnowledge"
-                type="checkbox"
-                checked={draft.handoffOnNoKnowledge}
-                onChange={(event) => {
-                  const checked = event.currentTarget.checked
-                  setDraft((current) =>
-                    current ? { ...current, handoffOnNoKnowledge: checked } : current,
-                  )
-                }}
-              />
-              没有知识时转接
-            </label>
-            <label className="check-field">
-              <input
-                name="handoffOnNegativeSentiment"
-                type="checkbox"
-                checked={draft.handoffOnNegativeSentiment}
-                onChange={(event) => {
-                  const checked = event.currentTarget.checked
-                  setDraft((current) =>
-                    current ? { ...current, handoffOnNegativeSentiment: checked } : current,
-                  )
-                }}
-              />
-              检测到负面情绪时转接
-            </label>
-            <label className="check-field">
-              <input
-                name="handoffOnUnableToAnswer"
-                type="checkbox"
-                checked={draft.handoffOnUnableToAnswer}
-                onChange={(event) => {
-                  const checked = event.currentTarget.checked
-                  setDraft((current) =>
-                    current ? { ...current, handoffOnUnableToAnswer: checked } : current,
-                  )
-                }}
-              />
-              无法回答时转接
-            </label>
-          </fieldset>
-          <div className="member-actions">
-            <button className="secondary" disabled={busy} type="submit">
-              {busy ? '保存中…' : '保存草稿'}
-            </button>
-            <button
-              className="primary"
-              disabled={busy}
-              type="button"
-              onClick={() => void publish()}
-            >
-              {busy ? '处理中…' : '发布'}
-            </button>
+          </section>
+
+          {formError && (
+            <p className="inline-error" role="alert">
+              {formError}
+            </p>
+          )}
+          {feedback && (
+            <p className="inline-feedback" role="status">
+              {feedback}
+            </p>
+          )}
+          {draftDirty && (
+            <p className="field-description" role="status">
+              保存草稿后才能发布这些更改。
+            </p>
+          )}
+          <div className="ai-form-actions">
+            <Button disabled={busy || !draftDirty} type="submit" variant="outline">
+              {busy ? '正在保存…' : '保存草稿'}
+            </Button>
           </div>
         </form>
 
-        <section className="ai-member-card ai-published-panel">
-          <div className="section-heading">
-            <p className="card-label">已发布运行快照</p>
-            <span>{config.publishedAt ? formatDate(config.publishedAt) : '尚未发布'}</span>
-          </div>
-          {config.publishedSnapshot ? (
-            <dl className="ai-snapshot">
+        <aside className="ai-runtime-column">
+          <section aria-labelledby="ai-runtime-title" className="runtime-panel ai-published-panel">
+            <div className="runtime-panel-heading">
               <div>
-                <dt>指令</dt>
-                <dd>{config.publishedSnapshot.instructions}</dd>
+                <h2 id="ai-runtime-title">已发布运行配置</h2>
+                <p>AI 正在使用的设置。</p>
               </div>
-              <div>
-                <dt>回复语言</dt>
-                <dd>{config.publishedSnapshot.responseLanguage}</dd>
+              <StateBadge
+                data-runtime-status={config.runtimeStatus}
+                status={config.runtimeStatus}
+                label={runtimeStatusLabels[config.runtimeStatus]}
+              />
+            </div>
+            {config.publishedAt ? (
+              <p className="runtime-published-time">
+                发布于{' '}
+                <time dateTime={config.publishedAt} title={formatExactDate(config.publishedAt)}>
+                  {formatDate(config.publishedAt)}
+                </time>
+              </p>
+            ) : (
+              <p className="runtime-published-time">尚未发布</p>
+            )}
+            {config.runtimeError && (
+              <p className="inline-error" role="alert">
+                {config.runtimeError}
+              </p>
+            )}
+            {config.publishedSnapshot ? (
+              <dl className="runtime-details">
+                <div>
+                  <dt>指令</dt>
+                  <dd>{config.publishedSnapshot.instructions}</dd>
+                </div>
+                <div>
+                  <dt>回复语言</dt>
+                  <dd>{config.publishedSnapshot.responseLanguage}</dd>
+                </div>
+                <div>
+                  <dt>知识库</dt>
+                  <dd>
+                    {knowledgeBases.find(
+                      ({ id }) => id === config.publishedSnapshot?.knowledgeBaseId,
+                    )?.name ?? '已选择知识库'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>客户要求人工时转接</dt>
+                  <dd>{config.publishedSnapshot.handoffOnCustomerRequest ? '启用' : '停用'}</dd>
+                </div>
+                <div>
+                  <dt>缺少知识时转接</dt>
+                  <dd>{config.publishedSnapshot.handoffOnNoKnowledge ? '启用' : '停用'}</dd>
+                </div>
+                <div>
+                  <dt>负面情绪时转接</dt>
+                  <dd>{config.publishedSnapshot.handoffOnNegativeSentiment ? '启用' : '停用'}</dd>
+                </div>
+                <div>
+                  <dt>无法回答时转接</dt>
+                  <dd>{config.publishedSnapshot.handoffOnUnableToAnswer ? '启用' : '停用'}</dd>
+                </div>
+                <div>
+                  <dt>转人工关键词</dt>
+                  <dd>{config.publishedSnapshot.handoffKeywords.join('、') || '未设置'}</dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="table-muted">
+                发布草稿后，运行时配置会显示在这里。未发布的草稿不会影响客户回复。
+              </p>
+            )}
+          </section>
+
+          <section aria-labelledby="ai-channels-title" className="runtime-section">
+            <h2 id="ai-channels-title">渠道访问</h2>
+            {memberChannels.length ? (
+              <div className="member-channel-list">
+                {memberChannels.map((channelName) => (
+                  <Badge key={channelName} variant="outline">
+                    {channelName}
+                  </Badge>
+                ))}
               </div>
-              <div>
-                <dt>知识库</dt>
-                <dd>
-                  {knowledgeBases.find(({ id }) => id === config.publishedSnapshot?.knowledgeBaseId)
-                    ?.name ?? '已选择知识库'}
-                </dd>
-              </div>
-              <div>
-                <dt>转人工关键词</dt>
-                <dd>{config.publishedSnapshot.handoffKeywords.join('、') || '未设置'}</dd>
-              </div>
-            </dl>
-          ) : (
-            <p className="muted">发布后，运行时只会使用这里显示的快照。</p>
-          )}
-        </section>
+            ) : (
+              <p className="table-muted">
+                尚未授予渠道访问。可以在 <a href="/team">团队成员设置</a> 中配置。
+              </p>
+            )}
+          </section>
+        </aside>
       </div>
     </main>
+  )
+}
+
+function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntimeSnapshot) {
+  return (
+    JSON.stringify([
+      left.instructions,
+      left.responseLanguage,
+      left.knowledgeBaseId,
+      left.handoffOnCustomerRequest,
+      left.handoffOnNoKnowledge,
+      left.handoffOnNegativeSentiment,
+      left.handoffOnUnableToAnswer,
+      left.handoffKeywords,
+    ]) ===
+    JSON.stringify([
+      right.instructions,
+      right.responseLanguage,
+      right.knowledgeBaseId,
+      right.handoffOnCustomerRequest,
+      right.handoffOnNoKnowledge,
+      right.handoffOnNegativeSentiment,
+      right.handoffOnUnableToAnswer,
+      right.handoffKeywords,
+    ])
   )
 }
 
@@ -2447,12 +3083,19 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
   const [loadError, setLoadError] = useState('')
   const [invite, setInvite] = useState<Invitation>()
   const [inviteCopied, setInviteCopied] = useState(false)
+  const [inviteOpen, setInviteOpen] = useState(false)
+  const [addAiOpen, setAddAiOpen] = useState(false)
+  const [editingMember, setEditingMember] = useState<TeamMember | null>(null)
+  const [removingMember, setRemovingMember] = useState<TeamMember | null>(null)
+  const [formError, setFormError] = useState('')
+  const [busy, setBusy] = useState('')
   const canManage = workspace.role !== 'AGENT'
 
   const refresh = useCallback(async () => {
     const response = await fetch(`/api/workspaces/${workspace.id}/team`)
     if (!response.ok) throw await responseError(response)
     setTeam((await response.json()) as Team)
+    setLoadError('')
   }, [workspace.id])
 
   useEffect(() => {
@@ -2464,6 +3107,8 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
     event.preventDefault()
     const form = event.currentTarget
     const data = new FormData(form)
+    setBusy('invite')
+    setFormError('')
     try {
       const result = (await request(`/api/workspaces/${workspace.id}/invitations`, {
         email: data.get('email'),
@@ -2476,348 +3121,612 @@ function TeamPage({ workspace }: { workspace: Workspace }) {
       })) as { invitation: Invitation }
       setInvite(result.invitation)
       setInviteCopied(false)
-      form.reset()
+      toast.success('邀请链接已创建')
     } catch (cause) {
-      setLoadError(teamErrorMessage(cause))
+      setFormError(teamErrorMessage(cause))
+    } finally {
+      setBusy('')
     }
   }
 
   async function createAi(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const form = event.currentTarget
-    const data = new FormData(form)
+    const data = new FormData(event.currentTarget)
+    setBusy('ai')
+    setFormError('')
     try {
       await request(`/api/workspaces/${workspace.id}/members`, {
         type: 'AI',
         displayName: data.get('displayName'),
       })
-      form.reset()
       await refresh()
+      setAddAiOpen(false)
+      toast.success('AI 成员已添加')
     } catch (cause) {
-      setLoadError(teamErrorMessage(cause))
+      setFormError(teamErrorMessage(cause))
+    } finally {
+      setBusy('')
     }
   }
 
-  if (loadError && !team) {
-    return (
-      <main className="team-page" role="alert">
-        <p className="form-error">{loadError}</p>
-      </main>
-    )
-  }
-  if (!team) return <main className="team-page">正在加载团队…</main>
-
-  return (
-    <main className="team-page">
-      <div className="team-heading">
-        <div>
-          <p className="eyebrow">工作区 / 成员</p>
-          <h1>团队</h1>
-          <p>人工与 AI 成员共享同一服务身份。</p>
-        </div>
-        <span className="role-pill">{roleLabel(workspace.role)}</span>
-      </div>
-
-      {canManage && (
-        <div className="team-actions">
-          <form className="team-card" onSubmit={inviteMember}>
-            <p className="card-label">邀请团队成员</p>
-            <Field label="工作邮箱" name="email" type="email" autoComplete="off" />
-            <Field label="显示名称" name="displayName" autoComplete="off" required={false} />
-            <label className="field">
-              <span>工作区角色</span>
-              <select name="role" defaultValue="AGENT">
-                <option value="AGENT">客服</option>
-                <option value="ADMIN">管理员</option>
-              </select>
-            </label>
-            <Field
-              label="同时处理数"
-              name="maxActiveConversations"
-              type="number"
-              min="0"
-              max="10000"
-              defaultValue="10"
-            />
-            <label className="check-field">
-              <input name="autoAssignmentEnabled" type="checkbox" defaultChecked />
-              自动分配
-            </label>
-            <label className="check-field">
-              <input name="available" type="checkbox" defaultChecked />
-              当前可用
-            </label>
-            <fieldset className="channel-fields">
-              <legend>渠道权限</legend>
-              {team.channels.length ? (
-                team.channels.map((channel) => (
-                  <label className="check-field" key={channel.id}>
-                    <input name="channelId" type="checkbox" value={channel.id} />
-                    {channel.displayName}
-                  </label>
-                ))
-              ) : (
-                <span className="muted">尚未连接任何渠道。</span>
-              )}
-            </fieldset>
-            <button className="primary" type="submit">
-              创建邀请链接
-            </button>
-          </form>
-
-          <form className="team-card" onSubmit={createAi}>
-            <p className="card-label">添加 AI 成员</p>
-            <p className="card-copy">AI 工作区将提供配置和发布功能。</p>
-            <Field label="显示名称" name="displayName" autoComplete="off" />
-            <button className="primary" type="submit">
-              添加 AI 成员
-            </button>
-          </form>
-        </div>
-      )}
-
-      {invite && (
-        <section className="invite-result" aria-live="polite">
-          <div>
-            <p className="card-label">一次性邀请链接</p>
-            <p>
-              将此链接分享给 {invite.email}。有效期至{' '}
-              {new Date(invite.expiresAt).toLocaleString('zh-CN')}。
-            </p>
-          </div>
-          <div className="invite-copy">
-            <input aria-label="邀请链接" readOnly value={invite.url} />
-            <button
-              className="secondary"
-              type="button"
-              onClick={() => {
-                if (navigator.clipboard) {
-                  void navigator.clipboard.writeText(invite.url).then(() => setInviteCopied(true))
-                }
-              }}
-            >
-              {inviteCopied ? '已复制' : '复制链接'}
-            </button>
-          </div>
-        </section>
-      )}
-
-      {loadError && (
-        <p className="form-error" role="alert">
-          {loadError}
-        </p>
-      )}
-      <section aria-labelledby="members-title">
-        <div className="section-heading">
-          <p className="card-label" id="members-title">
-            成员
-          </p>
-          <span>{team.members.length}</span>
-        </div>
-        <div className="member-list">
-          {team.members.map((member) => (
-            <MemberEditor
-              key={member.id}
-              workspaceId={workspace.id}
-              member={member}
-              channels={team.channels}
-              canManage={canManage}
-              onChanged={refresh}
-            />
-          ))}
-        </div>
-      </section>
-    </main>
-  )
-}
-
-function MemberEditor({
-  workspaceId,
-  member,
-  channels,
-  canManage,
-  onChanged,
-}: {
-  workspaceId: string
-  member: TeamMember
-  channels: TeamChannel[]
-  canManage: boolean
-  onChanged: () => Promise<void>
-}) {
-  const [busy, setBusy] = useState(false)
-  const owner = member.role === 'OWNER'
-
-  async function save(event: FormEvent<HTMLFormElement>) {
+  async function saveMember(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    setBusy(true)
+    if (!editingMember) return
+    const member = editingMember
     const data = new FormData(event.currentTarget)
+    setBusy(member.id)
+    setFormError('')
     try {
       await request(
-        `/api/workspaces/${workspaceId}/members/${member.id}`,
+        `/api/workspaces/${workspace.id}/members/${member.id}`,
         {
           displayName: data.get('displayName'),
-          status: data.get('status') ?? undefined,
+          status: String(data.get('status') ?? member.status),
           autoAssignmentEnabled: data.get('autoAssignmentEnabled') === 'on',
           maxActiveConversations: Number(data.get('maxActiveConversations')),
-          ...(member.type === 'HUMAN' && !owner
-            ? { role: data.get('role'), available: data.get('available') === 'on' }
-            : member.type === 'HUMAN'
-              ? { available: data.get('available') === 'on' }
-              : {}),
+          ...(member.type === 'HUMAN'
+            ? {
+                ...(member.role !== 'OWNER' ? { role: data.get('role') } : {}),
+                available: data.get('available') === 'on',
+              }
+            : {}),
           channelIds: data.getAll('channelId').map(String),
         },
         'PATCH',
       )
-      await onChanged()
+      await refresh()
+      setEditingMember(null)
+      toast.success('成员设置已保存')
     } catch (cause) {
-      window.alert(teamErrorMessage(cause))
+      setFormError(teamErrorMessage(cause))
     } finally {
-      setBusy(false)
+      setBusy('')
     }
   }
 
-  async function remove() {
-    if (!window.confirm(`确定要移除“${member.displayName ?? '该成员'}”吗？`)) return
-    setBusy(true)
+  async function updateMember(
+    member: TeamMember,
+    update: { autoAssignmentEnabled: boolean } | { available: boolean },
+  ) {
+    setBusy(member.id)
+    setLoadError('')
     try {
-      await request(`/api/workspaces/${workspaceId}/members/${member.id}`, {}, 'DELETE')
-      await onChanged()
+      await request(`/api/workspaces/${workspace.id}/members/${member.id}`, update, 'PATCH')
+      await refresh()
+      toast.success('成员设置已更新')
     } catch (cause) {
-      window.alert(teamErrorMessage(cause))
+      toast.error(teamErrorMessage(cause))
     } finally {
-      setBusy(false)
+      setBusy('')
     }
   }
+
+  async function removeMember() {
+    if (!removingMember) return
+    setBusy(removingMember.id)
+    setFormError('')
+    try {
+      await request(`/api/workspaces/${workspace.id}/members/${removingMember.id}`, {}, 'DELETE')
+      await refresh()
+      setRemovingMember(null)
+      toast.success('成员已移除')
+    } catch (cause) {
+      setFormError(teamErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function copyInvite() {
+    if (!invite) return
+    try {
+      await navigator.clipboard.writeText(invite.url)
+      setInviteCopied(true)
+      toast.success('邀请链接已复制')
+    } catch {
+      setFormError('无法访问剪贴板，请手动复制邀请链接。')
+    }
+  }
+
+  function openInviteDialog() {
+    setInvite(undefined)
+    setFormError('')
+    setInviteOpen(true)
+  }
+
+  function openMemberEditor(member: TeamMember) {
+    setFormError('')
+    setEditingMember(member)
+  }
+
+  const headerActions = canManage ? (
+    <>
+      <Button variant="outline" onClick={() => setAddAiOpen(true)}>
+        添加 AI 成员
+      </Button>
+      <Button onClick={openInviteDialog}>邀请成员</Button>
+    </>
+  ) : null
 
   return (
-    <form className="member-card" onSubmit={save}>
-      <div className="member-summary">
-        <div>
-          <span className={`type-badge ${member.type.toLowerCase()}`}>
-            {memberTypeLabels[member.type]}
-          </span>
-          <h2>{member.displayName ?? '未命名成员'}</h2>
-          {member.email && <p>{member.email}</p>}
-        </div>
-        <div className="member-state">
-          <span>
-            {member.type === 'AI'
-              ? member.configurationStatus
-                ? configurationStatusLabels[member.configurationStatus]
-                : ''
-              : roleLabel(member.role)}
-          </span>
-          <strong>{lifecycleLabels[member.status]}</strong>
-        </div>
-      </div>
-      <div className="member-fields">
-        <Field
-          label="显示名称"
-          name="displayName"
-          defaultValue={member.displayName ?? ''}
-          disabled={!canManage}
-        />
-        <label className="field">
-          <span>成员状态</span>
-          <select name="status" defaultValue={member.status} disabled={!canManage || owner}>
-            <option value="ACTIVE">启用</option>
-            <option value="DISABLED">停用</option>
-          </select>
-        </label>
-        {member.type === 'HUMAN' && !owner && (
-          <label className="field">
-            <span>角色</span>
-            <select name="role" defaultValue={member.role ?? 'AGENT'} disabled={!canManage}>
-              <option value="AGENT">客服</option>
-              <option value="ADMIN">管理员</option>
-            </select>
-          </label>
-        )}
-        <label className="field">
-          <span>同时处理数</span>
-          <input
-            name="maxActiveConversations"
-            type="number"
-            min="0"
-            max="10000"
-            defaultValue={member.maxActiveConversations}
-            disabled={!canManage}
-            required
-          />
-        </label>
-        <label className="check-field">
-          <input
-            name="autoAssignmentEnabled"
-            type="checkbox"
-            defaultChecked={member.autoAssignmentEnabled}
-            disabled={!canManage}
-          />
-          自动分配
-        </label>
-        {member.type === 'HUMAN' && (
-          <label className="check-field">
-            <input
-              name="available"
-              type="checkbox"
-              defaultChecked={member.availability ?? false}
-              disabled={!canManage}
-            />
-            当前可用
-          </label>
-        )}
-      </div>
-      <fieldset className="channel-fields" disabled={!canManage}>
-        <legend>渠道权限</legend>
-        {channels.length ? (
-          channels.map((channel) => (
-            <label className="check-field" key={channel.id}>
-              <input
-                name="channelId"
-                type="checkbox"
-                value={channel.id}
-                defaultChecked={member.channelIds.includes(channel.id)}
-              />
-              {channel.displayName}
-            </label>
-          ))
-        ) : (
-          <span className="muted">尚未连接任何渠道。</span>
-        )}
-      </fieldset>
-      {canManage && (
-        <div className="member-actions">
-          {member.type === 'AI' && (
-            <a className="secondary" href={`/ai-member/${member.id}`}>
-              配置 AI
-            </a>
-          )}
-          <button className="secondary" disabled={busy} type="submit">
-            {busy ? '保存中…' : '保存更改'}
-          </button>
-          {!owner && (
-            <button
-              className="danger-button"
-              disabled={busy}
-              type="button"
-              onClick={() => void remove()}
-            >
-              移除成员
-            </button>
-          )}
+    <main className="workspace-page team-page">
+      <PageHeader
+        actions={headerActions}
+        description="管理可以处理 Messenger 对话的成员、分配能力与渠道访问。"
+        eyebrow="工作区成员"
+        title="团队"
+      />
+      {loadError && (
+        <div className="page-error" role="alert">
+          <p>{loadError}</p>
+          <Button size="sm" variant="outline" onClick={() => void refresh()}>
+            重试
+          </Button>
         </div>
       )}
-    </form>
-  )
-}
+      {!team ? (
+        loadError ? null : (
+          <OperationalListSkeleton />
+        )
+      ) : (
+        <section aria-labelledby="members-title">
+          <div className="list-heading">
+            <h2 id="members-title">成员</h2>
+            <span>{team.members.length} 位</span>
+          </div>
+          {team.members.length ? (
+            <Table aria-labelledby="members-title" className="ops-table team-table">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>成员</TableHead>
+                  <TableHead>分配设置</TableHead>
+                  <TableHead>渠道访问</TableHead>
+                  {canManage && <TableHead className="actions-column">操作</TableHead>}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {team.members.map((member) => {
+                  const name = member.displayName ?? '未命名成员'
+                  const memberChannels = team.channels
+                    .filter((channel) => member.channelIds.includes(channel.id))
+                    .map(({ displayName }) => displayName)
 
-function SignalRail() {
-  return (
-    <aside className="signal-rail" aria-hidden="true">
-      <span>收件箱信号</span>
-      <i />
-      <i />
-      <i />
-    </aside>
+                  return (
+                    <TableRow className="member-row" data-member-id={member.id} key={member.id}>
+                      <TableCell data-column="member" data-label="成员">
+                        <div className="member-identity">
+                          <Avatar size="sm">
+                            <AvatarFallback>{nameInitial(name, '成')}</AvatarFallback>
+                          </Avatar>
+                          <div className="member-identity-copy">
+                            <div className="member-identity-line">
+                              <strong>{name}</strong>
+                              <Badge variant="outline">
+                                {member.type === 'AI' ? 'AI 成员' : '人工成员'}
+                              </Badge>
+                              <StateBadge
+                                status={member.status}
+                                label={lifecycleLabels[member.status]}
+                              />
+                            </div>
+                            <div className="member-meta">
+                              {member.email && <span>{member.email}</span>}
+                              {member.role && <span>{roleLabel(member.role)}</span>}
+                              {member.type === 'AI' && (
+                                <StateBadge
+                                  status={member.configurationStatus ?? 'UNPUBLISHED'}
+                                  label={
+                                    runtimeStatusLabels[member.configurationStatus ?? 'UNPUBLISHED']
+                                  }
+                                />
+                              )}
+                            </div>
+                            {member.role === 'OWNER' && (
+                              <span className="member-protection-note">所有者不可停用或移除</span>
+                            )}
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell data-column="routing" data-label="分配设置">
+                        <div className="member-routing">
+                          <div className="member-switch-row">
+                            <span>自动分配</span>
+                            <Switch
+                              aria-label={`${name} 自动分配`}
+                              checked={member.autoAssignmentEnabled}
+                              disabled={!canManage || Boolean(busy)}
+                              onCheckedChange={(checked) =>
+                                void updateMember(member, { autoAssignmentEnabled: checked })
+                              }
+                            />
+                          </div>
+                          {member.type === 'HUMAN' && (
+                            <div className="member-switch-row">
+                              <span>{member.availability ? '当前可用' : '当前不可用'}</span>
+                              <Switch
+                                aria-label={`${name} 当前可用`}
+                                checked={member.availability ?? false}
+                                disabled={!canManage || Boolean(busy)}
+                                onCheckedChange={(checked) =>
+                                  void updateMember(member, { available: checked })
+                                }
+                              />
+                            </div>
+                          )}
+                          <span className="member-capacity">
+                            最多 {member.maxActiveConversations} 段进行中对话
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell data-column="channels" data-label="渠道访问">
+                        {memberChannels.length ? (
+                          <div className="member-channel-list">
+                            {memberChannels.map((channelName) => (
+                              <span key={channelName}>{channelName}</span>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="table-muted">未授权渠道</span>
+                        )}
+                      </TableCell>
+                      {canManage && (
+                        <TableCell data-column="actions" data-label="操作">
+                          <div className="row-actions">
+                            <DropdownMenu>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <DropdownMenuTrigger asChild>
+                                    <Button
+                                      aria-label={`${name} 的更多操作`}
+                                      size="icon-sm"
+                                      variant="ghost"
+                                    >
+                                      <MoreHorizontal aria-hidden="true" />
+                                    </Button>
+                                  </DropdownMenuTrigger>
+                                </TooltipTrigger>
+                                <TooltipContent>更多成员操作</TooltipContent>
+                              </Tooltip>
+                              <DropdownMenuContent align="end">
+                                <DropdownMenuItem onSelect={() => openMemberEditor(member)}>
+                                  编辑成员设置
+                                </DropdownMenuItem>
+                                {member.type === 'AI' && (
+                                  <DropdownMenuItem
+                                    onSelect={() =>
+                                      window.location.assign(`/ai-member/${member.id}`)
+                                    }
+                                  >
+                                    配置 AI 成员
+                                  </DropdownMenuItem>
+                                )}
+                                {member.role !== 'OWNER' && (
+                                  <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem
+                                      className="text-destructive"
+                                      onSelect={() => {
+                                        setFormError('')
+                                        setRemovingMember(member)
+                                      }}
+                                    >
+                                      移除成员
+                                    </DropdownMenuItem>
+                                  </>
+                                )}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          </div>
+                        </TableCell>
+                      )}
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          ) : (
+            <EmptyState
+              action={canManage ? <Button onClick={openInviteDialog}>邀请成员</Button> : undefined}
+              description="邀请人工客服，或添加 AI 成员来处理 Messenger 对话。"
+              title="还没有团队成员"
+            />
+          )}
+        </section>
+      )}
+
+      <Dialog
+        open={inviteOpen}
+        onOpenChange={(open) => {
+          setInviteOpen(open)
+          if (!open) setInvite(undefined)
+        }}
+      >
+        <DialogContent className="ui-dialog-content">
+          {invite ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>一次性邀请链接</DialogTitle>
+                <DialogDescription>
+                  邀请已发送给 {invite.email}。请复制链接并分享给受邀成员。
+                </DialogDescription>
+              </DialogHeader>
+              <p className="invite-expiry">
+                {roleLabel(invite.role)} · 有效期至{' '}
+                <time dateTime={invite.expiresAt} title={formatExactDate(invite.expiresAt)}>
+                  {formatDate(invite.expiresAt)}
+                </time>
+              </p>
+              <div className="form-field">
+                <label className="form-field-label" htmlFor="invite-url">
+                  邀请链接
+                </label>
+                <Input id="invite-url" readOnly value={invite.url} />
+              </div>
+              {formError && (
+                <p className="inline-error" role="alert">
+                  {formError}
+                </p>
+              )}
+              <DialogFooter>
+                <Button variant="outline" onClick={() => void copyInvite()}>
+                  <Copy aria-hidden="true" />
+                  {inviteCopied ? '已复制' : '复制链接'}
+                </Button>
+                <Button onClick={() => setInviteOpen(false)}>完成</Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle>邀请团队成员</DialogTitle>
+                <DialogDescription>
+                  创建一个仅可使用一次、24 小时后过期的邀请链接。
+                </DialogDescription>
+              </DialogHeader>
+              <form className="dialog-form" onSubmit={inviteMember}>
+                <Field label="工作邮箱" name="email" type="email" autoComplete="email" />
+                <Field label="显示名称" name="displayName" autoComplete="name" required={false} />
+                <div className="form-field">
+                  <span className="form-field-label" id="invite-role-label">
+                    工作区角色
+                  </span>
+                  <Select defaultValue="AGENT" name="role">
+                    <SelectTrigger aria-labelledby="invite-role-label">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="AGENT">客服</SelectItem>
+                      <SelectItem value="ADMIN">管理员</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Field
+                  label="最大并行对话数"
+                  name="maxActiveConversations"
+                  type="number"
+                  min="0"
+                  max="10000"
+                  defaultValue="10"
+                />
+                <div className="switch-field">
+                  <span>自动分配</span>
+                  <Switch aria-label="自动分配" defaultChecked name="autoAssignmentEnabled" />
+                </div>
+                <div className="switch-field">
+                  <span>当前可用</span>
+                  <Switch aria-label="当前可用" defaultChecked name="available" />
+                </div>
+                <fieldset className="selection-group">
+                  <legend>渠道访问</legend>
+                  {team?.channels.length ? (
+                    team.channels.map((channel) => (
+                      <div className="selection-option" key={channel.id}>
+                        <Checkbox
+                          aria-label={channel.displayName}
+                          name="channelId"
+                          value={channel.id}
+                        />
+                        <span>{channel.displayName}</span>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="field-description">
+                      尚未连接 Facebook Page。可以稍后在成员设置中配置渠道访问。
+                    </p>
+                  )}
+                </fieldset>
+                {formError && (
+                  <p className="inline-error" role="alert">
+                    {formError}
+                  </p>
+                )}
+                <DialogFooter>
+                  <Button type="button" variant="outline" onClick={() => setInviteOpen(false)}>
+                    取消
+                  </Button>
+                  <Button disabled={busy === 'invite'} type="submit">
+                    {busy === 'invite' ? '正在创建…' : '创建邀请链接'}
+                  </Button>
+                </DialogFooter>
+              </form>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={addAiOpen}
+        onOpenChange={(open) => {
+          setAddAiOpen(open)
+          if (!open) setFormError('')
+        }}
+      >
+        <DialogContent className="ui-dialog-content">
+          <DialogHeader>
+            <DialogTitle>添加 AI 成员</DialogTitle>
+            <DialogDescription>
+              先创建 AI 成员，再配置渠道访问和草稿。AI 不需要登录账户。
+            </DialogDescription>
+          </DialogHeader>
+          <form className="dialog-form" onSubmit={createAi}>
+            <Field label="显示名称" name="displayName" autoComplete="off" />
+            {formError && (
+              <p className="inline-error" role="alert">
+                {formError}
+              </p>
+            )}
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setAddAiOpen(false)}>
+                取消
+              </Button>
+              <Button disabled={busy === 'ai'} type="submit">
+                {busy === 'ai' ? '正在添加…' : '添加 AI 成员'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={Boolean(editingMember)}
+        onOpenChange={(open) => {
+          if (!open && !busy) setEditingMember(null)
+        }}
+      >
+        {editingMember && (
+          <DialogContent className="ui-dialog-content ui-dialog-wide">
+            <DialogHeader>
+              <DialogTitle>编辑成员设置</DialogTitle>
+              <DialogDescription>
+                {editingMember.displayName ?? '未命名成员'} 的成员状态、分配能力和渠道访问。
+              </DialogDescription>
+            </DialogHeader>
+            <form className="dialog-form" key={editingMember.id} onSubmit={saveMember}>
+              <Field
+                label="显示名称"
+                name="displayName"
+                defaultValue={editingMember.displayName ?? ''}
+              />
+              <div className="form-grid-two">
+                <div className="form-field">
+                  <span className="form-field-label" id="member-lifecycle-label">
+                    成员状态
+                  </span>
+                  <Select defaultValue={editingMember.status} name="status">
+                    <SelectTrigger
+                      aria-labelledby="member-lifecycle-label"
+                      disabled={editingMember.role === 'OWNER'}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="ACTIVE">启用</SelectItem>
+                      <SelectItem value="DISABLED">停用</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {editingMember.role === 'OWNER' && (
+                    <span className="field-description">所有者成员不能停用。</span>
+                  )}
+                </div>
+                {editingMember.type === 'HUMAN' && editingMember.role !== 'OWNER' && (
+                  <div className="form-field">
+                    <span className="form-field-label" id="member-role-label">
+                      工作区角色
+                    </span>
+                    <Select defaultValue={editingMember.role ?? 'AGENT'} name="role">
+                      <SelectTrigger aria-labelledby="member-role-label">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="AGENT">客服</SelectItem>
+                        <SelectItem value="ADMIN">管理员</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
+              </div>
+              <Field
+                label="最大并行对话数"
+                name="maxActiveConversations"
+                type="number"
+                min="0"
+                max="10000"
+                defaultValue={editingMember.maxActiveConversations}
+              />
+              <div className="form-grid-two">
+                <div className="switch-field">
+                  <span>自动分配</span>
+                  <Switch
+                    aria-label="自动分配"
+                    defaultChecked={editingMember.autoAssignmentEnabled}
+                    name="autoAssignmentEnabled"
+                  />
+                </div>
+                {editingMember.type === 'HUMAN' && (
+                  <div className="switch-field">
+                    <span>当前可用</span>
+                    <Switch
+                      aria-label="当前可用"
+                      defaultChecked={editingMember.availability ?? false}
+                      name="available"
+                    />
+                  </div>
+                )}
+              </div>
+              <fieldset className="selection-group">
+                <legend>渠道访问</legend>
+                {team?.channels.length ? (
+                  team.channels.map((channel) => (
+                    <div className="selection-option" key={channel.id}>
+                      <Checkbox
+                        aria-label={channel.displayName}
+                        defaultChecked={editingMember.channelIds.includes(channel.id)}
+                        name="channelId"
+                        value={channel.id}
+                      />
+                      <span>{channel.displayName}</span>
+                    </div>
+                  ))
+                ) : (
+                  <p className="field-description">尚未连接 Facebook Page。</p>
+                )}
+              </fieldset>
+              {formError && (
+                <p className="inline-error" role="alert">
+                  {formError}
+                </p>
+              )}
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={() => setEditingMember(null)}>
+                  取消
+                </Button>
+                <Button disabled={busy === editingMember.id} type="submit">
+                  {busy === editingMember.id ? '正在保存…' : '保存更改'}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        )}
+      </Dialog>
+
+      <ConfirmActionDialog
+        busy={Boolean(removingMember && busy === removingMember.id)}
+        busyLabel="正在移除…"
+        confirmLabel="移除成员"
+        description={
+          removingMember?.type === 'HUMAN'
+            ? `移除“${removingMember.displayName ?? '该成员'}”会删除其成员设置，并撤销该用户的工作区访问。此操作无法撤销。`
+            : `移除“${removingMember?.displayName ?? '该成员'}”会永久删除其成员设置。此操作无法撤销。`
+        }
+        error={formError}
+        onConfirm={removeMember}
+        onOpenChange={(open) => {
+          if (!open) setRemovingMember(null)
+        }}
+        open={Boolean(removingMember)}
+        title="移除此成员？"
+      />
+    </main>
   )
 }
 

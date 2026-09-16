@@ -29,7 +29,7 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
       .values({ workspaceId: workspace.id, provider: 'FACEBOOK_MESSENGER', displayName: 'Support' })
       .returning({ id: channel.id })
     if (!createdChannel) throw new Error('Channel was not created')
-    const knowledgeBase = await createKnowledgeBase(db, {
+    await createKnowledgeBase(db, {
       workspaceId: workspace.id,
       createdByUserId: (
         (await (await page.request.get('/api/me')).json()) as { user: { id: string } }
@@ -38,11 +38,11 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     })
 
     await page.goto('/team')
-    const aiForm = page.locator('form.team-card').filter({ hasText: '添加 AI 成员' })
-    await aiForm.getByLabel('显示名称').fill('Answer Bot')
-    await aiForm.getByRole('button', { name: '添加 AI 成员' }).click()
-    const aiCard = page.locator('form.member-card').filter({ hasText: 'Answer Bot' })
-    await expect(aiCard).toBeVisible()
+    await page.getByRole('button', { name: '添加 AI 成员', exact: true }).click()
+    const addAiDialog = page.getByRole('dialog')
+    await addAiDialog.getByLabel('显示名称').fill('Answer Bot')
+    await addAiDialog.getByRole('button', { name: '添加 AI 成员', exact: true }).click()
+    await expect(page.getByRole('row').filter({ hasText: 'Answer Bot' })).toBeVisible()
 
     const team = (await (
       await page.request.get(`/api/workspaces/${workspace.id}/team`)
@@ -56,26 +56,32 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     })
 
     await page.goto(`/ai-member/${member.id}`)
-    await expect(page.getByRole('heading', { name: 'AI 成员配置' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Answer Bot', exact: true })).toBeVisible()
     await page.locator('#ai-instructions').fill('Answer from support facts only.')
     await page.locator('#ai-response-language').fill('English')
-    await page.locator('#ai-knowledge-base').selectOption(knowledgeBase.id)
+    await page.getByRole('combobox', { name: '知识库' }).click()
+    await page.getByRole('option', { name: 'Support facts' }).click()
     await page.locator('#ai-handoff-keywords').fill('Human, agent')
+    await expect(page.getByRole('button', { name: '发布', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: '保存草稿' }).click()
-    await expect(page.locator('[data-runtime-status="UNPUBLISHED"]')).toBeVisible()
+    await expect(
+      page.locator('.ai-published-panel [data-runtime-status="UNPUBLISHED"]'),
+    ).toBeVisible()
 
     await page.getByRole('button', { name: '发布', exact: true }).click()
-    await expect(page.locator('[data-runtime-status="USABLE"]')).toBeVisible()
+    await expect(page.locator('.ai-published-panel [data-runtime-status="USABLE"]')).toBeVisible()
     await expect(page.locator('.ai-published-panel')).toContainText(
       'Answer from support facts only.',
     )
 
     await page.locator('#ai-instructions').fill('Use the updated support policy.')
+    await expect(page.getByRole('button', { name: '发布', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: '保存草稿' }).click()
     await expect(page.locator('#ai-instructions')).toHaveValue('Use the updated support policy.')
     await expect(page.locator('.ai-published-panel')).toContainText(
       'Answer from support facts only.',
     )
+    await expect(page.getByRole('button', { name: '发布', exact: true })).toBeEnabled()
     await page.getByRole('button', { name: '发布', exact: true }).click()
     await expect(page.locator('.ai-published-panel')).toContainText(
       'Use the updated support policy.',

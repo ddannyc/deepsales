@@ -16,14 +16,14 @@ test('routes AI first, falls back to a human, then remains queued', async ({ pag
   const password = 'correct-horse-battery-staple'
 
   await page.goto('/login')
-  await page.locator('.mode-switch button').nth(1).click()
+  await page.getByRole('button', { name: '创建账户视图', exact: true }).click()
   await page.locator('input[name=name]').fill('Ada Lovelace')
   await page.locator('input[name=email]').fill(`routing-${suffix}@example.com`)
   await page.locator('input[name=password]').fill(password)
   await page.locator('form').first().locator('button[type=submit]').click()
-  await expect(page.locator('.setup-layout')).toBeVisible()
-  await page.locator('.setup-layout input[name=name]').fill('Routing acceptance')
-  await page.locator('.setup-layout button[type=submit]').click()
+  await expect(page.getByRole('heading', { name: '为工作区命名' })).toBeVisible()
+  await page.getByLabel('工作区名称').fill('Routing acceptance')
+  await page.getByRole('button', { name: '创建工作区' }).click()
   await expect(page.locator('.shell')).toBeVisible()
 
   const me = (await page.request.get('/api/me').then((response) => response.json())) as {

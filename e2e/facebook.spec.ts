@@ -17,6 +17,6 @@ test('owner can open Facebook settings', async ({ page }) => {
   await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
   await page.goto('/settings/facebook')
-  await expect(page.getByRole('heading', { name: 'Facebook Page' })).toBeVisible()
-  await expect(page.getByRole('button', { name: '连接 Facebook Page' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Facebook / Messenger' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '连接 Page', exact: true })).toBeVisible()
 })
