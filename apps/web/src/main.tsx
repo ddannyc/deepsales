@@ -83,6 +83,8 @@ import { Switch } from '#components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '#components/ui/table'
 import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
+import { DemoPage } from './demo'
+import { LandingPage } from './landing'
 
 import './styles.css'
 
@@ -496,6 +498,10 @@ function App() {
   const registrationPath = ['/sign-up', '/signup', '/register'].includes(pathname)
   const invitePath = pathname === '/invite' || (registrationPath && Boolean(pendingInviteToken))
   const publicPath =
+    pathname === '/' ||
+    pathname === '/en' ||
+    pathname === '/demo' ||
+    pathname === '/en/demo' ||
     invitePath ||
     registrationPath
 
@@ -543,10 +549,18 @@ function App() {
 
   if (loadError) return <Unavailable message={loadError} onRetry={load} />
   if (me === undefined) {
+    if (pathname === '/') return <LandingPage authenticated={false} locale="zh" />
+    if (pathname === '/en') return <LandingPage authenticated={false} locale="en" />
+    if (pathname === '/demo') return <DemoPage locale="zh" />
+    if (pathname === '/en/demo') return <DemoPage locale="en" />
     if (registrationPath && !pendingInviteToken) return <PrivateBetaPage />
     return <Loading />
   }
   if (!me) {
+    if (pathname === '/') return <LandingPage authenticated={false} locale="zh" />
+    if (pathname === '/en') return <LandingPage authenticated={false} locale="en" />
+    if (pathname === '/demo') return <DemoPage locale="zh" />
+    if (pathname === '/en/demo') return <DemoPage locale="en" />
     if (invitePath) {
       return pendingInviteToken ? (
         <InvitationAuth
@@ -589,6 +603,10 @@ function App() {
       />
     )
   }
+  if (pathname === '/') return <LandingPage authenticated locale="zh" />
+  if (pathname === '/en') return <LandingPage authenticated locale="en" />
+  if (pathname === '/demo') return <DemoPage locale="zh" />
+  if (pathname === '/en/demo') return <DemoPage locale="en" />
   if (!me.workspace) return <WorkspaceSetup userName={me.user.name} onCreated={refresh} />
   return (
     <Shell
