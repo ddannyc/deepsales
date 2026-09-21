@@ -2,23 +2,16 @@ import { createHmac } from 'node:crypto'
 import { channel, createDatabase, facebookChannelConfig } from '@deepsales/db'
 import { expect, test } from '@playwright/test'
 import { Pool } from 'pg'
+import { e2eOwnerEmail, e2ePassword, signInAndCreateWorkspace } from './auth'
 
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
 
 test('fake Messenger text appears in the inbox without reloading', async ({ page }) => {
   await page.clock.install()
   const suffix = Date.now()
-  const password = 'correct-horse-battery-staple'
+  const password = e2ePassword
 
-  await page.goto('/login')
-  await page.getByRole('button', { name: '创建账户视图', exact: true }).click()
-  await page.getByLabel('姓名').fill('Ada Lovelace')
-  await page.getByLabel('工作邮箱').fill(`inbox-${suffix}@example.com`)
-  await page.getByLabel('密码').fill(password)
-  await page.getByRole('button', { name: '创建账户', exact: true }).click()
-  await expect(page).toHaveURL(/\/inbox$/)
-  await page.getByLabel('工作区名称').fill('Inbox acceptance')
-  await page.getByRole('button', { name: '创建工作区' }).click()
+  await signInAndCreateWorkspace(page, 'inbox', 'Inbox acceptance')
   await expect(page).toHaveURL(/\/inbox$/)
   await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
@@ -217,7 +210,7 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     await expect(page).toHaveURL(/\/login$/)
     await page.goto('/inbox')
     await expect(page).toHaveURL(/\/login$/)
-    await page.getByLabel('工作邮箱').fill(`inbox-${suffix}@example.com`)
+    await page.getByLabel('工作邮箱').fill(e2eOwnerEmail('inbox'))
     await page.getByLabel('密码').fill(password)
     await page.getByRole('button', { name: '登录', exact: true }).click()
     await expect(page).toHaveURL(/\/inbox$/)

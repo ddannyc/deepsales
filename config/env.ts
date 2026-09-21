@@ -41,6 +41,7 @@ export function loadAppEnv(expected?: AppEnv) {
 
   return {
     name: requested as AppEnv,
+    appUrl: values.APP_URL?.trim(),
     databaseUrl: resolvedDatabaseUrl,
     databaseUrlUnpooled:
       requested === 'test'

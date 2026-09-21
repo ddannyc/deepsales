@@ -1,0 +1,1 @@
+ALTER TABLE "workspace_invitation" ADD COLUMN "revoked_at" timestamp with time zone;

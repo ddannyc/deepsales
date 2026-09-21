@@ -234,6 +234,20 @@ textarea:focus-visible {
   font-size: var(--type-body-size);
   line-height: var(--type-body-leading);
 }
+.auth-heading .auth-notice {
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: var(--type-dense-size);
+}
+.auth-status-actions {
+  display: grid;
+}
+.auth-status-actions [data-slot="button"] {
+  width: 100%;
+}
 .auth-form {
   gap: var(--space-4);
 }

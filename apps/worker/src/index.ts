@@ -1,11 +1,10 @@
 import {
-  acceptInvitation,
+  acceptAnyInvitation,
   claimAiResponseRun,
   autoAssignConversation,
   AssignmentError,
   AiResponseError,
   AiMemberError,
-  bootstrapWorkspace,
   claimOutboundMessage,
   claimFacebookInboundAttachment,
   claimKnowledgeDocument,
@@ -18,6 +17,7 @@ import {
   completeOutboundMessage,
   commitAiResponse,
   createDatabase,
+  createWorkspaceFromRegistrationInvite,
   createAiMember,
   createInvitation,
   createFacebookHumanReply,
@@ -75,6 +75,7 @@ import {
   unassignConversation,
   updateMember,
   updateAiMemberConfig,
+  validateAnyInvitation,
   workspace,
   workspaceUserAccess,
   type Database,
@@ -218,6 +219,19 @@ const memberUpdateInput = z.object({
 })
 const channelAccessInput = z.object({ channelIds: z.array(z.string().uuid()).max(100) })
 const invitationAcceptInput = z.object({ token: z.string().min(1).max(200) })
+const invitationTokenInput = z.string().trim().min(1).max(200)
+const invitationSignupInput = z.object({
+  email: z
+    .string()
+    .trim()
+    .max(320)
+    .email()
+    .transform((email) => email.toLowerCase()),
+  invitationToken: invitationTokenInput,
+})
+const authSignupResponse = z.object({
+  user: z.object({ id: z.string().min(1), email: z.string().email(), name: z.string() }),
+})
 const facebookOAuthCallbackInput = z.object({
   state: z.string().regex(/^[0-9a-f]{64}$/i),
   code: z.string().min(1).max(4_096),
@@ -289,8 +303,7 @@ app.get('/ready', async (c) => {
 
 app.use('/api/auth/*', async (c, next) => {
   const credentialAttempt =
-    c.req.method === 'POST' &&
-    (c.req.path.endsWith('/sign-in/email') || c.req.path.endsWith('/sign-up/email'))
+    c.req.method === 'POST' && (isEmailSignInPath(c.req.path) || isEmailSignupPath(c.req.path))
   if (!credentialAttempt) return next()
   if (!hasAuthBindings(c.env)) return notReady(c)
 
@@ -308,6 +321,52 @@ app.use('/api/auth/*', async (c, next) => {
     return c.json({ error: { code: 'RATE_LIMITED', message: 'Try again later' } }, 429)
   }
   return next()
+})
+
+app.use('/api/auth/*', async (c, next) => {
+  if (c.req.method !== 'POST' || !isEmailSignupPath(c.req.path)) return next()
+
+  const body = (await c.req.raw
+    .clone()
+    .json()
+    .catch(() => null)) as Record<string, unknown> | null
+  const input = invitationSignupInput.safeParse(body)
+  if (!input.success) return invitationRequired(c)
+
+  try {
+    return await withDatabase(c.env, (db) =>
+      db.transaction(async (tx) => {
+        const transactionalDb = tx as unknown as Database
+        await validateAnyInvitation(transactionalDb, {
+          token: input.data.invitationToken,
+          userEmail: input.data.email,
+        })
+
+        const response = await createAuth(transactionalDb, c.env).handler(c.req.raw)
+        if (!response.ok) return normalizeAuthError(response)
+
+        const payload = authSignupResponse.safeParse(
+          await response
+            .clone()
+            .json()
+            .catch(() => null),
+        )
+        if (!payload.success) {
+          throw new MemberError('INVITATION_INVALID', 'Invitation registration failed')
+        }
+
+        await acceptAnyInvitation(transactionalDb, {
+          token: input.data.invitationToken,
+          userId: payload.data.user.id,
+          userEmail: payload.data.user.email,
+          userName: payload.data.user.name,
+        })
+        return response
+      }),
+    )
+  } catch (error) {
+    return memberErrorResponse(c, error)
+  }
 })
 
 app.all('/api/auth/*', async (c) => {
@@ -536,12 +595,16 @@ app.post('/api/workspaces', async (c) => {
       return c.json({ error: { code: 'INVALID_REQUEST', message: 'Enter a workspace name' } }, 400)
     }
 
-    const created = await bootstrapWorkspace(db, {
-      userId: session.user.id,
-      userName: session.user.name,
-      name: input.data.name,
-    })
-    return c.json({ workspace: created }, 201)
+    try {
+      const created = await createWorkspaceFromRegistrationInvite(db, {
+        userId: session.user.id,
+        userName: session.user.name,
+        name: input.data.name,
+      })
+      return c.json({ workspace: created }, 201)
+    } catch (error) {
+      return memberErrorResponse(c, error)
+    }
   })
 })
 
@@ -1255,6 +1318,24 @@ app.post('/api/workspaces/:workspaceId/invitations', async (c) => {
   })
 })
 
+app.get('/api/invitations/:token', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  c.header('Cache-Control', 'no-store')
+  const token = invitationTokenInput.safeParse(c.req.param('token'))
+  if (!token.success) {
+    return c.json({ error: { code: 'INVITATION_INVALID', message: 'Invitation is invalid' } }, 400)
+  }
+
+  try {
+    const invitation = await withDatabase(c.env, (db) =>
+      validateAnyInvitation(db, { token: token.data }),
+    )
+    return c.json({ invitation })
+  } catch (error) {
+    return memberErrorResponse(c, error)
+  }
+})
+
 app.post('/api/invitations/accept', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
@@ -1272,15 +1353,18 @@ app.post('/api/invitations/accept', async (c) => {
     }
 
     try {
-      const accepted = await acceptInvitation(db, {
+      const accepted = await acceptAnyInvitation(db, {
         token: input.data.token,
         userId: session.user.id,
         userEmail: session.user.email,
         userName: session.user.name,
       })
+      if (accepted.type === 'WORKSPACE_CREATOR') {
+        return c.json({ type: accepted.type })
+      }
       await enqueueQueuedConversations(c.env, db, accepted.workspaceId)
       const [access] = await findAccesses(db, session.user.id, accepted.workspaceId)
-      return c.json({ workspace: access, memberId: accepted.memberId })
+      return c.json({ type: accepted.type, workspace: access, memberId: accepted.memberId })
     } catch (error) {
       return memberErrorResponse(c, error)
     }
@@ -1510,6 +1594,18 @@ function unauthorized(c: Context<{ Bindings: Bindings }>) {
   return c.json({ error: { code: 'UNAUTHORIZED', message: 'Sign in required' } }, 401)
 }
 
+function invitationRequired(c: Context<{ Bindings: Bindings }>) {
+  return c.json(
+    {
+      error: {
+        code: 'INVITATION_REQUIRED',
+        message: 'Registration is currently invitation only.',
+      },
+    },
+    403,
+  )
+}
+
 async function rateLimit(c: Context<{ Bindings: Bindings }>, key: string) {
   const { success } = await c.env.AUTH_RATE_LIMITER.limit({ key })
   return success
@@ -1523,6 +1619,14 @@ function forbidden(c: Context<{ Bindings: Bindings }>) {
 
 function invitationUrl(appUrl: string, token: string) {
   return `${appUrl.replace(/\/$/, '')}/invite?token=${encodeURIComponent(token)}`
+}
+
+function isEmailSignupPath(path: string) {
+  return path.replace(/\/+$/, '').endsWith('/sign-up/email')
+}
+
+function isEmailSignInPath(path: string) {
+  return path.replace(/\/+$/, '').endsWith('/sign-in/email')
 }
 
 function encodeFacebookCursor(cursor: FacebookChannelCursor) {
@@ -1585,11 +1689,15 @@ function decodeCursorValue(value: string) {
 function memberErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
   if (!(error instanceof MemberError)) throw error
   const status =
-    error.code === 'FORBIDDEN' || error.code === 'INVITATION_EMAIL_MISMATCH'
+    error.code === 'FORBIDDEN' ||
+    error.code === 'INVITATION_EMAIL_MISMATCH' ||
+    error.code === 'WORKSPACE_SETUP_REQUIRED'
       ? 403
       : error.code === 'NOT_FOUND'
         ? 404
-        : error.code === 'ALREADY_MEMBER' || error.code === 'INVITATION_USED'
+        : error.code === 'ALREADY_MEMBER' ||
+            error.code === 'INVITATION_USED' ||
+            error.code === 'WORKSPACE_ALREADY_EXISTS'
           ? 409
           : 400
   return c.json({ error: { code: error.code, message: error.message } }, status)

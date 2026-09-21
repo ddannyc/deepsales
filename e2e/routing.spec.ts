@@ -1,5 +1,4 @@
 import { createHmac } from 'node:crypto'
-import { expect, test, type Page } from '@playwright/test'
 import {
   channel,
   createDatabase,
@@ -7,23 +6,15 @@ import {
   facebookChannelConfig,
   setMemberChannelAccess,
 } from '@deepsales/db'
+import { expect, type Page, test } from '@playwright/test'
 import { Pool } from 'pg'
+import { signInAndCreateWorkspace } from './auth'
 
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
 
 test('routes AI first, falls back to a human, then remains queued', async ({ page }) => {
   const suffix = Date.now()
-  const password = 'correct-horse-battery-staple'
-
-  await page.goto('/login')
-  await page.getByRole('button', { name: '创建账户视图', exact: true }).click()
-  await page.locator('input[name=name]').fill('Ada Lovelace')
-  await page.locator('input[name=email]').fill(`routing-${suffix}@example.com`)
-  await page.locator('input[name=password]').fill(password)
-  await page.locator('form').first().locator('button[type=submit]').click()
-  await expect(page.getByRole('heading', { name: '为工作区命名' })).toBeVisible()
-  await page.getByLabel('工作区名称').fill('Routing acceptance')
-  await page.getByRole('button', { name: '创建工作区' }).click()
+  await signInAndCreateWorkspace(page, 'routing', 'Routing acceptance')
   await expect(page.locator('.shell')).toBeVisible()
 
   const me = (await page.request.get('/api/me').then((response) => response.json())) as {

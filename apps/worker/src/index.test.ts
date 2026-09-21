@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Bindings } from './bindings'
-import { app } from './index'
 import { MAX_FACEBOOK_WEBHOOK_EVENTS } from './facebook'
+import { app } from './index'
 import { MAX_FACEBOOK_WEBHOOK_BODY_BYTES } from './limits'
 
 const bindings = {
@@ -23,6 +23,28 @@ const applicationBindings = {
 }
 
 afterEach(() => vi.unstubAllGlobals())
+
+describe('invitation-only signup', () => {
+  it('rejects public signup without an invitation before opening the database', async () => {
+    const response = await app.request(
+      '/api/auth/sign-up/email',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Public User',
+          email: 'public@example.com',
+          password: 'correct-horse-battery-staple',
+        }),
+      },
+      applicationBindings,
+    )
+
+    expect(response.status).toBe(403)
+    const payload = (await response.json()) as { error: { code: string } }
+    expect(payload.error.code).toBe('INVITATION_REQUIRED')
+  })
+})
 
 describe('Facebook webhook', () => {
   it('answers Meta verification only for the configured token', async () => {
@@ -307,6 +329,30 @@ describe('application readiness', () => {
       error: { code: 'RATE_LIMITED', message: 'Try again later' },
     })
     expect(limit).toHaveBeenCalledOnce()
+  })
+
+  it('rejects email signup without a valid invitation', async () => {
+    const response = await app.request(
+      '/api/auth/sign-up/email',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: 'Public User',
+          email: 'public@example.com',
+          password: 'correct-horse-battery-staple',
+        }),
+      },
+      applicationBindings,
+    )
+
+    expect(response.status).toBe(403)
+    expect(await response.json()).toEqual({
+      error: {
+        code: 'INVITATION_REQUIRED',
+        message: 'Registration is currently invitation only.',
+      },
+    })
   })
 
   it('wraps authentication validation errors in the API error envelope', async () => {

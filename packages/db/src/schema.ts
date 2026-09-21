@@ -191,6 +191,7 @@ export const workspaceInvitation = pgTable(
     tokenHash: text('token_hash').notNull().unique(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
     createdByUserId: uuid('created_by_user_id')
       .notNull()
       .references(() => user.id),
@@ -203,6 +204,22 @@ export const workspaceInvitation = pgTable(
     check('workspace_invitation_capacity', sql`${table.maxActiveConversations} >= 0`),
   ],
 )
+
+export const registrationInvitation = pgTable('registration_invitation', {
+  id: uuid().defaultRandom().primaryKey(),
+  email: text().notNull(),
+  tokenHash: text('token_hash').notNull().unique(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  acceptedByUserId: uuid('accepted_by_user_id')
+    .unique()
+    .references(() => user.id, {
+      onDelete: 'cascade',
+    }),
+  acceptedAt: timestamp('accepted_at', { withTimezone: true }),
+  workspaceCreatedAt: timestamp('workspace_created_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+})
 
 export const member = pgTable(
   'member',

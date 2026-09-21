@@ -12,6 +12,7 @@ import {
 } from '@deepsales/db'
 import { expect, type Page, test } from '@playwright/test'
 import { Pool } from 'pg'
+import { signInAndCreateWorkspace } from './auth'
 
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
 
@@ -19,17 +20,7 @@ test('human can transfer, unassign, close, and receive a later message in a new 
   page,
 }) => {
   const suffix = Date.now()
-  const password = 'correct-horse-battery-staple'
-  const ownerEmail = `lifecycle-${suffix}@example.com`
-
-  await page.goto('/login')
-  await page.getByRole('button', { name: '创建账户视图', exact: true }).click()
-  await page.getByLabel('姓名').fill('Ada Lovelace')
-  await page.getByLabel('工作邮箱').fill(ownerEmail)
-  await page.getByLabel('密码').fill(password)
-  await page.getByRole('button', { name: '创建账户', exact: true }).click()
-  await page.getByLabel('工作区名称').fill('Lifecycle acceptance')
-  await page.getByRole('button', { name: '创建工作区', exact: true }).click()
+  await signInAndCreateWorkspace(page, 'lifecycle', 'Lifecycle acceptance')
   await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
   const me = (await page.request.get('/api/me').then((response) => response.json())) as {

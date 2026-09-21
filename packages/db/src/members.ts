@@ -8,6 +8,7 @@ import {
   humanMemberAvailability,
   member,
   memberChannelAccess,
+  registrationInvitation,
   user,
   workspace,
   workspaceInvitation,
@@ -25,6 +26,8 @@ export type MemberErrorCode =
   | 'INVITATION_EXPIRED'
   | 'INVITATION_USED'
   | 'INVITATION_EMAIL_MISMATCH'
+  | 'WORKSPACE_SETUP_REQUIRED'
+  | 'WORKSPACE_ALREADY_EXISTS'
 
 export class MemberError extends Error {
   constructor(
@@ -117,11 +120,82 @@ export async function createInvitation(db: Database, input: CreateInvitationInpu
   })
 }
 
+export async function createRegistrationInvitation(
+  db: Database,
+  input: { email: string; expiresAt?: Date },
+) {
+  const email = normalizeEmail(input.email)
+  if (!isEmail(email)) throw new MemberError('INVALID_REQUEST', 'Invalid invitation')
+
+  const expiresAt = input.expiresAt ?? new Date(Date.now() + INVITATION_TTL_MS)
+  if (expiresAt.getTime() <= Date.now()) {
+    throw new MemberError('INVALID_REQUEST', 'Invitation must expire in the future')
+  }
+
+  const token = createToken()
+  const tokenHash = await hashInvitationToken(token)
+  const [created] = await db
+    .insert(registrationInvitation)
+    .values({ email, tokenHash, expiresAt })
+    .returning({
+      id: registrationInvitation.id,
+      email: registrationInvitation.email,
+      expiresAt: registrationInvitation.expiresAt,
+    })
+  if (!created) throw new MemberError('INVITATION_INVALID', 'Invitation could not be created')
+  return { ...created, token }
+}
+
 export type AcceptInvitationInput = {
   token: string
   userId: string
   userEmail: string
   userName: string
+}
+
+export type ValidateInvitationInput = {
+  token: string
+  userEmail?: string
+}
+
+export async function validateInvitation(db: Database, input: ValidateInvitationInput) {
+  const email = input.userEmail ? normalizeEmail(input.userEmail) : undefined
+  if (!input.token || (email !== undefined && !isEmail(email))) {
+    throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+  }
+
+  const tokenHash = await hashInvitationToken(input.token)
+  return db.transaction(async (tx) => {
+    const invitation = await lockInvitation(tx, tokenHash)
+    assertInvitationUsable(invitation, email)
+    const [targetWorkspace] = await tx
+      .select({ name: workspace.name })
+      .from(workspace)
+      .where(eq(workspace.id, invitation.workspaceId))
+      .limit(1)
+    if (!targetWorkspace) throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+    return {
+      id: invitation.id,
+      workspaceId: invitation.workspaceId,
+      workspaceName: targetWorkspace.name,
+      email: invitation.email,
+      expiresAt: invitation.expiresAt,
+    }
+  })
+}
+
+export async function validateRegistrationInvitation(db: Database, input: ValidateInvitationInput) {
+  const email = input.userEmail ? normalizeEmail(input.userEmail) : undefined
+  if (!input.token || (email !== undefined && !isEmail(email))) {
+    throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+  }
+
+  const tokenHash = await hashInvitationToken(input.token)
+  return db.transaction(async (tx) => {
+    const invitation = await lockRegistrationInvitation(tx, tokenHash)
+    assertRegistrationInvitationUsable(invitation, email)
+    return { id: invitation.id, email: invitation.email, expiresAt: invitation.expiresAt }
+  })
 }
 
 export async function acceptInvitation(db: Database, input: AcceptInvitationInput) {
@@ -136,26 +210,8 @@ export async function acceptInvitation(db: Database, input: AcceptInvitationInpu
       sql`select pg_advisory_xact_lock(hashtextextended(${`${input.userId}:${tokenHash}`}, 0))`,
     )
 
-    const locked = await tx.execute(
-      sql`select id from workspace_invitation where token_hash = ${tokenHash} for update`,
-    )
-    if (!locked.rows.length) {
-      throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
-    }
-
-    const [invitation] = await tx
-      .select()
-      .from(workspaceInvitation)
-      .where(eq(workspaceInvitation.tokenHash, tokenHash))
-      .limit(1)
-    if (!invitation) throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
-    if (invitation.acceptedAt) throw new MemberError('INVITATION_USED', 'Invitation was used')
-    if (invitation.expiresAt.getTime() <= Date.now()) {
-      throw new MemberError('INVITATION_EXPIRED', 'Invitation expired')
-    }
-    if (invitation.email !== email) {
-      throw new MemberError('INVITATION_EMAIL_MISMATCH', 'Invitation email does not match')
-    }
+    const invitation = await lockInvitation(tx, tokenHash)
+    assertInvitationUsable(invitation, email)
     await assertChannelsBelongToWorkspace(tx, invitation.workspaceId, invitation.channelIds)
 
     const [existing] = await tx
@@ -204,6 +260,92 @@ export async function acceptInvitation(db: Database, input: AcceptInvitationInpu
       memberId: human.id,
     }
   })
+}
+
+export async function acceptRegistrationInvitation(
+  db: Database,
+  input: Pick<AcceptInvitationInput, 'token' | 'userId' | 'userEmail'>,
+) {
+  const email = normalizeEmail(input.userEmail)
+  if (!input.token || !isEmail(email)) {
+    throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+  }
+
+  const tokenHash = await hashInvitationToken(input.token)
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${input.userId}, 0))`)
+    const invitation = await lockRegistrationInvitation(tx, tokenHash)
+    if (invitation.email !== email) {
+      throw new MemberError('INVITATION_EMAIL_MISMATCH', 'Invitation email does not match')
+    }
+    if (invitation.workspaceCreatedAt) {
+      throw new MemberError('INVITATION_USED', 'Invitation was used')
+    }
+    if (invitation.acceptedByUserId && invitation.acceptedByUserId !== input.userId) {
+      throw new MemberError('INVITATION_USED', 'Invitation was used')
+    }
+
+    const [acceptedInvite] = await tx
+      .select({ id: registrationInvitation.id })
+      .from(registrationInvitation)
+      .where(eq(registrationInvitation.acceptedByUserId, input.userId))
+      .limit(1)
+    if (acceptedInvite && acceptedInvite.id !== invitation.id) {
+      throw new MemberError('INVITATION_USED', 'A registration invitation was already accepted')
+    }
+
+    const [existingAccess] = await tx
+      .select({ id: workspaceUserAccess.id })
+      .from(workspaceUserAccess)
+      .where(eq(workspaceUserAccess.userId, input.userId))
+      .limit(1)
+    if (existingAccess) {
+      throw new MemberError('WORKSPACE_ALREADY_EXISTS', 'User already belongs to a workspace')
+    }
+
+    if (!invitation.acceptedByUserId) {
+      assertRegistrationInvitationUsable(invitation, email)
+      const acceptedAt = new Date()
+      await tx
+        .update(registrationInvitation)
+        .set({ acceptedByUserId: input.userId, acceptedAt, updatedAt: acceptedAt })
+        .where(eq(registrationInvitation.id, invitation.id))
+    }
+
+    return { invitationId: invitation.id }
+  })
+}
+
+export async function validateAnyInvitation(db: Database, input: ValidateInvitationInput) {
+  try {
+    const invitation = await validateInvitation(db, input)
+    return {
+      type: 'WORKSPACE_MEMBER' as const,
+      workspaceName: invitation.workspaceName,
+      expiresAt: invitation.expiresAt,
+    }
+  } catch (error) {
+    if (!(error instanceof MemberError) || error.code !== 'INVITATION_INVALID') throw error
+  }
+
+  const invitation = await validateRegistrationInvitation(db, input)
+  return { type: 'WORKSPACE_CREATOR' as const, expiresAt: invitation.expiresAt }
+}
+
+export async function acceptAnyInvitation(db: Database, input: AcceptInvitationInput) {
+  try {
+    return {
+      type: 'WORKSPACE_MEMBER' as const,
+      ...(await acceptInvitation(db, input)),
+    }
+  } catch (error) {
+    if (!(error instanceof MemberError) || error.code !== 'INVITATION_INVALID') throw error
+  }
+
+  return {
+    type: 'WORKSPACE_CREATOR' as const,
+    ...(await acceptRegistrationInvitation(db, input)),
+  }
 }
 
 export async function listTeam(db: Database, workspaceId: string) {
@@ -511,6 +653,65 @@ async function replaceChannelAccess(tx: Transaction, memberId: string, channelId
     await tx
       .insert(memberChannelAccess)
       .values(channelIds.map((channelId) => ({ memberId, channelId })))
+  }
+}
+
+async function lockInvitation(tx: Transaction, tokenHash: string) {
+  const locked = await tx.execute(
+    sql`select id from workspace_invitation where token_hash = ${tokenHash} for update`,
+  )
+  if (!locked.rows.length) throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+
+  const [invitation] = await tx
+    .select()
+    .from(workspaceInvitation)
+    .where(eq(workspaceInvitation.tokenHash, tokenHash))
+    .limit(1)
+  if (!invitation) throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+  return invitation
+}
+
+async function lockRegistrationInvitation(tx: Transaction, tokenHash: string) {
+  const locked = await tx.execute(
+    sql`select id from registration_invitation where token_hash = ${tokenHash} for update`,
+  )
+  if (!locked.rows.length) throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+
+  const [invitation] = await tx
+    .select()
+    .from(registrationInvitation)
+    .where(eq(registrationInvitation.tokenHash, tokenHash))
+    .limit(1)
+  if (!invitation) throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+  return invitation
+}
+
+function assertInvitationUsable(
+  invitation: typeof workspaceInvitation.$inferSelect,
+  email?: string,
+) {
+  if (invitation.acceptedAt) throw new MemberError('INVITATION_USED', 'Invitation was used')
+  if (invitation.revokedAt) throw new MemberError('INVITATION_INVALID', 'Invitation is invalid')
+  if (invitation.expiresAt.getTime() <= Date.now()) {
+    throw new MemberError('INVITATION_EXPIRED', 'Invitation expired')
+  }
+  if (email !== undefined && invitation.email !== email) {
+    throw new MemberError('INVITATION_EMAIL_MISMATCH', 'Invitation email does not match')
+  }
+}
+
+function assertRegistrationInvitationUsable(
+  invitation: typeof registrationInvitation.$inferSelect,
+  email?: string,
+) {
+  if (invitation.acceptedByUserId || invitation.acceptedAt || invitation.workspaceCreatedAt) {
+    throw new MemberError('INVITATION_USED', 'Invitation was used')
+  }
+  if (invitation.expiresAt.getTime() <= Date.now()) {
+    throw new MemberError('INVITATION_EXPIRED', 'Invitation expired')
+  }
+  if (email !== undefined && invitation.email !== email) {
+    throw new MemberError('INVITATION_EMAIL_MISMATCH', 'Invitation email does not match')
   }
 }
 

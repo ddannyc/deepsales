@@ -1,15 +1,39 @@
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { type ChildProcess, type SpawnOptions, spawn } from 'node:child_process'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer } from 'node:net'
 import { dirname, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
+import { eq } from 'drizzle-orm'
 import { Pool } from 'pg'
+import { createAuth } from '../apps/worker/src/auth'
+import type { Bindings } from '../apps/worker/src/bindings'
 import { assertTestDatabaseUrl, loadAppEnv } from '../config/env'
+import {
+  acceptRegistrationInvitation,
+  createDatabase,
+  createRegistrationInvitation,
+  user,
+} from '../packages/db/src'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const packageManager = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const readyTimeoutMs = 30_000
+const e2ePassword = 'correct-horse-battery-staple'
+const e2eOwnerKeys = [
+  'ai-member',
+  'ai-response',
+  'lifecycle',
+  'facebook',
+  'inbox',
+  'knowledge',
+  'reply',
+  'routing',
+  'team',
+  'workspace',
+  'invitation',
+  'invitation-existing',
+]
 
 function testDatabaseUrl() {
   const { databaseUrl } = loadAppEnv('test')
@@ -35,6 +59,46 @@ async function resetTestDatabase(connectionString: string) {
     await pool.query('drop schema if exists public cascade')
     await pool.query('drop schema if exists drizzle cascade')
     await pool.query('create schema public')
+  } finally {
+    await pool.end()
+  }
+}
+
+async function seedE2eUsers(connectionString: string, baseUrl: string) {
+  const pool = new Pool({ connectionString, max: 1 })
+  const db = createDatabase(pool)
+  const auth = createAuth(db, {
+    APP_URL: baseUrl,
+    BETTER_AUTH_SECRET: 'e2e-only-better-auth-secret-32-characters',
+  } as Bindings)
+
+  try {
+    for (const key of e2eOwnerKeys) {
+      await auth.api.signUpEmail({
+        body: {
+          name: 'Ada Lovelace',
+          email: `e2e-owner-${key}@example.com`,
+          password: e2ePassword,
+        },
+      })
+      const email = `e2e-owner-${key}@example.com`
+      const [createdUser] = await db
+        .select({ id: user.id })
+        .from(user)
+        .where(eq(user.email, email))
+        .limit(1)
+      if (!createdUser) throw new Error('E2E user was not created')
+      const invitation = await createRegistrationInvitation(db, { email })
+      await acceptRegistrationInvitation(db, {
+        token: invitation.token,
+        userId: createdUser.id,
+        userEmail: email,
+      })
+    }
+    const creatorInvitation = await createRegistrationInvitation(db, {
+      email: 'e2e-registration@example.com',
+    })
+    return creatorInvitation.token
   } finally {
     await pool.end()
   }
@@ -345,6 +409,7 @@ async function main() {
 
   const port = await freePort()
   const baseUrl = `http://127.0.0.1:${port}`
+  const creatorInvitationToken = await seedE2eUsers(connectionString, baseUrl)
   const fakeFacebook = await startFakeFacebook()
   const fakeAI = await startFakeAI()
   const worker = startWorker(port, connectionString, baseUrl, fakeFacebook.baseUrl, fakeAI.baseUrl)
@@ -357,6 +422,7 @@ async function main() {
       E2E_BASE_URL: baseUrl,
       DATABASE_URL: connectionString,
       E2E_FAKE_FACEBOOK_URL: fakeFacebook.baseUrl,
+      E2E_CREATOR_INVITATION_TOKEN: creatorInvitationToken,
     }
     await run(['exec', 'playwright', 'test', ...process.argv.slice(2)], testEnv)
   } finally {

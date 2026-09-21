@@ -1,19 +1,10 @@
 import { expect, test } from '@playwright/test'
+import { signInAndCreateWorkspace } from './auth'
 
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
 
 test('owner indexes inline and uploaded knowledge and shows failed documents', async ({ page }) => {
-  const suffix = Date.now()
-  const password = 'correct-horse-battery-staple'
-
-  await page.goto('/login')
-  await page.getByRole('button', { name: '创建账户视图', exact: true }).click()
-  await page.getByLabel('姓名').fill('Ada Lovelace')
-  await page.getByLabel('工作邮箱').fill(`knowledge-${suffix}@example.com`)
-  await page.getByLabel('密码').fill(password)
-  await page.getByRole('button', { name: '创建账户', exact: true }).click()
-  await page.getByLabel('工作区名称').fill('Knowledge acceptance')
-  await page.getByRole('button', { name: '创建工作区', exact: true }).click()
+  await signInAndCreateWorkspace(page, 'knowledge', 'Knowledge acceptance')
   await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
 
   await page.goto('/knowledge')

@@ -1,22 +1,14 @@
 import { expect, test } from '@playwright/test'
+import { e2eOwnerEmail, e2ePassword, signInAndCreateWorkspace } from './auth'
 
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
 
-test('user can sign up, create a workspace, sign out, and sign back in', async ({ page }) => {
-  const email = `workspace-owner-${Date.now()}@example.com`
-  const password = 'correct-horse-battery-staple'
+test('user can create a workspace, sign out, and sign back in', async ({ page }) => {
+  const email = e2eOwnerEmail('workspace')
+  const password = e2ePassword
 
   expect((await page.request.get('/ready')).status()).toBe(200)
-  await page.goto('/login')
-  await page.getByRole('button', { name: '创建账户视图', exact: true }).click()
-  await page.getByLabel('姓名').fill('Ada Lovelace')
-  await page.getByLabel('工作邮箱').fill(email)
-  await page.getByLabel('密码').fill(password)
-  await page.getByRole('button', { name: '创建账户', exact: true }).click()
-
-  await expect(page.getByRole('heading', { name: '为工作区命名' })).toBeVisible()
-  await page.getByLabel('工作区名称').fill('Analytical Engines')
-  await page.getByRole('button', { name: '创建工作区' }).click()
+  await signInAndCreateWorkspace(page, 'workspace', 'Analytical Engines')
 
   await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
   await expect(page.getByText('Analytical Engines')).toBeVisible()

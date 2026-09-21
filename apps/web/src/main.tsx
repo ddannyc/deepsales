@@ -99,6 +99,9 @@ type Me = {
   workspace: Workspace | null
 }
 
+type InvitationKind = 'WORKSPACE_MEMBER' | 'WORKSPACE_CREATOR'
+type InvitationDetails = { type: InvitationKind; expiresAt: string; workspaceName?: string }
+
 type TeamChannel = {
   id: string
   displayName: string
@@ -489,6 +492,12 @@ function App() {
   const [me, setMe] = useState<Me | null>()
   const [loadError, setLoadError] = useState('')
   const [pendingInviteToken, setPendingInviteToken] = useState(() => inviteToken())
+  const pathname = window.location.pathname
+  const registrationPath = ['/sign-up', '/signup', '/register'].includes(pathname)
+  const invitePath = pathname === '/invite' || (registrationPath && Boolean(pendingInviteToken))
+  const publicPath =
+    invitePath ||
+    registrationPath
 
   const refresh = useCallback(async () => {
     const activeWorkspaceId = localStorage.getItem('activeWorkspaceId')
@@ -507,13 +516,17 @@ function App() {
     try {
       await refresh()
     } catch (cause) {
+      if (publicPath) {
+        setMe(null)
+        return
+      }
       setLoadError(
         cause instanceof ApiError && cause.code === 'NOT_READY'
           ? 'DeepSales 尚未就绪，请检查数据库连接。'
           : '收件箱加载失败，请重试。',
       )
     }
-  }, [refresh])
+  }, [publicPath, refresh])
 
   useEffect(() => {
     void load()
@@ -521,25 +534,56 @@ function App() {
 
   useEffect(() => {
     if (me === undefined) return
-    const pathname = window.location.pathname
-    if (me === null && pathname !== '/login' && pathname !== '/invite') {
+    if (me === null && !publicPath && pathname !== '/login') {
       history.replaceState(null, '', '/login')
     } else if (me && pathname === '/login') {
-      history.replaceState(null, '', '/inbox')
+      history.replaceState(null, '', me.workspace ? '/inbox' : '/workspace/setup')
     }
-  }, [me])
+  }, [me, pathname, publicPath])
 
   if (loadError) return <Unavailable message={loadError} onRetry={load} />
-  if (me === undefined) return <Loading />
-  if (!me) return <Auth onAuthenticated={refresh} invited={Boolean(pendingInviteToken)} />
+  if (me === undefined) {
+    if (registrationPath && !pendingInviteToken) return <PrivateBetaPage />
+    return <Loading />
+  }
+  if (!me) {
+    if (invitePath) {
+      return pendingInviteToken ? (
+        <InvitationAuth
+          token={pendingInviteToken}
+          onAuthenticated={async (signedUp, invitationType) => {
+            await refresh()
+            if (signedUp) {
+              setPendingInviteToken(null)
+              history.replaceState(
+                null,
+                '',
+                invitationType === 'WORKSPACE_CREATOR' ? '/workspace/setup' : '/team',
+              )
+            }
+          }}
+        />
+      ) : (
+        <InvitationState code="INVITATION_INVALID" />
+      )
+    }
+    if (registrationPath) return <PrivateBetaPage />
+    return <Auth onAuthenticated={refresh} invitationToken={null} />
+  }
+  if (registrationPath && !pendingInviteToken) return <PrivateBetaPage />
+  if (invitePath && !pendingInviteToken) return <InvitationState code="INVITATION_INVALID" />
   if (pendingInviteToken) {
     return (
       <InviteAcceptance
         token={pendingInviteToken}
-        onAccepted={async (workspaceId) => {
+        onAccepted={async (accepted) => {
           setPendingInviteToken(null)
-          localStorage.setItem('activeWorkspaceId', workspaceId)
-          history.replaceState(null, '', '/team')
+          if (accepted.type === 'WORKSPACE_MEMBER' && accepted.workspace) {
+            localStorage.setItem('activeWorkspaceId', accepted.workspace.id)
+            history.replaceState(null, '', '/team')
+          } else {
+            history.replaceState(null, '', '/workspace/setup')
+          }
           await refresh()
         }}
       />
@@ -560,11 +604,16 @@ function App() {
 
 function Auth({
   onAuthenticated,
-  invited,
+  invitationToken,
+  invitationType,
+  workspaceName,
 }: {
-  onAuthenticated: () => Promise<void>
-  invited: boolean
+  onAuthenticated: (signedUp: boolean, invitationType?: InvitationKind) => Promise<void>
+  invitationToken: string | null
+  invitationType?: InvitationKind
+  workspaceName?: string
 }) {
+  const invited = Boolean(invitationToken)
   const [mode, setMode] = useState<'sign-in' | 'sign-up'>(invited ? 'sign-up' : 'sign-in')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -579,8 +628,9 @@ function Auth({
         name: data.get('name'),
         email: data.get('email'),
         password: data.get('password'),
+        ...(signingUp && invitationToken ? { invitationToken } : {}),
       })
-      await onAuthenticated()
+      await onAuthenticated(signingUp, invitationType)
     } catch (cause) {
       setError(authenticationErrorMessage(cause))
     } finally {
@@ -599,36 +649,54 @@ function Auth({
         <div className="auth-heading">
           <h1 id="auth-title">{signingUp ? '创建账户' : '登录'}</h1>
           <p>
-            {invited
+            {invitationType === 'WORKSPACE_CREATOR'
               ? signingUp
-                ? '请使用受邀工作邮箱创建账户以加入团队。'
-                : '请使用受邀工作邮箱登录以加入团队。'
-              : signingUp
-                ? '创建账户后即可设置团队工作区。'
+                ? '你已获得 DeepSales 邀请测试资格。注册后即可创建自己的工作区。'
+                : '登录后即可继续创建自己的工作区。'
+              : invited
+                ? signingUp
+                  ? workspaceName
+                    ? `请使用受邀工作邮箱创建账户以加入 ${workspaceName}。`
+                    : '请使用受邀工作邮箱创建账户以加入团队。'
+                  : workspaceName
+                    ? `请使用受邀工作邮箱登录以加入 ${workspaceName}。`
+                    : '请使用受邀工作邮箱登录以加入团队。'
                 : '登录 DeepSales 团队收件箱。'}
           </p>
+          {!invited && (
+            <p className="auth-notice" role="note">
+              DeepSales 目前处于邀请测试阶段，仅限受邀用户注册。
+              <br />
+              <span lang="en">
+                DeepSales is currently in private beta. Registration is available by invitation
+                only.
+              </span>
+            </p>
+          )}
         </div>
-        <fieldset className="auth-mode-switch">
-          <legend className="sr-only">账户操作</legend>
-          <Button
-            aria-label="登录视图"
-            aria-pressed={!signingUp}
-            size="sm"
-            variant={signingUp ? 'ghost' : 'secondary'}
-            onClick={() => setMode('sign-in')}
-          >
-            登录
-          </Button>
-          <Button
-            aria-label="创建账户视图"
-            aria-pressed={signingUp}
-            size="sm"
-            variant={signingUp ? 'secondary' : 'ghost'}
-            onClick={() => setMode('sign-up')}
-          >
-            创建账户
-          </Button>
-        </fieldset>
+        {invited && (
+          <fieldset className="auth-mode-switch">
+            <legend className="sr-only">账户操作</legend>
+            <Button
+              aria-label="登录视图"
+              aria-pressed={!signingUp}
+              size="sm"
+              variant={signingUp ? 'ghost' : 'secondary'}
+              onClick={() => setMode('sign-in')}
+            >
+              登录
+            </Button>
+            <Button
+              aria-label="创建账户视图"
+              aria-pressed={signingUp}
+              size="sm"
+              variant={signingUp ? 'secondary' : 'ghost'}
+              onClick={() => setMode('sign-up')}
+            >
+              创建账户
+            </Button>
+          </fieldset>
+        )}
         <form className="auth-form" onSubmit={submit}>
           {signingUp && <Field label="姓名" name="name" autoComplete="name" />}
           <Field label="工作邮箱" name="email" type="email" autoComplete="email" />
@@ -653,30 +721,139 @@ function Auth({
   )
 }
 
+function PrivateBetaPage() {
+  return (
+    <main className="auth-page">
+      <section aria-labelledby="private-beta-title" className="auth-card">
+        <div className="auth-brand">
+          <span className="auth-brand-mark">DS</span>
+          <span>DeepSales</span>
+        </div>
+        <div className="auth-heading">
+          <h1 id="private-beta-title">Private Beta</h1>
+          <p>DeepSales is currently in private beta.</p>
+          <p>Registration is available by invitation only.</p>
+          <p className="auth-notice" role="note">
+            DeepSales 目前处于邀请测试阶段，仅限受邀用户注册。
+          </p>
+        </div>
+        <div className="auth-status-actions">
+          <Button asChild>
+            <a href="/login">Sign in / 登录</a>
+          </Button>
+        </div>
+      </section>
+    </main>
+  )
+}
+
+function InvitationAuth({
+  token,
+  onAuthenticated,
+}: {
+  token: string
+  onAuthenticated: (signedUp: boolean, invitationType?: InvitationKind) => Promise<void>
+}) {
+  const [status, setStatus] = useState<'checking' | 'valid' | 'invalid'>('checking')
+  const [errorCode, setErrorCode] = useState('INVITATION_INVALID')
+  const [invitation, setInvitation] = useState<InvitationDetails>()
+
+  useEffect(() => {
+    let active = true
+    void fetch(`/api/invitations/${encodeURIComponent(token)}`, { cache: 'no-store' })
+      .then(async (response) => {
+        if (!response.ok) throw await responseError(response)
+        const result = (await response.json()) as { invitation: InvitationDetails }
+        if (active) {
+          setInvitation(result.invitation)
+          setStatus('valid')
+        }
+      })
+      .catch((cause) => {
+        if (!active) return
+        setErrorCode(cause instanceof ApiError ? cause.code : 'INVITATION_INVALID')
+        setStatus('invalid')
+      })
+    return () => {
+      active = false
+    }
+  }, [token])
+
+  if (status === 'checking') return <Loading />
+  if (status === 'invalid') return <InvitationState code={errorCode} />
+  return (
+    <Auth
+      invitationToken={token}
+      invitationType={invitation?.type}
+      workspaceName={invitation?.workspaceName}
+      onAuthenticated={onAuthenticated}
+    />
+  )
+}
+
+function InvitationState({ code }: { code: string }) {
+  const copy = {
+    INVITATION_EXPIRED: {
+      title: '邀请已过期',
+      message: 'This invitation has expired.',
+    },
+    INVITATION_USED: {
+      title: '邀请已使用',
+      message: 'This invitation has already been used.',
+    },
+    INVITATION_EMAIL_MISMATCH: {
+      title: '邀请邮箱不匹配',
+      message: 'This invitation is for a different email address.',
+    },
+    WORKSPACE_ALREADY_EXISTS: {
+      title: '账号已有工作区',
+      message: 'This account already belongs to a workspace.',
+    },
+  }[code] ?? {
+    title: '邀请无效',
+    message: 'This invitation is invalid.',
+  }
+
+  return (
+    <main className="auth-page">
+      <section aria-labelledby="invitation-state-title" className="auth-card">
+        <div className="auth-brand">
+          <span className="auth-brand-mark">DS</span>
+          <span>DeepSales</span>
+        </div>
+        <div className="auth-heading">
+          <h1 id="invitation-state-title">{copy.title}</h1>
+          <p role="alert">{copy.message}</p>
+        </div>
+        <div className="auth-status-actions">
+          <Button asChild>
+            <a href="/login">Sign in / 登录</a>
+          </Button>
+        </div>
+      </section>
+    </main>
+  )
+}
+
 function InviteAcceptance({
   token,
   onAccepted,
 }: {
   token: string
-  onAccepted: (workspaceId: string) => Promise<void>
+  onAccepted: (accepted: { type: InvitationKind; workspace?: { id: string } }) => Promise<void>
 }) {
   const started = useRef(false)
-  const [error, setError] = useState('')
+  const [errorCode, setErrorCode] = useState<string>()
 
   useEffect(() => {
     if (started.current) return
     started.current = true
     void request('/api/invitations/accept', { token })
-      .then((result) => onAccepted((result as { workspace: { id: string } }).workspace.id))
-      .catch((cause) => setError(invitationErrorMessage(cause)))
+      .then((result) => onAccepted(result as { type: InvitationKind; workspace?: { id: string } }))
+      .catch((cause) => setErrorCode(cause instanceof ApiError ? cause.code : 'INVITATION_INVALID'))
   }, [onAccepted, token])
 
-  return (
-    <main className="loading" role={error ? 'alert' : undefined}>
-      <span>DS</span>
-      {error || '正在加入团队…'}
-    </main>
-  )
+  return errorCode ? <InvitationState code={errorCode} /> : <Loading />
 }
 
 function Field({
@@ -725,7 +902,11 @@ function WorkspaceSetup({
     setError('')
     try {
       const data = new FormData(event.currentTarget)
-      await request('/api/workspaces', { name: data.get('name') })
+      const result = (await request('/api/workspaces', {
+        name: data.get('name'),
+      })) as { workspace: { id: string } }
+      localStorage.setItem('activeWorkspaceId', result.workspace.id)
+      history.replaceState(null, '', '/inbox')
       await onCreated()
     } catch (cause) {
       setError(workspaceErrorMessage(cause))
@@ -3909,20 +4090,9 @@ function workspaceErrorMessage(cause: unknown): string {
       INVALID_REQUEST: '请输入工作区名称。',
       NOT_READY: 'DeepSales 尚未就绪，请稍后重试。',
       UNAUTHORIZED: '请重新登录以创建工作区。',
+      WORKSPACE_SETUP_REQUIRED: '此账号没有创建工作区的授权。',
+      WORKSPACE_ALREADY_EXISTS: '此账号已经属于一个工作区。',
     }[cause.code] ?? '工作区创建失败'
-  )
-}
-
-function invitationErrorMessage(cause: unknown): string {
-  if (!(cause instanceof ApiError)) return '接受邀请失败。'
-  return (
-    {
-      INVITATION_EMAIL_MISMATCH: '请使用受邀工作邮箱登录。',
-      INVITATION_EXPIRED: '此邀请已过期。',
-      INVITATION_INVALID: '此邀请链接无效。',
-      INVITATION_USED: '此邀请已被使用。',
-      ALREADY_MEMBER: '你已属于此工作区。',
-    }[cause.code] ?? '接受邀请失败。'
   )
 }
 
@@ -4041,8 +4211,12 @@ function formatExactDate(value: string) {
 }
 
 function inviteToken() {
-  if (window.location.pathname !== '/invite') return null
-  return new URLSearchParams(window.location.search).get('token')
+  const params = new URLSearchParams(window.location.search)
+  if (window.location.pathname === '/invite') return params.get('token')
+  if (['/sign-up', '/signup', '/register'].includes(window.location.pathname)) {
+    return params.get('invite') ?? params.get('token')
+  }
+  return null
 }
 
 const root = document.getElementById('root')
