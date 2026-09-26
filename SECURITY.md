@@ -10,7 +10,7 @@ are expected to receive security fixes.
 Please do not open a public issue for a suspected vulnerability.
 
 Use GitHub's private vulnerability reporting feature for this repository. If it
-is not enabled yet, contact the repository maintainer [@ddannycc](https://github.com/ddannycc)
+is not enabled yet, contact the repository maintainer [@ddannyc](https://github.com/ddannyc)
 privately through GitHub and include:
 
 - the affected commit or version;
