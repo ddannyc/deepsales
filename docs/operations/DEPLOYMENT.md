@@ -157,6 +157,11 @@ Verify Token: 与 META_VERIFY_TOKEN 相同
 
 ## 7. 上线验证
 
+外部 uptime monitor 应定期访问 `/health`（不查询数据库），不要使用 `/ready`。
+`/ready` 保留 `SELECT 1` 的数据库 readiness 检查，只在部署验证或主动诊断时调用。
+Recovery Cron 为 `*/30 * * * *`，每 30 分钟执行全部 reconciliation；
+部署后核对 Cloudflare Worker 的 Cron Triggers，避免旧的每分钟触发器继续唤醒 Neon。
+
 ```powershell
 $APP_URL = 'https://你的域名'
 Invoke-RestMethod "$APP_URL/health"

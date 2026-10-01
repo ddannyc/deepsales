@@ -1412,10 +1412,8 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
         })
         .catch((cause) => setError(inboxErrorMessage(cause)))
     }
-    const interval = window.setInterval(refreshVisible, 30_000)
     window.addEventListener('focus', refreshVisible)
     return () => {
-      window.clearInterval(interval)
       window.removeEventListener('focus', refreshVisible)
     }
   }, [refresh, refreshThread])
@@ -1424,19 +1422,33 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     let socket: WebSocket | undefined
     let retryTimer: number | undefined
     let stopped = false
+    let connectedBefore = false
+    let retryDelay = 1_000
 
     const connect = () => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       socket = new WebSocket(
         `${protocol}//${window.location.host}/api/workspaces/${workspace.id}/realtime`,
       )
+      socket.onopen = () => {
+        retryDelay = 1_000
+        if (connectedBefore) {
+          void refresh()
+            .then(() => (selectedIdRef.current ? refreshThread(selectedIdRef.current) : undefined))
+            .catch((cause) => setError(inboxErrorMessage(cause)))
+        }
+        connectedBefore = true
+      }
       socket.onmessage = () => {
         void refresh()
           .then(() => (selectedIdRef.current ? refreshThread(selectedIdRef.current) : undefined))
           .catch((cause) => setError(inboxErrorMessage(cause)))
       }
       socket.onclose = () => {
-        if (!stopped) retryTimer = window.setTimeout(connect, 1_000)
+        if (!stopped) {
+          retryTimer = window.setTimeout(connect, retryDelay)
+          retryDelay = Math.min(retryDelay * 2, 30_000)
+        }
       }
     }
 
@@ -2530,13 +2542,36 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
     void refreshDocuments(selectedBaseId).catch((cause) =>
       setLoadError(knowledgeErrorMessage(cause)),
     )
-    const timer = window.setInterval(() => {
+  }, [refreshDocuments, selectedBaseId])
+
+  const processingDocuments = documents?.some(
+    ({ status }) => status === 'UPLOADED' || status === 'PROCESSING',
+  )
+  useEffect(() => {
+    if (!selectedBaseId) return
+    let timer: number | undefined
+    const refresh = () => {
+      if (document.hidden) return
       void refreshDocuments(selectedBaseId).catch((cause) =>
         setLoadError(knowledgeErrorMessage(cause)),
       )
-    }, 2_000)
-    return () => window.clearInterval(timer)
-  }, [refreshDocuments, selectedBaseId])
+    }
+    const updatePolling = () => {
+      window.clearInterval(timer)
+      timer = undefined
+      if (!document.hidden && processingDocuments) timer = window.setInterval(refresh, 2_000)
+    }
+    const visibilityChanged = () => {
+      refresh()
+      updatePolling()
+    }
+    updatePolling()
+    document.addEventListener('visibilitychange', visibilityChanged)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', visibilityChanged)
+    }
+  }, [processingDocuments, refreshDocuments, selectedBaseId])
 
   async function createBase(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()

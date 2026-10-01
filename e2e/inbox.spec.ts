@@ -126,6 +126,7 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     )
     holdNextMessageRequest = true
     await page.clock.fastForward(30_001)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
     await messageRequestStarted
     expect(new URL(heldMessageRequestUrl).searchParams.has('cursor')).toBe(true)
     await expect(messageList).toBeVisible()
@@ -142,7 +143,7 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     const nextPollResponse = page.waitForResponse(
       (response) => isMessageRequest(response.url()) && response.request().method() === 'GET',
     )
-    await page.clock.fastForward(30_001)
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
     expect((await nextPollResponse).status()).toBe(200)
     await expect(messageList).toHaveAttribute('data-poll-check', 'stable')
     expect(await messageViewport.evaluate((element) => element.scrollTop)).toBe(scrollTop)
