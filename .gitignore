@@ -11,3 +11,5 @@ playwright-report/
 test-results/
 .neon
 apps/worker/wrangler.jsonc
+tmp/
+
