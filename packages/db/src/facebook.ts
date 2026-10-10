@@ -1,6 +1,6 @@
 import { and, asc, eq, gt, inArray, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
-import { listConversations, type ConversationView, type ConversationCursor } from './inbox'
+import { type ConversationCursor, type ConversationView, listConversations } from './inbox'
 import { createHumanReply, type HumanReplyInput } from './outbound'
 import {
   channel,
@@ -85,7 +85,9 @@ export async function listFacebookConversations(
     after?: ConversationCursor
     limit?: number
     conversationId?: string
+    includeClosed?: boolean
     tagId?: string
+    attention?: 'unread' | 'unanswered'
   },
 ) {
   const page = await listConversations(db, input)

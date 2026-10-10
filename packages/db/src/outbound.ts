@@ -4,8 +4,8 @@ import {
   channelIdentity,
   conversation,
   deliveryAttempt,
-  message,
   member,
+  message,
   workspaceUserAccess,
 } from './schema'
 
@@ -111,7 +111,7 @@ export async function createHumanReply(
         messageType: 'TEXT',
         text,
         deliveryState: 'PENDING',
-        createdAt: now,
+        createdAt: sql`clock_timestamp()`,
         updatedAt: now,
       })
       .returning()
@@ -336,7 +336,7 @@ export async function completeOutboundMessage(
       .set({
         deliveryState: 'SENT',
         externalMessageId: input.externalMessageId,
-        providerSentAt: now,
+        providerSentAt: null,
         deliveryCompletedAt: now,
         updatedAt: now,
       })

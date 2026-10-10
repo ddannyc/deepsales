@@ -36,7 +36,6 @@ import {
   useState,
 } from 'react'
 import { createRoot } from 'react-dom/client'
-import { CustomerSidebar } from './customer-sidebar'
 import { toast } from 'sonner'
 import {
   AlertDialog,
@@ -84,6 +83,7 @@ import { Switch } from '#components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '#components/ui/table'
 import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
+import { CustomerSidebar } from './customer-sidebar'
 import { DemoPage } from './demo'
 import { LandingPage } from './landing'
 
@@ -145,8 +145,10 @@ type FacebookChannel = {
 
 type FacebookPageOption = { id: string; name: string; tasks: string[] }
 
-type InboxView = 'my' | 'waiting-human' | 'ai-handling' | 'unassigned' | 'all-open'
+type InboxView = 'my' | 'waiting-human' | 'ai-handling' | 'unassigned' | 'all-open' | 'closed'
 type InboxConversation = {
+  unread: boolean
+  unanswered: boolean
   id: string
   status: 'OPEN' | 'CLOSED'
   routingConstraint: 'ANY_MEMBER' | 'HUMAN_ONLY'
@@ -169,6 +171,8 @@ type InboxConversation = {
   failedMessage: boolean
 }
 type InboxMessage = {
+  delivered: boolean
+  read: boolean
   id: string
   direction: 'INBOUND' | 'OUTBOUND'
   senderType: 'CUSTOMER' | 'MEMBER' | 'EXTERNAL'
@@ -194,10 +198,6 @@ type InboxAttachment = {
 }
 type InboxPageData = { conversations: InboxConversation[]; nextCursor: string | null }
 
-function encodeMessageCursor(message: Pick<InboxMessage, 'createdAt' | 'id'>) {
-  return btoa(JSON.stringify({ createdAt: message.createdAt, id: message.id }))
-}
-
 function mergeInboxMessages(current: InboxMessage[], incoming: InboxMessage[]) {
   const messagesById = new Map(current.map((message) => [message.id, message]))
   let changed = false
@@ -212,7 +212,11 @@ function mergeInboxMessages(current: InboxMessage[], incoming: InboxMessage[]) {
   return changed
     ? [...messagesById.values()].sort(
         (first, second) =>
-          first.createdAt.localeCompare(second.createdAt) || first.id.localeCompare(second.id),
+          first.createdAt
+            .slice(0, -1)
+            .padEnd(26, '0')
+            .localeCompare(second.createdAt.slice(0, -1).padEnd(26, '0')) ||
+          first.id.localeCompare(second.id),
       )
     : current
 }
@@ -228,6 +232,8 @@ function sameInboxMessage(first: InboxMessage, second: InboxMessage) {
     first.externalMessageId === second.externalMessageId &&
     first.providerSentAt === second.providerSentAt &&
     first.deliveryState === second.deliveryState &&
+    first.delivered === second.delivered &&
+    first.read === second.read &&
     first.failureCode === second.failureCode &&
     first.failureMessage === second.failureMessage &&
     first.createdAt === second.createdAt &&
@@ -1136,6 +1142,13 @@ const inboxViews: Array<{ id: InboxView; label: string; icon: LucideIcon }> = [
 ]
 
 function InboxPage({ workspace }: { workspace: Workspace }) {
+  const [attention, setAttention] = useState<'all' | 'unread' | 'unanswered'>('all')
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [olderCursor, setOlderCursor] = useState<string | null>(null)
+  const [pageLoading, setPageLoading] = useState(false)
+  const [olderLoading, setOlderLoading] = useState(false)
+  const [readError, setReadError] = useState('')
+  const [readRetry, setReadRetry] = useState(0)
   const [tagFilter, setTagFilter] = useState<{ id: string; name: string } | null>(null)
   const [view, setView] = useState<InboxView>('all-open')
   const [conversations, setConversations] = useState<InboxConversation[]>([])
@@ -1154,6 +1167,24 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [mobileThreadOpen, setMobileThreadOpen] = useState(false)
   const [clock, setClock] = useState(() => Date.now())
   const selectedIdRef = useRef<string | null>(null)
+  const selectionEpoch = useRef(0)
+  const readAcknowledgements = useRef({ epoch: -1, retry: -1, ids: new Set<string>() })
+  if (selectedIdRef.current !== selectedId) {
+    selectedIdRef.current = selectedId
+    selectionEpoch.current += 1
+  }
+  const listRequest = useRef(0)
+  const threadRequest = useRef(0)
+  const listPages = useRef(1)
+  const unreadSelectionCleared = useRef(false)
+  const queryKey = `${workspace.id}:${view}:${tagFilter?.id ?? ''}:${attention}`
+  const currentQuery = useRef(queryKey)
+  if (currentQuery.current !== queryKey) {
+    currentQuery.current = queryKey
+    listPages.current = 1
+    unreadSelectionCleared.current = false
+    listRequest.current += 1
+  }
   const messagesRef = useRef<InboxMessage[]>([])
   const messageListRef = useRef<HTMLDivElement>(null)
   const shouldScrollToBottomRef = useRef(false)
@@ -1169,7 +1200,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
         )
       : []
   const canManageSelected = Boolean(
-    selectedConversation &&
+    selectedConversation?.status === 'OPEN' &&
       (workspace.role !== 'AGENT' || selectedConversation.assigneeMemberId === workspace.memberId),
   )
   const replyWindowEligibleUntil = selectedConversation?.replyWindowEligibleUntil ?? null
@@ -1212,49 +1243,178 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   }, [])
 
   const refresh = useCallback(async () => {
-    const response = await fetch(
-      `/api/workspaces/${workspace.id}/conversations?view=${encodeURIComponent(view)}${tagFilter ? `&tagId=${encodeURIComponent(tagFilter.id)}` : ''}`,
-    )
-    if (!response.ok) throw await responseError(response)
-    const data = (await response.json()) as InboxPageData
+    const generation = ++listRequest.current
+    const base = `/api/workspaces/${workspace.id}/conversations?view=${encodeURIComponent(view)}${tagFilter ? `&tagId=${encodeURIComponent(tagFilter.id)}` : ''}${attention === 'all' ? '' : `&attention=${attention}`}`
+    const items = new Map<string, InboxConversation>()
+    let cursor: string | null = null
+    for (let page = 0; page < listPages.current; page += 1) {
+      const response = await fetch(
+        `${base}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`,
+      )
+      if (!response.ok) throw await responseError(response)
+      const data = (await response.json()) as InboxPageData
+      if (currentQuery.current !== queryKey || listRequest.current !== generation) return
+      for (const item of data.conversations) items.set(item.id, item)
+      cursor = data.nextCursor
+      if (!cursor) break
+    }
+    const selected = selectedIdRef.current
+    if (selected && !items.has(selected)) {
+      const response = await fetch(`${base}&conversationId=${encodeURIComponent(selected)}`)
+      if (!response.ok) throw await responseError(response)
+      const data = (await response.json()) as InboxPageData
+      if (currentQuery.current !== queryKey || listRequest.current !== generation) return
+      if (data.conversations[0]) items.set(selected, data.conversations[0])
+    }
+    const visible = [...items.values()]
     setError('')
-    setConversations(data.conversations)
+    setNextCursor(cursor)
+    setConversations(visible)
     setSelectedId((current) => {
-      const stillSelected = current && data.conversations.some(({ id }) => id === current)
-      return stillSelected ? current : (data.conversations[0]?.id ?? null)
+      if (current && !items.has(current) && attention === 'unread')
+        unreadSelectionCleared.current = true
+      if (!items.has(current ?? '') && attention === 'unread' && unreadSelectionCleared.current)
+        return null
+      return current && items.has(current) ? current : (visible[0]?.id ?? null)
     })
     setLoading(false)
-  }, [view, workspace.id, tagFilter])
+  }, [view, workspace.id, tagFilter, attention, queryKey])
 
   const refreshThread = useCallback(
     async (conversationId: string, showLoading = false) => {
+      const generation = ++threadRequest.current
+      const epoch = selectionEpoch.current
       if (showLoading) setThreadLoading(true)
       try {
         const currentMessages = messagesRef.current
-        const latestMessage = currentMessages.at(-1)
-        const pendingUpdate = currentMessages.some(
-          (message) =>
-            message.deliveryState === 'PENDING' ||
-            message.attachments.some((attachment) => attachment.storageState === 'PENDING'),
-        )
-        const cursor =
-          !showLoading && latestMessage && !pendingUpdate
-            ? `?cursor=${encodeURIComponent(encodeMessageCursor(latestMessage))}`
-            : ''
-        const response = await fetch(
-          `/api/workspaces/${workspace.id}/conversations/${conversationId}/messages${cursor}`,
-        )
-        if (!response.ok) throw await responseError(response)
-        const data = (await response.json()) as { messages: InboxMessage[] }
-        if (selectedIdRef.current === conversationId) {
-          updateMessages(data.messages, !showLoading)
-        }
+        const oldestId = !showLoading ? currentMessages[0]?.id : undefined
+        const loaded: InboxMessage[] = []
+        let oldestLoadedId: string | undefined
+        let cursor: string | null = null
+        do {
+          const response = await fetch(
+            `/api/workspaces/${workspace.id}/conversations/${conversationId}/messages${cursor ? `?before=${encodeURIComponent(cursor)}` : '?history=latest'}`,
+          )
+          if (!response.ok) throw await responseError(response)
+          const data = (await response.json()) as {
+            messages: InboxMessage[]
+            olderCursor: string | null
+          }
+          if (
+            selectedIdRef.current !== conversationId ||
+            selectionEpoch.current !== epoch ||
+            threadRequest.current !== generation
+          )
+            return
+          loaded.push(...data.messages)
+          oldestLoadedId = data.messages[0]?.id
+          cursor = data.olderCursor
+          if (!oldestId || data.messages.some((m) => m.id === oldestId)) break
+        } while (cursor)
+        updateMessages(loaded, !showLoading)
+        if (messagesRef.current[0]?.id === oldestLoadedId) setOlderCursor(cursor)
+        if (showLoading) shouldScrollToBottomRef.current = true
       } finally {
         if (showLoading && selectedIdRef.current === conversationId) setThreadLoading(false)
       }
     },
     [updateMessages, workspace.id],
   )
+
+  async function loadOlder() {
+    if (!selectedId || !olderCursor || olderLoading) return
+    const epoch = selectionEpoch.current
+    setOlderLoading(true)
+    try {
+      const response = await fetch(
+        `/api/workspaces/${workspace.id}/conversations/${selectedId}/messages?before=${encodeURIComponent(olderCursor)}`,
+      )
+      if (!response.ok) throw await responseError(response)
+      const data = (await response.json()) as {
+        messages: InboxMessage[]
+        olderCursor: string | null
+      }
+      if (selectionEpoch.current !== epoch) return
+      const viewport = messageListRef.current?.closest('[data-slot="scroll-area-viewport"]')
+      const anchor =
+        viewport instanceof HTMLElement
+          ? { viewport, height: viewport.scrollHeight, top: viewport.scrollTop }
+          : null
+      updateMessages(data.messages, false)
+      if (messagesRef.current[0]?.id === data.messages[0]?.id) setOlderCursor(data.olderCursor)
+      if (anchor)
+        requestAnimationFrame(() => {
+          if (selectionEpoch.current === epoch)
+            anchor.viewport.scrollTop = anchor.top + anchor.viewport.scrollHeight - anchor.height
+        })
+    } catch (cause) {
+      if (selectionEpoch.current === epoch) setError(inboxErrorMessage(cause))
+    } finally {
+      if (selectionEpoch.current === epoch) setOlderLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!selectedId || threadLoading || document.hidden) return
+    const epoch = selectionEpoch.current
+    if (
+      readAcknowledgements.current.epoch !== epoch ||
+      readAcknowledgements.current.retry !== readRetry
+    )
+      readAcknowledgements.current = { epoch, retry: readRetry, ids: new Set<string>() }
+    const acknowledged = readAcknowledgements.current.ids
+    let timer: number | undefined
+    const pending = new Set<string>()
+    const root = messageListRef.current?.closest('[data-slot="scroll-area-viewport"]')
+    if (!(root instanceof HTMLElement)) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          const id = (entry.target as HTMLElement).dataset.customerMessageId
+          if (entry.isIntersecting && id && !acknowledged.has(id)) {
+            pending.add(id)
+          }
+        }
+        if (!pending.size || timer !== undefined) return
+        timer = window.setTimeout(() => {
+          timer = undefined
+          if (document.hidden || selectionEpoch.current !== epoch) return
+          const ids = [...pending]
+          pending.clear()
+          for (const id of ids) acknowledged.add(id)
+          void (async () => {
+            for (let offset = 0; offset < ids.length; offset += 100) {
+              if (selectionEpoch.current !== epoch || document.hidden) return
+              await request(`/api/workspaces/${workspace.id}/conversations/${selectedId}/read`, {
+                messageIds: ids.slice(offset, offset + 100),
+              })
+            }
+          })()
+            .then(() => {
+              if (selectionEpoch.current === epoch) {
+                setReadError('')
+                return refresh()
+              }
+            })
+            .catch(() => {
+              if (selectionEpoch.current === epoch) setReadError('已读确认失败，请重试。')
+            })
+        }, 150)
+      },
+      { root, threshold: 0.1 },
+    )
+    const customerIds = new Set(
+      messages.filter((message) => message.senderType === 'CUSTOMER').map((message) => message.id),
+    )
+    for (const element of root.querySelectorAll('[data-customer-message-id]')) {
+      if (customerIds.has((element as HTMLElement).dataset.customerMessageId ?? ''))
+        observer.observe(element)
+    }
+    return () => {
+      observer.disconnect()
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [messages, selectedId, workspace.id, threadLoading, refresh, readRetry])
 
   useEffect(() => {
     void fetch(`/api/workspaces/${workspace.id}/team`)
@@ -1369,11 +1529,14 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
 
   useEffect(() => {
     setLoading(true)
+    setConversations([])
+    setSelectedId(null)
     void refresh().catch((cause) => {
+      if (currentQuery.current !== queryKey) return
       setLoading(false)
       setError(inboxErrorMessage(cause))
     })
-  }, [refresh])
+  }, [refresh, queryKey])
 
   useEffect(() => {
     if (!replyWindowEligibleUntil) return
@@ -1400,6 +1563,9 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       return
     }
     shouldScrollToBottomRef.current = false
+    setOlderCursor(null)
+    setOlderLoading(false)
+    setReadError('')
     messagesRef.current = []
     setMessages([])
     void refreshThread(selectedId, true).catch((cause) => setError(inboxErrorMessage(cause)))
@@ -1415,8 +1581,13 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
         .catch((cause) => setError(inboxErrorMessage(cause)))
     }
     window.addEventListener('focus', refreshVisible)
+    const readVisible = () => {
+      if (!document.hidden) setReadRetry((value) => value + 1)
+    }
+    document.addEventListener('visibilitychange', readVisible)
     return () => {
       window.removeEventListener('focus', refreshVisible)
+      document.removeEventListener('visibilitychange', readVisible)
     }
   }, [refresh, refreshThread])
 
@@ -1462,7 +1633,10 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     }
   }, [refresh, refreshThread, workspace.id])
 
-  const currentViewLabel = inboxViews.find((item) => item.id === view)?.label ?? '全部进行中'
+  const currentViewLabel =
+    view === 'closed'
+      ? '已关闭历史'
+      : (inboxViews.find((item) => item.id === view)?.label ?? '全部进行中')
 
   return (
     <main className={`inbox-page ${mobileThreadOpen ? 'mobile-thread-open' : ''}`}>
@@ -1513,6 +1687,28 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
               )
             })}
           </nav>
+          <Button
+            type="button"
+            variant="ghost"
+            aria-pressed={view === 'closed'}
+            onClick={() => setView('closed')}
+          >
+            已关闭历史
+          </Button>
+          <label htmlFor="inbox-attention">消息筛选</label>
+          <Select
+            value={attention}
+            onValueChange={(value) => setAttention(value as typeof attention)}
+          >
+            <SelectTrigger id="inbox-attention" aria-label="消息筛选">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部消息</SelectItem>
+              <SelectItem value="unread">未读</SelectItem>
+              <SelectItem value="unanswered">未回复</SelectItem>
+            </SelectContent>
+          </Select>
         </div>
         <Separator />
         <section className="conversation-list" aria-label="对话列表">
@@ -1551,6 +1747,22 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                   }}
                 />
               ))}
+              {nextCursor && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={pageLoading}
+                  onClick={() => {
+                    listPages.current += 1
+                    setPageLoading(true)
+                    void refresh()
+                      .catch((cause) => setError(inboxErrorMessage(cause)))
+                      .finally(() => setPageLoading(false))
+                  }}
+                >
+                  {pageLoading ? '加载中…' : '加载更多对话'}
+                </Button>
+              )}
             </div>
           ) : (
             <div className="inbox-placeholder inbox-empty-state">
@@ -1589,6 +1801,18 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
               onUnassign={() => void unassign()}
             />
             <div className="thread-context">
+              {readError && (
+                <div role="alert">
+                  {readError}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => setReadRetry((value) => value + 1)}
+                  >
+                    重试已读确认
+                  </Button>
+                </div>
+              )}
               {error && (
                 <div className="thread-error" role="alert">
                   <AlertCircle aria-hidden="true" />
@@ -1640,6 +1864,16 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                 <MessageThreadSkeleton />
               ) : (
                 <div ref={messageListRef} className="message-list" aria-live="polite">
+                  {olderCursor && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      disabled={olderLoading}
+                      onClick={() => void loadOlder()}
+                    >
+                      {olderLoading ? '加载中…' : '加载更早消息'}
+                    </Button>
+                  )}
                   {messages.length ? (
                     messages.map((message) => (
                       <MessageBubble
@@ -1656,6 +1890,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
               )}
             </ScrollArea>
             <ConversationComposer
+              closed={selectedConversation.status === 'CLOSED'}
               actionLoading={actionLoading}
               canReply={
                 selectedConversation.assigneeMemberId === workspace.memberId &&
@@ -1778,6 +2013,8 @@ function ConversationListItem({
           <StatusBadge tone={handling.tone}>{handling.label}</StatusBadge>
           {item.aiGenerating && <StatusBadge tone="info">AI 正在生成</StatusBadge>}
           {item.failedMessage && <StatusBadge tone="destructive">发送失败</StatusBadge>}
+          {item.unread && <StatusBadge tone="info">未读</StatusBadge>}
+          {item.unanswered && <StatusBadge tone="warning">未回复</StatusBadge>}
         </span>
       </span>
     </button>
@@ -1848,7 +2085,9 @@ function ConversationHeader({
   onUnassign: () => void
 }) {
   const handling = conversationHandling(conversation)
-  const canTakeOver = conversation.assigneeMemberId === null || conversation.assigneeType === 'AI'
+  const canTakeOver =
+    conversation.status === 'OPEN' &&
+    (conversation.assigneeMemberId === null || conversation.assigneeType === 'AI')
 
   return (
     <header className="thread-heading">
@@ -1967,6 +2206,7 @@ function MessageBubble({
     <article
       aria-label={`${senderName}的消息`}
       className={`message-bubble ${message.direction.toLowerCase()}`}
+      data-customer-message-id={message.senderType === 'CUSTOMER' ? message.id : undefined}
     >
       <div className="message-bubble-header">
         <span className="message-sender">
@@ -1983,6 +2223,11 @@ function MessageBubble({
         <AttachmentPreview attachment={attachment} key={attachment.id} workspaceId={workspaceId} />
       ))}
       {message.deliveryState && <DeliveryStatus state={message.deliveryState} />}
+      {message.deliveryState === 'SENT' && (
+        <StatusBadge tone={message.read || message.delivered ? 'success' : 'neutral'}>
+          {message.read ? '客户已读' : message.delivered ? '已送达' : '送达状态未知'}
+        </StatusBadge>
+      )}
       {message.deliveryState === 'FAILED' && (
         <span className="delivery-failure">{deliveryFailureLabel(message.failureCode)}</span>
       )}
@@ -2011,6 +2256,7 @@ function DeliveryStatus({ state }: { state: NonNullable<InboxMessage['deliverySt
 }
 
 function ConversationComposer({
+  closed = false,
   actionLoading,
   canReply,
   reply,
@@ -2018,6 +2264,7 @@ function ConversationComposer({
   setReply,
   onSubmit,
 }: {
+  closed?: boolean
   actionLoading: boolean
   canReply: boolean
   reply: string
@@ -2025,14 +2272,16 @@ function ConversationComposer({
   setReply: (value: string) => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
-  const disabled = actionLoading || !canReply || !replyWindowOpen
+  const disabled = closed || actionLoading || !canReply || !replyWindowOpen
   const hint = actionLoading
     ? '正在处理，请稍候。'
-    : !canReply
-      ? '接管对话后即可回复客户。'
-      : !replyWindowOpen
-        ? 'Messenger 回复窗口已关闭，暂时无法发送新消息。'
-        : ''
+    : closed
+      ? '该对话已关闭。客户再次发来消息时会创建新的进行中对话。'
+      : !canReply
+        ? '接管对话后即可回复客户。'
+        : !replyWindowOpen
+          ? 'Messenger 回复窗口已关闭，暂时无法发送新消息。'
+          : ''
 
   return (
     <div className="reply-composer-dock">

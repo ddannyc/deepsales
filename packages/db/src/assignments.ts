@@ -600,7 +600,7 @@ async function executeAiHandoff(
         messageType: 'TEXT',
         text: noticeText,
         deliveryState: 'PENDING',
-        createdAt: now,
+        createdAt: sql`clock_timestamp()`,
         updatedAt: now,
       })
       .returning({ id: message.id })

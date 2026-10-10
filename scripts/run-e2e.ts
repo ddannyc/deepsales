@@ -27,6 +27,7 @@ const e2eOwnerKeys = [
   'facebook',
   'inbox',
   'customer-facts',
+  'inbox-reading',
   'knowledge',
   'reply',
   'routing',

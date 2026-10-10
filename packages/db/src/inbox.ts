@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, getTableColumns, inArray, isNull, lt, sql } from 'drizzle-orm'
 import { ensureAiResponseRun } from './assignments'
 import type { FacebookInboundAttachmentInput } from './attachments'
 import type { Database } from './database'
@@ -7,17 +7,19 @@ import {
   channel,
   channelIdentity,
   conversation,
+  conversationMemberRead,
   customer,
   customerTag,
   customerTagDefinition,
-  memberChannelAccess,
   facebookAttachmentSource,
   facebookChannelConfig,
   facebookMessagingWindow,
   facebookWebhookReceipt,
   member,
+  memberChannelAccess,
   message,
   messageAttachment,
+  messageMemberRead,
   workspaceUserAccess,
 } from './schema'
 
@@ -184,6 +186,7 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
         text: input.text,
         externalMessageId: input.externalMessageId,
         providerSentAt: input.providerSentAt,
+        createdAt: sql`clock_timestamp()`,
       })
       .onConflictDoNothing()
       .returning({ id: message.id, conversationId: message.conversationId })
@@ -338,8 +341,14 @@ export async function deleteOldFacebookWebhookReceipts(
   })
 }
 
-export type ConversationView = 'my' | 'waiting-human' | 'ai-handling' | 'unassigned' | 'all-open'
-export type ConversationCursor = { updatedAt: Date; id: string }
+export type ConversationView =
+  | 'my'
+  | 'waiting-human'
+  | 'ai-handling'
+  | 'unassigned'
+  | 'all-open'
+  | 'closed'
+export type ConversationCursor = { updatedAt: Date | string; id: string }
 
 export async function listConversations(
   db: Database,
@@ -350,12 +359,20 @@ export async function listConversations(
     after?: ConversationCursor
     limit?: number
     conversationId?: string
+    includeClosed?: boolean
     tagId?: string
+    attention?: 'unread' | 'unanswered'
   },
 ) {
   const viewer = await assertViewer(db, input.workspaceId, input.userId)
   const limit = Math.min(Math.max(input.limit ?? 50, 1), 100)
-  const filters = [eq(conversation.workspaceId, input.workspaceId), eq(conversation.status, 'OPEN')]
+  const filters = [eq(conversation.workspaceId, input.workspaceId)]
+  if (!input.includeClosed)
+    filters.push(eq(conversation.status, input.view === 'closed' ? 'CLOSED' : 'OPEN'))
+  const unread = sql<boolean>`exists (select 1 from message input where input.conversation_id = ${conversation.id} and input.sender_type = 'CUSTOMER' and not exists (select 1 from ${messageMemberRead} r where r.member_id = ${viewer.memberId} and r.message_id = input.id))`
+  const unanswered = sql<boolean>`exists (select 1 from message input where input.id = ${conversation.lastCustomerMessageId} and not exists (select 1 from message reply where reply.conversation_id = ${conversation.id} and reply.direction = 'OUTBOUND' and reply.sender_type = 'MEMBER' and reply.delivery_state = 'SENT' and length(btrim(coalesce(reply.text, ''))) > 0 and (reply.created_at, reply.id) > (input.created_at, input.id)))`
+  if (input.attention === 'unread') filters.push(unread)
+  if (input.attention === 'unanswered') filters.push(unanswered)
   const sharedCustomerVisible =
     viewer.role === 'AGENT'
       ? sql`not exists (select 1 from ${channelIdentity} ci where ci.customer_id = ${customer.id} and not exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = ci.channel_id)) and not exists (select 1 from jsonb_array_elements_text(${customer.profileSourceChannelIds}) s(channel_id) where not exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id::text = s.channel_id))`
@@ -395,16 +412,17 @@ export async function listConversations(
   if (input.view === 'unassigned') filters.push(isNull(conversation.assigneeMemberId))
   if (input.conversationId) filters.push(eq(conversation.id, input.conversationId))
   if (input.after && !input.conversationId) {
-    const cursorFilter = or(
-      lt(conversation.updatedAt, input.after.updatedAt),
-      and(eq(conversation.updatedAt, input.after.updatedAt), lt(conversation.id, input.after.id)),
+    filters.push(
+      sql`(${conversation.updatedAt}, ${conversation.id}) < (${input.after.updatedAt}::timestamptz, ${input.after.id}::uuid)`,
     )
-    if (cursorFilter) filters.push(cursorFilter)
   }
 
   const rows = await db
     .select({
       id: conversation.id,
+      unread,
+      unanswered,
+      cursorTime: sql<string>`to_char(${conversation.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       status: conversation.status,
       routingConstraint: conversation.routingConstraint,
       queueReason: conversation.queueReason,
@@ -451,7 +469,7 @@ export async function listConversations(
   const last = conversations.at(-1)
   return {
     conversations,
-    nextCursor: hasNext && last ? { updatedAt: last.updatedAt, id: last.id } : null,
+    nextCursor: hasNext && last ? { updatedAt: last.cursorTime, id: last.id } : null,
   }
 }
 
@@ -461,7 +479,9 @@ export async function listMessages(
     workspaceId: string
     userId: string
     conversationId: string
-    after?: { createdAt: Date; id: string }
+    after?: { createdAt: Date | string; id: string }
+    before?: { createdAt: Date | string; id: string }
+    latest?: boolean
     limit?: number
   },
 ) {
@@ -469,21 +489,31 @@ export async function listMessages(
   const limit = Math.min(Math.max(input.limit ?? 100, 1), 100)
   const filters = [eq(message.conversationId, input.conversationId)]
   if (input.after) {
-    const cursorFilter = or(
-      gt(message.createdAt, input.after.createdAt),
-      and(eq(message.createdAt, input.after.createdAt), gt(message.id, input.after.id)),
+    filters.push(
+      sql`(${message.createdAt}, ${message.id}) > (${input.after.createdAt}::timestamptz, ${input.after.id}::uuid)`,
     )
-    if (cursorFilter) filters.push(cursorFilter)
   }
+  if (input.before)
+    filters.push(
+      sql`(${message.createdAt}, ${message.id}) < (${input.before.createdAt}::timestamptz, ${input.before.id}::uuid)`,
+    )
+  const backwards = Boolean(input.latest || input.before)
 
   const rows = await db
-    .select()
+    .select({
+      ...getTableColumns(message),
+      cursorTime: sql<string>`to_char(${message.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+    })
     .from(message)
     .where(and(...filters))
-    .orderBy(asc(message.createdAt), asc(message.id))
+    .orderBy(
+      backwards ? desc(message.createdAt) : asc(message.createdAt),
+      backwards ? desc(message.id) : asc(message.id),
+    )
     .limit(limit + 1)
   const hasNext = rows.length > limit
   const messages = rows.slice(0, limit)
+  if (backwards) messages.reverse()
   const attachments = messages.length
     ? await db
         .select({
@@ -515,12 +545,57 @@ export async function listMessages(
   return {
     messages: messages.map((item) => ({
       ...item,
+      createdAt: item.cursorTime,
       attachments: (attachmentsByMessageId.get(item.id) ?? []).map(
         ({ messageId: _messageId, ...attachment }) => attachment,
       ),
     })),
-    nextCursor: hasNext && last ? { createdAt: last.createdAt, id: last.id } : null,
+    nextCursor: !backwards && hasNext && last ? { createdAt: last.cursorTime, id: last.id } : null,
+    olderCursor:
+      backwards && hasNext && messages[0]
+        ? { createdAt: messages[0].cursorTime, id: messages[0].id }
+        : null,
   }
+}
+
+export async function acknowledgeConversationRead(
+  db: Database,
+  input: { workspaceId: string; userId: string; conversationId: string; messageIds: string[] },
+) {
+  return db.transaction(async (tx) => {
+    const viewer = await assertConversationAccess(tx, input)
+    const ids = [...new Set(input.messageIds)]
+    const visible = await tx
+      .select({ id: message.id, createdAt: message.createdAt })
+      .from(message)
+      .where(
+        and(
+          eq(message.conversationId, input.conversationId),
+          eq(message.senderType, 'CUSTOMER'),
+          inArray(message.id, ids),
+        ),
+      )
+      .orderBy(desc(message.createdAt), desc(message.id))
+    if (visible.length !== ids.length || !visible.length)
+      throw new InboxError('INVALID_REQUEST', 'Customer messages required')
+    await tx
+      .insert(messageMemberRead)
+      .values(visible.map((m) => ({ memberId: viewer.memberId, messageId: m.id })))
+      .onConflictDoNothing()
+    await tx
+      .insert(conversationMemberRead)
+      .values({
+        memberId: viewer.memberId,
+        conversationId: input.conversationId,
+        lastReadMessageId: visible[0].id,
+      })
+      .onConflictDoUpdate({
+        target: [conversationMemberRead.memberId, conversationMemberRead.conversationId],
+        set: {
+          lastReadMessageId: sql`case when (select (created_at, id) from message where id = excluded.last_read_message_id) > (select (created_at, id) from message where id = ${conversationMemberRead.lastReadMessageId}) then excluded.last_read_message_id else ${conversationMemberRead.lastReadMessageId} end`,
+        },
+      })
+  })
 }
 
 async function assertViewer(db: QueryHandle, workspaceId: string, userId: string) {
@@ -529,7 +604,13 @@ async function assertViewer(db: QueryHandle, workspaceId: string, userId: string
     .from(workspaceUserAccess)
     .innerJoin(member, eq(member.workspaceUserAccessId, workspaceUserAccess.id))
     .where(
-      and(eq(workspaceUserAccess.workspaceId, workspaceId), eq(workspaceUserAccess.userId, userId)),
+      and(
+        eq(workspaceUserAccess.workspaceId, workspaceId),
+        eq(workspaceUserAccess.userId, userId),
+        eq(member.workspaceId, workspaceId),
+        eq(member.status, 'ACTIVE'),
+        eq(member.type, 'HUMAN'),
+      ),
     )
     .limit(1)
   if (!viewer) throw new InboxError('FORBIDDEN', 'Workspace access required')
@@ -565,6 +646,7 @@ async function assertConversationAccess(
       )
     if (!allowed) throw new InboxError('FORBIDDEN', 'Channel access required')
   }
+  return viewer
 }
 
 async function markReceiptProcessed(db: QueryHandle, receiptId: string, processedAt: Date) {

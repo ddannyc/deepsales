@@ -105,7 +105,6 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     let holdNextMessageRequest = false
     let releaseMessageRequest: (() => void) | undefined
     let resolveMessageRequestStarted: (() => void) | undefined
-    let heldMessageRequestUrl = ''
     const messageRequestStarted = new Promise<void>((resolve) => {
       resolveMessageRequestStarted = resolve
     })
@@ -115,7 +114,6 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
       async (route) => {
         if (holdNextMessageRequest) {
           holdNextMessageRequest = false
-          heldMessageRequestUrl = route.request().url()
           resolveMessageRequestStarted?.()
           await new Promise<void>((resolve) => {
             releaseMessageRequest = resolve
@@ -128,7 +126,6 @@ test('fake Messenger text appears in the inbox without reloading', async ({ page
     await page.clock.fastForward(30_001)
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
     await messageRequestStarted
-    expect(new URL(heldMessageRequestUrl).searchParams.has('cursor')).toBe(true)
     await expect(messageList).toBeVisible()
     await expect(messageList).toHaveAttribute('data-poll-check', 'stable')
     await expect(page.locator('.message-skeleton')).toHaveCount(0)

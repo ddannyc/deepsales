@@ -3,14 +3,15 @@ import {
   buildFacebookOAuthUrl,
   createFacebookAdapter,
   decryptFacebookToken,
-  encryptFacebookToken,
   encryptFacebookAttachmentSources,
+  encryptFacebookToken,
   FacebookProviderError,
-  facebookWebhookJobSchema,
   facebookOutboundJobSchema,
+  facebookWebhookJobSchema,
   isFacebookReplyWindowOpen,
   isRetryableFacebookFailure,
   isValidTokenEncryptionKey,
+  normalizeFacebookReceipts,
   normalizeFacebookWebhook,
   redactedFacebookFailure,
 } from './facebook'
@@ -18,6 +19,49 @@ import {
 const encryptionKey = btoa(String.fromCharCode(...new Uint8Array(32).fill(7)))
 
 describe('Facebook adapter', () => {
+  it('normalizes identity-scoped delivery, read and echo receipts without message content', () => {
+    const events = normalizeFacebookReceipts({
+      object: 'page',
+      entry: [
+        {
+          id: 'page-1',
+          messaging: [
+            {
+              sender: { id: 'customer-1' },
+              recipient: { id: 'page-1' },
+              delivery: { mids: ['mid-1'], watermark: 1700000000000 },
+            },
+            {
+              sender: { id: 'customer-1' },
+              recipient: { id: 'page-1' },
+              read: { watermark: 1700000000001 },
+            },
+            {
+              sender: { id: 'page-1' },
+              recipient: { id: 'customer-1' },
+              timestamp: 1699999999999,
+              message: { mid: 'mid-1', is_echo: true, text: 'Private reply' },
+            },
+            {
+              sender: { id: 'customer-1' },
+              recipient: { id: 'other-page' },
+              read: { watermark: 1700000000001 },
+            },
+            {
+              sender: { id: 'customer-1' },
+              recipient: { id: 'page-1' },
+              read: { watermark: 'invalid' },
+            },
+          ],
+        },
+      ],
+    })
+    expect(events).toHaveLength(3)
+    expect(events.map((e) => e.kind)).toEqual(['delivery', 'read', 'echo'])
+    expect(events.every((e) => e.externalUserId === 'customer-1')).toBe(true)
+    expect(JSON.stringify(events)).not.toContain('Private reply')
+    expect(events[2].providerSentAt).toBe('2023-11-14T22:13:19.999Z')
+  })
   it('normalizes text events without local dedupe or echo data', () => {
     const events = normalizeFacebookWebhook({
       object: 'page',

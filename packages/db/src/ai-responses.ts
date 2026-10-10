@@ -515,7 +515,7 @@ export async function commitAiResponse(
         messageType: 'TEXT',
         text,
         deliveryState: 'PENDING',
-        createdAt: now,
+        createdAt: sql`clock_timestamp()`,
         updatedAt: now,
       })
       .returning()

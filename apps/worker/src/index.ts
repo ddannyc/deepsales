@@ -56,7 +56,7 @@ import {
   listFacebookChannels,
   listFacebookChannelsPage,
   listFacebookConversations,
-  listMessages,
+  listFacebookMessages,
   listPendingFacebookInboundAttachmentIds,
   listPendingKnowledgeDocumentIds,
   listQueuedAiResponseRunIds,
@@ -73,6 +73,8 @@ import {
   listTeam,
   MemberError,
   processFacebookInbound,
+  processFacebookReceipt,
+  acknowledgeConversationRead,
   recordAiResponseRetrievedChunks,
   retryAiResponseRun,
   releaseOutboundMessage,
@@ -109,6 +111,9 @@ import {
   isFacebookReplyWindowOpen,
   isRetryableFacebookFailure,
   normalizeFacebookWebhook,
+  normalizeFacebookReceipts,
+  facebookReceiptJobSchema,
+  MAX_FACEBOOK_WEBHOOK_EVENTS,
   decryptFacebookToken,
   createFacebookAdapter,
   redactedFacebookFailure,
@@ -259,6 +264,7 @@ const conversationViewInput = z.enum([
   'ai-handling',
   'unassigned',
   'all-open',
+  'closed',
 ])
 const conversationCursorInput = z.object({
   updatedAt: z.string().datetime(),
@@ -994,10 +1000,19 @@ app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
     try {
       const viewResult = conversationViewInput.safeParse(c.req.query('view') ?? 'all-open')
       if (!viewResult.success) throw new InboxError('INVALID_REQUEST', 'Invalid conversation view')
+      const attention = z
+        .enum(['unread', 'unanswered'])
+        .optional()
+        .safeParse(c.req.query('attention'))
+      if (!attention.success) throw new InboxError('INVALID_REQUEST', 'Invalid attention filter')
+      const selected = z.string().uuid().optional().safeParse(c.req.query('conversationId'))
+      if (!selected.success) throw new InboxError('INVALID_REQUEST', 'Invalid conversation ID')
       const page = await listFacebookConversations(db, {
         workspaceId: c.req.param('workspaceId'),
         userId: session.user.id,
         tagId: c.req.query('tagId'),
+        attention: attention.data,
+        conversationId: selected.data,
         view: viewResult.data,
         after: decodeConversationCursor(c.req.query('cursor')),
       })
@@ -1005,7 +1020,7 @@ app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
         conversations: page.conversations,
         nextCursor: page.nextCursor
           ? encodeCursor({
-              updatedAt: page.nextCursor.updatedAt.toISOString(),
+              updatedAt: page.nextCursor.updatedAt,
               id: page.nextCursor.id,
             })
           : null,
@@ -1028,6 +1043,7 @@ app.get('/api/workspaces/:workspaceId/conversations/:conversationId', async (c) 
         userId: session.user.id,
         view: 'all-open',
         conversationId: c.req.param('conversationId'),
+        includeClosed: true,
       })
       const conversation = page.conversations[0]
       if (!conversation) throw new InboxError('NOT_FOUND', 'Conversation not found')
@@ -1045,21 +1061,58 @@ app.get('/api/workspaces/:workspaceId/conversations/:conversationId/messages', a
     if (!session) return unauthorized(c)
 
     try {
-      const page = await listMessages(db, {
+      if (c.req.query('cursor') && (c.req.query('before') || c.req.query('history')))
+        throw new InboxError('INVALID_REQUEST', 'Conflicting message cursors')
+      if (c.req.query('history') && c.req.query('history') !== 'latest')
+        throw new InboxError('INVALID_REQUEST', 'Invalid history direction')
+      const page = await listFacebookMessages(db, {
         workspaceId: c.req.param('workspaceId'),
         userId: session.user.id,
         conversationId: c.req.param('conversationId'),
         after: decodeMessageCursor(c.req.query('cursor')),
+        before: decodeMessageCursor(c.req.query('before')),
+        latest: c.req.query('history') === 'latest',
       })
       return c.json({
         messages: page.messages,
         nextCursor: page.nextCursor
           ? encodeCursor({
-              createdAt: page.nextCursor.createdAt.toISOString(),
+              createdAt: page.nextCursor.createdAt,
               id: page.nextCursor.id,
             })
           : null,
+        olderCursor: page.olderCursor ? encodeCursor(page.olderCursor) : null,
       })
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/read', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      const input = z
+        .object({ messageIds: z.array(z.string().uuid()).min(1).max(100) })
+        .strict()
+        .safeParse(await c.req.json().catch(() => null))
+      if (!input.success) throw new InboxError('INVALID_REQUEST', 'Customer message IDs required')
+      await acknowledgeConversationRead(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        conversationId: c.req.param('conversationId'),
+        ...input.data,
+      })
+      await publishInboxChange(
+        c.env,
+        c.req.param('workspaceId'),
+        c.req.param('conversationId'),
+        'conversation.changed',
+      )
+      return c.json({ acknowledged: true })
     } catch (error) {
       return inboxErrorResponse(c, error)
     }
@@ -1923,7 +1976,7 @@ function decodeConversationCursor(value: string | undefined) {
   try {
     const cursor = conversationCursorInput.safeParse(JSON.parse(decodeCursorValue(value)))
     if (!cursor.success) throw new Error('invalid cursor')
-    return { updatedAt: new Date(cursor.data.updatedAt), id: cursor.data.id }
+    return cursor.data
   } catch {
     throw new InboxError('INVALID_REQUEST', 'Invalid conversation cursor')
   }
@@ -1934,7 +1987,7 @@ function decodeMessageCursor(value: string | undefined) {
   try {
     const cursor = messageCursorInput.safeParse(JSON.parse(decodeCursorValue(value)))
     if (!cursor.success) throw new Error('invalid cursor')
-    return { createdAt: new Date(cursor.data.createdAt), id: cursor.data.id }
+    return cursor.data
   } catch {
     throw new InboxError('INVALID_REQUEST', 'Invalid message cursor')
   }
@@ -2138,13 +2191,17 @@ app.post('/webhooks/facebook', async (c) => {
   }
 
   let events: ReturnType<typeof normalizeFacebookWebhook>
+  let receiptEvents: ReturnType<typeof normalizeFacebookReceipts>
   try {
     events = normalizeFacebookWebhook(payload)
+    receiptEvents = normalizeFacebookReceipts(payload)
+    if (events.length + receiptEvents.length > MAX_FACEBOOK_WEBHOOK_EVENTS)
+      throw new FacebookWebhookPayloadError('TOO_MANY_EVENTS')
   } catch (error) {
     if (error instanceof FacebookWebhookPayloadError) return c.text('Payload Too Large', 413)
     throw error
   }
-  if (!events.length) return c.text('EVENT_RECEIVED')
+  if (!events.length && !receiptEvents.length) return c.text('EVENT_RECEIVED')
 
   const queue = c.env.WEBHOOKS_QUEUE ? createJobQueue(c.env.WEBHOOKS_QUEUE) : undefined
   if (!queue) {
@@ -2186,7 +2243,12 @@ app.post('/webhooks/facebook', async (c) => {
   if (jobs.some((job) => !job.success)) return c.text('Bad Request', 400)
 
   try {
-    await Promise.all(jobs.map((job) => queue.send(job.data)))
+    await Promise.all([
+      ...jobs.map((job) => queue.send(job.data)),
+      ...receiptEvents.map((event) =>
+        queue.send(facebookReceiptJobSchema.parse({ v: 1, type: 'facebook.receipt', event })),
+      ),
+    ])
   } catch {
     console.error(JSON.stringify({ event: 'webhook_queue_failed', messages: events.length }))
     return c.json(
@@ -2360,6 +2422,21 @@ async function publishMemberChange(env: Bindings, workspaceId: string, memberId:
 export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bindings) {
   const documentsQueue = env.DOCUMENTS_QUEUE ? createJobQueue(env.DOCUMENTS_QUEUE) : undefined
   for (const message of batch.messages) {
+    const receipt = facebookReceiptJobSchema.safeParse(message.body)
+    if (receipt.success) {
+      try {
+        const changed = await withDatabase(env, (db) =>
+          processFacebookReceipt(db, receipt.data.event),
+        )
+        if (changed)
+          for (const id of changed.conversationIds)
+            await publishInboxChange(env, changed.workspaceId, id, 'message.changed')
+        message.ack()
+      } catch {
+        message.retry()
+      }
+      continue
+    }
     const job = facebookWebhookJobSchema.safeParse(message.body)
     if (!job.success) {
       message.ack()

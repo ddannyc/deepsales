@@ -111,7 +111,9 @@ export function createFacebookAdapter(
           Authorization: `Bearer ${pageAccessToken}`,
           'Content-Type': 'application/x-www-form-urlencoded',
         },
-        body: new URLSearchParams({ subscribed_fields: 'messages' }),
+        body: new URLSearchParams({
+          subscribed_fields: 'messages,message_deliveries,message_reads,message_echoes',
+        }),
       })
       if (
         typeof result === 'object' &&
@@ -303,6 +305,70 @@ export const facebookWebhookJobSchema = z
   .strict()
 
 export type FacebookWebhookJob = z.infer<typeof facebookWebhookJobSchema>
+
+export const facebookReceiptEventSchema = z
+  .object({
+    pageId: z.string().min(1).max(200),
+    externalUserId: z.string().min(1).max(200),
+    kind: z.enum(['delivery', 'read', 'echo']),
+    mids: z.array(z.string().min(1).max(500)).max(100),
+    watermark: z.string().datetime().nullable(),
+    providerSentAt: z.string().datetime().nullable(),
+  })
+  .strict()
+  .refine((e) =>
+    e.kind === 'echo'
+      ? e.mids.length === 1 && e.providerSentAt !== null
+      : e.kind === 'read'
+        ? e.watermark !== null
+        : e.mids.length > 0 || e.watermark !== null,
+  )
+
+export const facebookReceiptJobSchema = z
+  .object({
+    v: z.literal(1),
+    type: z.literal('facebook.receipt'),
+    event: facebookReceiptEventSchema,
+  })
+  .strict()
+
+export function normalizeFacebookReceipts(payload: unknown) {
+  const events: z.infer<typeof facebookReceiptEventSchema>[] = []
+  if (!isRecord(payload) || payload.object !== 'page' || !Array.isArray(payload.entry))
+    return events
+  for (const entry of payload.entry) {
+    if (!isRecord(entry) || typeof entry.id !== 'string' || !Array.isArray(entry.messaging))
+      continue
+    for (const event of entry.messaging) {
+      if (!isRecord(event) || !isRecord(event.sender) || !isRecord(event.recipient)) continue
+      const echo = isRecord(event.message) && event.message.is_echo === true
+      const kind = echo
+        ? 'echo'
+        : isRecord(event.delivery)
+          ? 'delivery'
+          : isRecord(event.read)
+            ? 'read'
+            : null
+      if (!kind || (echo ? event.sender.id : event.recipient.id) !== entry.id) continue
+      const detail =
+        kind === 'delivery' ? event.delivery : kind === 'read' ? event.read : event.message
+      if (!isRecord(detail)) continue
+      const parsed = facebookReceiptEventSchema.safeParse({
+        pageId: entry.id,
+        externalUserId: echo ? event.recipient.id : event.sender.id,
+        kind,
+        mids: echo ? [detail.mid] : kind === 'delivery' ? (detail.mids ?? []) : [],
+        watermark: providerTimestamp(detail.watermark)?.toISOString() ?? null,
+        providerSentAt: echo ? (providerTimestamp(event.timestamp)?.toISOString() ?? null) : null,
+      })
+      if (!parsed.success) continue
+      if (events.length >= MAX_FACEBOOK_WEBHOOK_EVENTS)
+        throw new FacebookWebhookPayloadError('TOO_MANY_EVENTS')
+      events.push(parsed.data)
+    }
+  }
+  return events
+}
 
 export const facebookAttachmentJobSchema = z
   .object({

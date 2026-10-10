@@ -639,6 +639,58 @@ export const message = pgTable(
   ],
 )
 
+export const messageMemberRead = pgTable(
+  'message_member_read',
+  {
+    messageId: uuid('message_id')
+      .notNull()
+      .references(() => message.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    readAt: timestamp('read_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.memberId, table.messageId] })],
+)
+
+export const conversationMemberRead = pgTable(
+  'conversation_member_read',
+  {
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    lastReadMessageId: uuid('last_read_message_id')
+      .notNull()
+      .references(() => message.id, { onDelete: 'cascade' }),
+  },
+  (table) => [primaryKey({ columns: [table.memberId, table.conversationId] })],
+)
+
+export const facebookReceiptWatermark = pgTable('facebook_receipt_watermark', {
+  channelIdentityId: uuid('channel_identity_id')
+    .primaryKey()
+    .references(() => channelIdentity.id, { onDelete: 'cascade' }),
+  deliveredThrough: timestamp('delivered_through', { withTimezone: true }),
+  readThrough: timestamp('read_through', { withTimezone: true }),
+})
+
+export const facebookMessageReceipt = pgTable(
+  'facebook_message_receipt',
+  {
+    channelIdentityId: uuid('channel_identity_id')
+      .notNull()
+      .references(() => channelIdentity.id, { onDelete: 'cascade' }),
+    externalMessageId: text('external_message_id').notNull(),
+    providerSentAt: timestamp('provider_sent_at', { withTimezone: true }),
+    delivered: boolean().default(false).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.channelIdentityId, table.externalMessageId] })],
+)
+
 export const aiResponseRun = pgTable(
   'ai_response_run',
   {
