@@ -69,6 +69,21 @@ test('previews and cancels recording, edits text drafts and safely sends private
     await page.reload()
     await page.getByText('Media greeting', { exact: true }).first().click()
     await page.getByRole('button', { name: '接管', exact: true }).click()
+    await page.getByLabel('上传附件').setInputFiles({
+      name: 'renamed.png',
+      mimeType: 'image/png',
+      buffer: Buffer.from('RIFF0000WEBPVP8 '),
+    })
+    const rejectedUpload = page.waitForResponse(
+      (r) => r.url().endsWith('/media-assets') && r.request().method() === 'POST',
+    )
+    await page.getByRole('button', { name: '上传所选附件', exact: true }).click()
+    const rejected = await rejectedUpload
+    expect(rejected.status()).toBe(400)
+    expect((await rejected.json()).error.code).toBe('MEDIA_INVALID_FILE')
+    await expect(page.getByRole('alert')).toContainText('改扩展名不会转换文件格式')
+    await expect(page.getByText('renamed.png', { exact: false })).toBeVisible()
+    await page.getByRole('button', { name: '取消附件草稿', exact: true }).click()
     await page.getByRole('button', { name: '开始录音', exact: true }).click()
     await expect(page.getByText('录音中，最多 60 秒')).toBeVisible()
     await page.getByRole('button', { name: '取消录音', exact: true }).click()

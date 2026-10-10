@@ -192,7 +192,7 @@ app.use('*', async (c, next) => {
   c.header('X-Content-Type-Options', 'nosniff')
   c.header('X-Frame-Options', 'DENY')
   c.header('Referrer-Policy', 'strict-origin-when-cross-origin')
-  c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  c.header('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()')
   if (c.env.APP_URL?.startsWith('https://')) {
     c.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
   }
@@ -1204,7 +1204,15 @@ app.on(['GET', 'POST'], '/api/workspaces/:workspaceId/media-assets', async (c) =
           new Uint8Array(body),
         )
       } catch {
-        throw new InboxError('INVALID_REQUEST', 'Unsupported media type, signature or size')
+        return c.json(
+          {
+            error: {
+              code: 'MEDIA_INVALID_FILE',
+              message: 'Unsupported media type, signature or size',
+            },
+          },
+          400,
+        )
       }
       const sha256 = await sha256Hex(body)
       const storageKey = `media/${context.workspaceId}/${id.data}/${sha256}`

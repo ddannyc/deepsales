@@ -33,14 +33,20 @@ type Template = { id: string; title: string; text: string }
 
 async function read<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init)
-  if (!response.ok)
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => ({}))) as { error?: { code?: string } }
     throw new Error(
-      response.status === 403
-        ? '权限不足，请检查工作区或频道权限。'
-        : response.status === 404
-          ? '所选内容已失效，请重新选择。'
-          : '操作未确认成功，草稿已保留；请重试。',
+      payload?.error?.code === 'MEDIA_INVALID_FILE'
+        ? '文件格式、内容或大小不符合要求，请按下方限制重新导出文件；改扩展名不会转换文件格式。'
+        : response.status === 413
+          ? '文件过大，请按下方大小限制选择文件。'
+          : response.status === 403
+            ? '权限不足，请检查工作区或频道权限。'
+            : response.status === 404
+              ? '所选内容已失效，请重新选择。'
+              : '操作未确认成功，草稿已保留；请重试。',
     )
+  }
   return response.json() as Promise<T>
 }
 const body = (value: unknown) => ({

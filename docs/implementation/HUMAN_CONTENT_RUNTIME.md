@@ -39,12 +39,17 @@ not a claim that every permitted file is accepted by every provider account.
 Extension, declared MIME, file signature, nonempty size, and UTF-8 text are checked.
 This boundary does not fully decode uploaded media or scan files for malware.
 Provider rejection is displayed through the existing failed delivery state.
+Files whose bytes do not match their declared format are rejected with an
+actionable upload error. Renaming a WebP file to PNG does not convert it;
+export it as a supported image format before uploading.
 
 Recording uses browser microphone permission and MediaRecorder, previews a mono
 PCM WAV, and stops after 60 seconds. Cancellation releases the microphone and
 does not upload or send. Unsupported microphone or decoding capabilities display
 an error and preserve the upload alternative. Templates are limited to 100-character
 names and 2,000-character text; library searches return at most 100 items.
+The Permissions-Policy permits microphone requests from the same origin only;
+the browser still requires the user's microphone permission.
 
 ## Migration and release verification
 

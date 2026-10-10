@@ -244,7 +244,7 @@ describe('application readiness', () => {
     expect(response.headers.get('x-frame-options')).toBe('DENY')
     expect(response.headers.get('referrer-policy')).toBe('strict-origin-when-cross-origin')
     expect(response.headers.get('permissions-policy')).toBe(
-      'camera=(), microphone=(), geolocation=()',
+      'camera=(), microphone=(self), geolocation=()',
     )
     expect(response.headers.get('strict-transport-security')).toBe(
       'max-age=31536000; includeSubDomains',
