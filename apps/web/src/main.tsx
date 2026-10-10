@@ -36,6 +36,7 @@ import {
   useState,
 } from 'react'
 import { createRoot } from 'react-dom/client'
+import { InboxFilterControls, inboxQuery, type InboxFilters } from './inbox-filters'
 import { toast } from 'sonner'
 import {
   AlertDialog,
@@ -145,7 +146,7 @@ type FacebookChannel = {
 
 type FacebookPageOption = { id: string; name: string; tasks: string[] }
 
-type InboxView = 'my' | 'waiting-human' | 'ai-handling' | 'unassigned' | 'all-open' | 'closed'
+type InboxView = InboxFilters['view']
 type InboxConversation = {
   unread: boolean
   unanswered: boolean
@@ -1142,7 +1143,18 @@ const inboxViews: Array<{ id: InboxView; label: string; icon: LucideIcon }> = [
 ]
 
 function InboxPage({ workspace }: { workspace: Workspace }) {
-  const [attention, setAttention] = useState<'all' | 'unread' | 'unanswered'>('all')
+  const [filters, setFilters] = useState<InboxFilters>({ view: 'all-open' })
+  const [searchReady, setSearchReady] = useState(
+    () => !new URL(window.location.href).searchParams.has('inboxView'),
+  )
+  const view = filters.view
+  const attention = filters.attention ?? 'all'
+  const setView = (view: InboxView) => setFilters((current) => ({ ...current, view }))
+  const setAttention = (attention: 'all' | 'unread' | 'unanswered') =>
+    setFilters((current) => ({
+      ...current,
+      attention: attention === 'all' ? undefined : attention,
+    }))
   const [nextCursor, setNextCursor] = useState<string | null>(null)
   const [olderCursor, setOlderCursor] = useState<string | null>(null)
   const [pageLoading, setPageLoading] = useState(false)
@@ -1150,7 +1162,6 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [readError, setReadError] = useState('')
   const [readRetry, setReadRetry] = useState(0)
   const [tagFilter, setTagFilter] = useState<{ id: string; name: string } | null>(null)
-  const [view, setView] = useState<InboxView>('all-open')
   const [conversations, setConversations] = useState<InboxConversation[]>([])
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -1177,7 +1188,20 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const threadRequest = useRef(0)
   const listPages = useRef(1)
   const unreadSelectionCleared = useRef(false)
-  const queryKey = `${workspace.id}:${view}:${tagFilter?.id ?? ''}:${attention}`
+  const queryParams = inboxQuery({
+    ...filters,
+    tagIds: [...new Set([...(filters.tagIds ?? []), ...(tagFilter ? [tagFilter.id] : [])])],
+  })
+  const queryKey = `${workspace.id}:${queryParams}:${searchReady}`
+  const applyFilters = useCallback((next: InboxFilters) => {
+    setFilters(next)
+    setTagFilter(null)
+    setSearchReady(true)
+  }, [])
+  const readyFilters = useCallback((next?: InboxFilters) => {
+    if (next) setFilters(next)
+    setSearchReady(true)
+  }, [])
   const currentQuery = useRef(queryKey)
   if (currentQuery.current !== queryKey) {
     currentQuery.current = queryKey
@@ -1244,7 +1268,11 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
 
   const refresh = useCallback(async () => {
     const generation = ++listRequest.current
-    const base = `/api/workspaces/${workspace.id}/conversations?view=${encodeURIComponent(view)}${tagFilter ? `&tagId=${encodeURIComponent(tagFilter.id)}` : ''}${attention === 'all' ? '' : `&attention=${attention}`}`
+    if (!searchReady) {
+      setLoading(false)
+      return
+    }
+    const base = `/api/workspaces/${workspace.id}/conversations?${queryParams}`
     const items = new Map<string, InboxConversation>()
     let cursor: string | null = null
     for (let page = 0; page < listPages.current; page += 1) {
@@ -1278,7 +1306,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       return current && items.has(current) ? current : (visible[0]?.id ?? null)
     })
     setLoading(false)
-  }, [view, workspace.id, tagFilter, attention, queryKey])
+  }, [workspace.id, attention, queryKey, queryParams, searchReady])
 
   const refreshThread = useCallback(
     async (conversationId: string, showLoading = false) => {
@@ -1636,7 +1664,9 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const currentViewLabel =
     view === 'closed'
       ? '已关闭历史'
-      : (inboxViews.find((item) => item.id === view)?.label ?? '全部进行中')
+      : view === 'team'
+        ? '团队对话'
+        : (inboxViews.find((item) => item.id === view)?.label ?? '全部进行中')
 
   return (
     <main className={`inbox-page ${mobileThreadOpen ? 'mobile-thread-open' : ''}`}>
@@ -1709,6 +1739,26 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
               <SelectItem value="unanswered">未回复</SelectItem>
             </SelectContent>
           </Select>
+          <Button
+            type="button"
+            variant="ghost"
+            aria-pressed={view === 'team'}
+            onClick={() => setView('team')}
+          >
+            团队对话
+          </Button>
+          <InboxFilterControls
+            workspaceId={workspace.id}
+            manager={workspace.role !== 'AGENT'}
+            filters={{
+              ...filters,
+              tagIds: [
+                ...new Set([...(filters.tagIds ?? []), ...(tagFilter ? [tagFilter.id] : [])]),
+              ],
+            }}
+            onApply={applyFilters}
+            onReady={readyFilters}
+          />
         </div>
         <Separator />
         <section className="conversation-list" aria-label="对话列表">
@@ -1787,6 +1837,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                   members={teamMembers}
                   onSaved={refresh}
                   onFilter={setTagFilter}
+                  onFilterCustomer={(customerId) => applyFilters({ ...filters, customerId })}
                 />
               }
               actionLoading={actionLoading}
@@ -4461,6 +4512,8 @@ function facebookErrorMessage(cause: unknown): string {
 }
 
 function inboxErrorMessage(cause: unknown): string {
+  if (cause instanceof ApiError && cause.message === 'Filter references need repair')
+    return '筛选条件引用的标签、成员、客户或属性已失效，请打开筛选面板修复。'
   if (cause instanceof ApiError && cause.code === 'TRANSFER_CONFIRMATION_REQUIRED') {
     return '目标成员暂不可用，请确认是否继续转接。'
   }

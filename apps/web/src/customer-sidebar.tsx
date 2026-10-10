@@ -71,6 +71,7 @@ type Props = {
   members: { id: string; displayName: string | null; type: string; status: string }[]
   onSaved: () => Promise<void>
   onFilter: (tag: { id: string; name: string }) => void
+  onFilterCustomer: (customerId: string) => void
 }
 
 async function read<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
@@ -123,6 +124,10 @@ export function CustomerSidebar(props: Props) {
               props.onFilter(tag)
               setOpen(false)
             }}
+            onFilterCustomer={(id) => {
+              props.onFilterCustomer(id)
+              setOpen(false)
+            }}
           />
         )}
       </SheetContent>
@@ -138,6 +143,7 @@ function CustomerFacts({
   members,
   onSaved,
   onFilter,
+  onFilterCustomer,
 }: Props) {
   const base = `/api/workspaces/${workspaceId}/conversations/${conversationId}`
   const formId = useId()
@@ -247,6 +253,13 @@ function CustomerFacts({
         <p role="status">{error ? '资料暂不可用。对话仍可继续处理。' : '正在加载客户资料…'}</p>
       ) : (
         <>
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => onFilterCustomer(profile.customer.id)}
+          >
+            仅查看此客户的对话
+          </Button>
           <form
             key={`${profile.customer.id}:${profile.customer.profileRevision}`}
             onSubmit={(event) => {

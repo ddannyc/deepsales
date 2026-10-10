@@ -11,6 +11,8 @@ import {
   customer,
   customerTag,
   customerTagDefinition,
+  customerPropertyDefinition,
+  customerPropertyValue,
   facebookAttachmentSource,
   facebookChannelConfig,
   facebookMessagingWindow,
@@ -348,11 +350,108 @@ export type ConversationView =
   | 'unassigned'
   | 'all-open'
   | 'closed'
+  | 'team'
 export type ConversationCursor = { updatedAt: Date | string; id: string }
+
+export type InboxFilters = {
+  view: ConversationView
+  query?: string
+  memberIds?: string[]
+  tagIds?: string[]
+  customerId?: string
+  updatedFrom?: string
+  updatedTo?: string
+  attention?: 'unread' | 'unanswered'
+  properties?: { definitionId: string; value: string | number }[]
+}
+
+export async function inboxFilterOptions(
+  db: QueryHandle,
+  input: { workspaceId: string; userId: string },
+) {
+  const viewer = await assertInboxViewer(db, input.workspaceId, input.userId)
+  const members = await db
+    .select({ id: member.id, name: member.displayName })
+    .from(member)
+    .where(
+      and(
+        eq(member.workspaceId, input.workspaceId),
+        eq(member.status, 'ACTIVE'),
+        viewer.role === 'AGENT'
+          ? sql`exists (select 1 from ${memberChannelAccess} target join ${memberChannelAccess} own on target.channel_id = own.channel_id where target.member_id = ${member.id} and own.member_id = ${viewer.memberId})`
+          : undefined,
+      ),
+    )
+    .orderBy(member.displayName, member.id)
+  const tags = await db
+    .select()
+    .from(customerTagDefinition)
+    .where(eq(customerTagDefinition.workspaceId, input.workspaceId))
+    .orderBy(customerTagDefinition.name)
+  const properties = await db
+    .select()
+    .from(customerPropertyDefinition)
+    .where(
+      and(
+        eq(customerPropertyDefinition.workspaceId, input.workspaceId),
+        isNull(customerPropertyDefinition.deletedAt),
+      ),
+    )
+    .orderBy(customerPropertyDefinition.name)
+  return { members, tags, properties }
+}
+
+export async function validateInboxFilters(
+  db: QueryHandle,
+  input: { workspaceId: string; userId: string },
+  filters: InboxFilters,
+) {
+  if (
+    !filters.memberIds?.length &&
+    !filters.tagIds?.length &&
+    !filters.properties?.length &&
+    !filters.customerId
+  )
+    return
+  const options = await inboxFilterOptions(db, input)
+  if (
+    filters.memberIds?.some((id) => !options.members.some((m) => m.id === id)) ||
+    filters.tagIds?.some((id) => !options.tags.some((t) => t.id === id))
+  )
+    throw new InboxError('INVALID_REQUEST', 'Filter references need repair')
+  if (filters.customerId) {
+    const viewer = await assertInboxViewer(db, input.workspaceId, input.userId)
+    const [target] = await db
+      .select({ id: customer.id })
+      .from(customer)
+      .where(
+        and(
+          eq(customer.id, filters.customerId),
+          eq(customer.workspaceId, input.workspaceId),
+          viewer.role === 'AGENT'
+            ? sql`exists (select 1 from ${channelIdentity} ci join ${memberChannelAccess} a on a.channel_id = ci.channel_id where ci.customer_id = ${customer.id} and a.member_id = ${viewer.memberId})`
+            : undefined,
+        ),
+      )
+    if (!target) throw new InboxError('INVALID_REQUEST', 'Filter references need repair')
+  }
+  for (const condition of filters.properties ?? []) {
+    const definition = options.properties.find((d) => d.id === condition.definitionId)
+    if (
+      !definition ||
+      (definition.type === 'NUMBER'
+        ? typeof condition.value !== 'number' || !Number.isFinite(condition.value)
+        : typeof condition.value !== 'string' ||
+          condition.value.length > definition.maxLength ||
+          (definition.type === 'OPTION' && !definition.options.includes(condition.value)))
+    )
+      throw new InboxError('INVALID_REQUEST', 'Filter references need repair')
+  }
+}
 
 export async function listConversations(
   db: Database,
-  input: {
+  input: InboxFilters & {
     workspaceId: string
     userId: string
     view: ConversationView
@@ -364,7 +463,8 @@ export async function listConversations(
     attention?: 'unread' | 'unanswered'
   },
 ) {
-  const viewer = await assertViewer(db, input.workspaceId, input.userId)
+  const viewer = await assertInboxViewer(db, input.workspaceId, input.userId)
+  await validateInboxFilters(db, input, input)
   const limit = Math.min(Math.max(input.limit ?? 50, 1), 100)
   const filters = [eq(conversation.workspaceId, input.workspaceId)]
   if (!input.includeClosed)
@@ -381,25 +481,40 @@ export async function listConversations(
     filters.push(
       sql`exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = ${channelIdentity.channelId})`,
     )
-  if (input.tagId) {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.tagId))
+  if (input.query)
+    filters.push(
+      sql`${sharedCustomerVisible} and (strpos(lower(coalesce(${customer.displayName}, '')), lower(${input.query})) > 0 or strpos(lower(coalesce(${customer.notes}, '')), lower(${input.query})) > 0)`,
+    )
+  if (input.customerId) filters.push(eq(customer.id, input.customerId))
+  if (input.memberIds?.length) filters.push(inArray(conversation.assigneeMemberId, input.memberIds))
+  if (input.updatedFrom)
+    filters.push(sql`${conversation.updatedAt} >= ${input.updatedFrom}::timestamptz`)
+  if (input.updatedTo)
+    filters.push(sql`${conversation.updatedAt} <= ${input.updatedTo}::timestamptz`)
+  for (const condition of input.properties ?? [])
+    filters.push(
+      sql`exists (select 1 from ${customerPropertyValue} p where p.definition_id = ${condition.definitionId} and (p.customer_id = ${customer.id} or p.conversation_id = ${conversation.id}) and p.value = ${JSON.stringify(condition.value)}::jsonb ${viewer.role === 'AGENT' ? sql`and (p.customer_id is null or (${sharedCustomerVisible})) and exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = p.source_channel_id)` : sql``})`,
+    )
+  for (const tagId of new Set([...(input.tagIds ?? []), ...(input.tagId ? [input.tagId] : [])])) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tagId))
       throw new InboxError('INVALID_REQUEST', 'Invalid tag')
     const [tag] = await db
       .select({ id: customerTagDefinition.id })
       .from(customerTagDefinition)
       .where(
         and(
-          eq(customerTagDefinition.id, input.tagId),
+          eq(customerTagDefinition.id, tagId),
           eq(customerTagDefinition.workspaceId, input.workspaceId),
         ),
       )
     if (!tag) throw new InboxError('NOT_FOUND', 'Tag not found')
     filters.push(
-      sql`exists (select 1 from ${customerTag} t where t.tag_id = ${input.tagId} and (t.customer_id = ${customer.id} or t.conversation_id = ${conversation.id}) ${viewer.role === 'AGENT' ? sql`and exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = t.source_channel_id) and not exists (select 1 from ${channelIdentity} ci where ci.customer_id = ${customer.id} and not exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = ci.channel_id))` : sql``})`,
+      sql`exists (select 1 from ${customerTag} t where t.tag_id = ${tagId} and (t.customer_id = ${customer.id} or t.conversation_id = ${conversation.id}) ${viewer.role === 'AGENT' ? sql`and exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = t.source_channel_id) and (t.customer_id is null or (${sharedCustomerVisible}))` : sql``})`,
     )
   }
 
   if (input.view === 'my') filters.push(eq(conversation.assigneeMemberId, viewer.memberId))
+  if (input.view === 'team') filters.push(eq(member.type, 'HUMAN'))
   if (input.view === 'waiting-human') {
     filters.push(
       isNull(conversation.assigneeMemberId),
@@ -598,7 +713,7 @@ export async function acknowledgeConversationRead(
   })
 }
 
-async function assertViewer(db: QueryHandle, workspaceId: string, userId: string) {
+export async function assertInboxViewer(db: QueryHandle, workspaceId: string, userId: string) {
   const [viewer] = await db
     .select({ memberId: member.id, role: workspaceUserAccess.role })
     .from(workspaceUserAccess)
@@ -621,7 +736,7 @@ async function assertConversationAccess(
   db: QueryHandle,
   input: { workspaceId: string; userId: string; conversationId: string },
 ) {
-  const viewer = await assertViewer(db, input.workspaceId, input.userId)
+  const viewer = await assertInboxViewer(db, input.workspaceId, input.userId)
   const [found] = await db
     .select({ id: conversation.id, channelId: channelIdentity.channelId })
     .from(conversation)

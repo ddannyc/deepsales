@@ -75,6 +75,10 @@ import {
   processFacebookInbound,
   processFacebookReceipt,
   acknowledgeConversationRead,
+  inboxFilterOptions,
+  listInboxViews,
+  saveInboxView,
+  deleteInboxView,
   recordAiResponseRetrievedChunks,
   retryAiResponseRun,
   releaseOutboundMessage,
@@ -265,7 +269,35 @@ const conversationViewInput = z.enum([
   'unassigned',
   'all-open',
   'closed',
+  'team',
 ])
+
+const inboxFiltersInput = z
+  .object({
+    view: conversationViewInput,
+    query: z.string().trim().min(1).max(200).optional(),
+    memberIds: z.array(z.string().uuid()).max(50).optional(),
+    tagIds: z.array(z.string().uuid()).max(50).optional(),
+    customerId: z.string().uuid().optional(),
+    updatedFrom: z.string().datetime({ offset: true }).optional(),
+    updatedTo: z.string().datetime({ offset: true }).optional(),
+    attention: z.enum(['unread', 'unanswered']).optional(),
+    properties: z
+      .array(
+        z
+          .object({
+            definitionId: z.string().uuid(),
+            value: z.union([z.string().max(2000), z.number().finite()]),
+          })
+          .strict(),
+      )
+      .max(20)
+      .optional(),
+  })
+  .strict()
+  .refine(
+    (f) => !f.updatedFrom || !f.updatedTo || Date.parse(f.updatedFrom) <= Date.parse(f.updatedTo),
+  )
 const conversationCursorInput = z.object({
   updatedAt: z.string().datetime(),
   id: z.string().uuid(),
@@ -991,6 +1023,82 @@ app.delete(
   },
 )
 
+app.get('/api/workspaces/:workspaceId/inbox-filter-options', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      return c.json(
+        await inboxFilterOptions(db, {
+          workspaceId: c.req.param('workspaceId'),
+          userId: session.user.id,
+        }),
+      )
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+app.get('/api/workspaces/:workspaceId/inbox-views', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      return c.json(
+        await listInboxViews(db, {
+          workspaceId: c.req.param('workspaceId'),
+          userId: session.user.id,
+        }),
+      )
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+const savedInboxViewInput = z
+  .object({
+    name: z.string().trim().min(1).max(100),
+    scope: z.enum(['PERSONAL', 'PUBLIC']),
+    filters: inboxFiltersInput,
+  })
+  .strict()
+app.on(
+  ['POST', 'PATCH', 'DELETE'],
+  ['/api/workspaces/:workspaceId/inbox-views', '/api/workspaces/:workspaceId/inbox-views/:viewId'],
+  async (c) => {
+    if (!hasAuthBindings(c.env)) return notReady(c)
+    return withDatabase(c.env, async (db) => {
+      const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+      if (!session) return unauthorized(c)
+      try {
+        const id = c.req.param('viewId')
+        if (
+          (c.req.method === 'POST' && id) ||
+          (c.req.method !== 'POST' && !id) ||
+          (id && !z.string().uuid().safeParse(id).success)
+        )
+          throw new InboxError('INVALID_REQUEST')
+        const context = { workspaceId: c.req.param('workspaceId'), userId: session.user.id }
+        if (c.req.method === 'DELETE') {
+          if (!id) throw new InboxError('INVALID_REQUEST')
+          await deleteInboxView(db, { ...context, id })
+          return c.body(null, 204)
+        }
+        const parsed = savedInboxViewInput.safeParse(await c.req.json().catch(() => null))
+        if (!parsed.success) throw new InboxError('INVALID_REQUEST', 'Invalid saved view')
+        return c.json(
+          await saveInboxView(db, { ...context, ...parsed.data, id }),
+          c.req.method === 'POST' ? 201 : 200,
+        )
+      } catch (error) {
+        return inboxErrorResponse(c, error)
+      }
+    })
+  },
+)
+
 app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
@@ -998,22 +1106,33 @@ app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
     if (!session) return unauthorized(c)
 
     try {
-      const viewResult = conversationViewInput.safeParse(c.req.query('view') ?? 'all-open')
-      if (!viewResult.success) throw new InboxError('INVALID_REQUEST', 'Invalid conversation view')
-      const attention = z
-        .enum(['unread', 'unanswered'])
-        .optional()
-        .safeParse(c.req.query('attention'))
-      if (!attention.success) throw new InboxError('INVALID_REQUEST', 'Invalid attention filter')
+      let properties: unknown
+      try {
+        const raw = c.req.query('properties')
+        properties = raw ? JSON.parse(raw) : undefined
+      } catch {
+        throw new InboxError('INVALID_REQUEST', 'Invalid property filters')
+      }
+      const filters = inboxFiltersInput.safeParse({
+        view: c.req.query('view') ?? 'all-open',
+        query: c.req.query('query'),
+        memberIds: c.req.query('memberIds')?.split(','),
+        tagIds: c.req.query('tagIds')?.split(','),
+        customerId: c.req.query('customerId'),
+        updatedFrom: c.req.query('updatedFrom'),
+        updatedTo: c.req.query('updatedTo'),
+        attention: c.req.query('attention'),
+        properties,
+      })
+      if (!filters.success) throw new InboxError('INVALID_REQUEST', 'Invalid inbox filters')
       const selected = z.string().uuid().optional().safeParse(c.req.query('conversationId'))
       if (!selected.success) throw new InboxError('INVALID_REQUEST', 'Invalid conversation ID')
       const page = await listFacebookConversations(db, {
         workspaceId: c.req.param('workspaceId'),
         userId: session.user.id,
         tagId: c.req.query('tagId'),
-        attention: attention.data,
+        ...filters.data,
         conversationId: selected.data,
-        view: viewResult.data,
         after: decodeConversationCursor(c.req.query('cursor')),
       })
       return c.json({

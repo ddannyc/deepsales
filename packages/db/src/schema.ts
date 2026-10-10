@@ -442,6 +442,27 @@ export const conversation = pgTable(
 )
 
 export const customerFactLevel = pgEnum('customer_fact_level', ['CUSTOMER', 'CONVERSATION'])
+export const inboxSavedView = pgTable(
+  'inbox_saved_view',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    ownerMemberId: uuid('owner_member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    scope: text().$type<'PERSONAL' | 'PUBLIC'>().notNull(),
+    filters: jsonb().$type<import('./inbox').InboxFilters>().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    check('inbox_saved_view_scope', sql`${t.scope} in ('PERSONAL', 'PUBLIC')`),
+    check('inbox_saved_view_name', sql`length(btrim(${t.name})) between 1 and 100`),
+    index('inbox_saved_view_workspace_idx').on(t.workspaceId, t.ownerMemberId),
+  ],
+)
 export const customerPropertyType = pgEnum('customer_property_type', ['TEXT', 'NUMBER', 'OPTION'])
 
 export const customerPropertyDefinition = pgTable(
