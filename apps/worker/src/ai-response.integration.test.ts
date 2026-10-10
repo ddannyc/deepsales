@@ -12,6 +12,7 @@ import {
   createAiMember,
   createDatabase,
   createInlineKnowledgeDocument,
+  createInternalNote,
   createKnowledgeBase,
   member,
   message,
@@ -127,6 +128,13 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     }
     const firstTime = new Date(Date.now() - 30_000)
     const first = await receive('Compare the available options.', firstTime)
+    await createInternalNote(db, {
+      workspaceId: fixture.workspaceId,
+      userId: fixture.ownerId,
+      conversationId: first.conversationId,
+      clientKey: crypto.randomUUID(),
+      text: 'Team-only instruction: arrange an internal review.',
+    })
     const assigned = await autoAssignConversation(db, {
       workspaceId: fixture.workspaceId,
       conversationId: first.conversationId,
@@ -174,6 +182,8 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     expect(queries[0]).toContain('Does the second option come in blue?')
     expect(prompts[0]).toContain('Option two is Torch Two.')
     expect(prompts[0]).toContain('Torch Two comes in blue.')
+    expect(prompts.join('\n')).not.toContain('Team-only instruction')
+    expect(queries.join('\n')).not.toContain('Team-only instruction')
     expect(
       await db
         .select({ text: message.text })

@@ -36,6 +36,7 @@ import {
   useState,
 } from 'react'
 import { createRoot } from 'react-dom/client'
+import { InternalNotes } from './internal-notes'
 import { InboxFilterControls, inboxQuery, type InboxFilters } from './inbox-filters'
 import { toast } from 'sonner'
 import {
@@ -148,6 +149,7 @@ type FacebookPageOption = { id: string; name: string; tasks: string[] }
 
 type InboxView = InboxFilters['view']
 type InboxConversation = {
+  muted: boolean
   unread: boolean
   unanswered: boolean
   id: string
@@ -1175,6 +1177,9 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
   const [transferTargetId, setTransferTargetId] = useState('')
   const [transferConfirmationOpen, setTransferConfirmationOpen] = useState(false)
   const [closeDialogOpen, setCloseDialogOpen] = useState(false)
+  const [notesRevision, setNotesRevision] = useState(0)
+  const [transferAiOnly, setTransferAiOnly] = useState(false)
+  const [aiTransferConfirmationOpen, setAiTransferConfirmationOpen] = useState(false)
   const [mobileThreadOpen, setMobileThreadOpen] = useState(false)
   const [clock, setClock] = useState(() => Date.now())
   const selectedIdRef = useRef<string | null>(null)
@@ -1555,6 +1560,23 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     }
   }
 
+  async function toggleMute() {
+    if (!selectedConversation) return
+    setActionLoading(true)
+    try {
+      await request(
+        `/api/workspaces/${workspace.id}/conversations/${selectedConversation.id}/mute`,
+        { muted: !selectedConversation.muted },
+        'PUT',
+      )
+      await refresh()
+    } catch (cause) {
+      setError(inboxErrorMessage(cause))
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   useEffect(() => {
     setLoading(true)
     setConversations([])
@@ -1583,6 +1605,8 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     setTransferOpen(false)
     setTransferTargetId('')
     setTransferConfirmationOpen(false)
+    setAiTransferConfirmationOpen(false)
+    setTransferAiOnly(false)
     if (!selectedId) {
       shouldScrollToBottomRef.current = false
       messagesRef.current = []
@@ -1641,6 +1665,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
         connectedBefore = true
       }
       socket.onmessage = () => {
+        setNotesRevision((current) => current + 1)
         void refresh()
           .then(() => (selectedIdRef.current ? refreshThread(selectedIdRef.current) : undefined))
           .catch((cause) => setError(inboxErrorMessage(cause)))
@@ -1739,6 +1764,25 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
               <SelectItem value="unanswered">未回复</SelectItem>
             </SelectContent>
           </Select>
+          <label htmlFor="inbox-mute-filter">个人免打扰筛选</label>
+          <Select
+            value={filters.mute ?? 'all'}
+            onValueChange={(value) =>
+              setFilters((current) => ({
+                ...current,
+                mute: value === 'all' ? undefined : (value as 'muted' | 'unmuted'),
+              }))
+            }
+          >
+            <SelectTrigger id="inbox-mute-filter" aria-label="个人免打扰筛选">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部对话</SelectItem>
+              <SelectItem value="unmuted">排除免打扰</SelectItem>
+              <SelectItem value="muted">仅免打扰</SelectItem>
+            </SelectContent>
+          </Select>
           <Button
             type="button"
             variant="ghost"
@@ -1828,17 +1872,34 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
           <div className="thread-layout">
             <ConversationHeader
               customerDetails={
-                <CustomerSidebar
-                  workspaceId={workspace.id}
-                  conversationId={selectedId}
-                  key={selectedId}
-                  manager={workspace.role !== 'AGENT'}
-                  canEdit={canManageSelected}
-                  members={teamMembers}
-                  onSaved={refresh}
-                  onFilter={setTagFilter}
-                  onFilterCustomer={(customerId) => applyFilters({ ...filters, customerId })}
-                />
+                <>
+                  <InternalNotes
+                    workspaceId={workspace.id}
+                    conversationId={selectedId}
+                    closed={selectedConversation.status === 'CLOSED'}
+                    revision={notesRevision}
+                    key={`notes:${selectedId}`}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={actionLoading}
+                    onClick={() => void toggleMute()}
+                  >
+                    {selectedConversation.muted ? '取消个人免打扰' : '个人免打扰'}
+                  </Button>
+                  <CustomerSidebar
+                    workspaceId={workspace.id}
+                    conversationId={selectedId}
+                    key={selectedId}
+                    manager={workspace.role !== 'AGENT'}
+                    canEdit={canManageSelected}
+                    members={teamMembers}
+                    onSaved={refresh}
+                    onFilter={setTagFilter}
+                    onFilterCustomer={(customerId) => applyFilters({ ...filters, customerId })}
+                  />
+                </>
               }
               actionLoading={actionLoading}
               canManage={canManageSelected}
@@ -1847,11 +1908,24 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
               transferTargets={transferTargets}
               onBack={() => setMobileThreadOpen(false)}
               onClose={() => setCloseDialogOpen(true)}
-              onOpenTransfer={() => setTransferOpen(true)}
+              onOpenTransfer={() => {
+                setTransferAiOnly(false)
+                setTransferOpen(true)
+              }}
+              onResumeAi={() => {
+                setTransferAiOnly(true)
+                setTransferTargetId('')
+                setTransferOpen(true)
+              }}
               onTakeOver={() => void takeOver()}
               onUnassign={() => void unassign()}
             />
             <div className="thread-context">
+              {selectedConversation.muted && (
+                <p>
+                  个人免打扰已开启，仅影响你的列表筛选。当前未提供声音或系统通知；消息接收与接待继续。
+                </p>
+              )}
               {readError && (
                 <div role="alert">
                   {readError}
@@ -1873,7 +1947,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
               {transferOpen && canManageSelected && (
                 <div className="transfer-controls">
                   <div className="transfer-copy">
-                    <strong>转接对话</strong>
+                    <strong>{transferAiOnly ? '交给 AI 托管' : '转接对话'}</strong>
                     <span>选择一个有权限处理此频道的成员。</span>
                   </div>
                   <label htmlFor="transfer-target">转接给</label>
@@ -1884,18 +1958,27 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                     onChange={(event) => setTransferTargetId(event.currentTarget.value)}
                     disabled={actionLoading}
                   >
-                    <option value="">选择人工成员</option>
-                    {transferTargets.map((member) => (
-                      <option key={member.id} value={member.id}>
-                        {member.displayName ?? '未命名成员'}
-                      </option>
-                    ))}
+                    <option value="">选择成员</option>
+                    {transferTargets
+                      .filter((member) => !transferAiOnly || member.type === 'AI')
+                      .map((member) => (
+                        <option key={member.id} value={member.id}>
+                          {member.displayName ?? '未命名成员'}
+                          {member.type === 'AI' ? '（AI）' : ''}
+                        </option>
+                      ))}
                   </select>
                   <Button
                     disabled={!transferTargetId || actionLoading}
                     type="button"
                     variant="outline"
-                    onClick={() => void transfer()}
+                    onClick={() => {
+                      if (
+                        teamMembers.find((member) => member.id === transferTargetId)?.type === 'AI'
+                      )
+                        setAiTransferConfirmationOpen(true)
+                      else void transfer()
+                    }}
                   >
                     确认转接
                   </Button>
@@ -1977,6 +2060,21 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction onClick={() => void transfer(true)}>继续转接</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog open={aiTransferConfirmationOpen} onOpenChange={setAiTransferConfirmationOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>交给此 AI 托管？</AlertDialogTitle>
+            <AlertDialogDescription>
+              AI 将成为当前负责人并自动接待；此次明确转交会解除仅人工接待限制。你仍可接管以停止 AI
+              托管。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => void transfer()}>确认 AI 托管</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -2066,6 +2164,7 @@ function ConversationListItem({
           {item.failedMessage && <StatusBadge tone="destructive">发送失败</StatusBadge>}
           {item.unread && <StatusBadge tone="info">未读</StatusBadge>}
           {item.unanswered && <StatusBadge tone="warning">未回复</StatusBadge>}
+          {item.muted && <StatusBadge tone="neutral">个人免打扰</StatusBadge>}
         </span>
       </span>
     </button>
@@ -2122,6 +2221,7 @@ function ConversationHeader({
   onOpenTransfer,
   onTakeOver,
   onUnassign,
+  onResumeAi,
 }: {
   customerDetails: ReactNode
   actionLoading: boolean
@@ -2134,6 +2234,7 @@ function ConversationHeader({
   onOpenTransfer: () => void
   onTakeOver: () => void
   onUnassign: () => void
+  onResumeAi: () => void
 }) {
   const handling = conversationHandling(conversation)
   const canTakeOver =
@@ -2200,6 +2301,12 @@ function ConversationHeader({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              {transferTargets.some((member) => member.type === 'AI') && (
+                <DropdownMenuItem disabled={actionLoading} onSelect={onResumeAi}>
+                  <Bot aria-hidden="true" />
+                  交给 AI 托管
+                </DropdownMenuItem>
+              )}
               {transferTargets.length > 0 && (
                 <DropdownMenuItem disabled={actionLoading} onSelect={onOpenTransfer}>
                   <ArrowRightLeft aria-hidden="true" />

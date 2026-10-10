@@ -36,6 +36,7 @@ export type InboxFilters = {
   updatedFrom?: string
   updatedTo?: string
   attention?: 'unread' | 'unanswered'
+  mute?: 'muted' | 'unmuted'
   properties?: { definitionId: string; value: string | number }[]
 }
 type Options = {
@@ -54,7 +55,14 @@ type SavedView = {
 
 export function inboxQuery(filters: InboxFilters) {
   const query = new URLSearchParams({ view: filters.view })
-  for (const key of ['query', 'customerId', 'updatedFrom', 'updatedTo', 'attention'] as const) {
+  for (const key of [
+    'query',
+    'customerId',
+    'updatedFrom',
+    'updatedTo',
+    'attention',
+    'mute',
+  ] as const) {
     if (filters[key]?.trim()) query.set(key, filters[key].trim())
   }
   if (filters.memberIds?.length) query.set('memberIds', filters.memberIds.join(','))
@@ -104,6 +112,7 @@ export function InboxFilterControls({
     (filters.updatedFrom ? 1 : 0) +
     (filters.updatedTo ? 1 : 0) +
     (filters.attention ? 1 : 0) +
+    (filters.mute ? 1 : 0) +
     (filters.properties?.length ?? 0)
   const base = `/api/workspaces/${workspaceId}`
 

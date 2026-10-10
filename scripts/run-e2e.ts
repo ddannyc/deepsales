@@ -31,6 +31,8 @@ const e2eOwnerKeys = [
   'inbox-search',
   'inbox-search-team',
   'inbox-search-agent',
+  'inbox-collaboration',
+  'inbox-collaboration-agent',
   'knowledge',
   'reply',
   'routing',
@@ -215,8 +217,17 @@ function startWorker(
 
 async function startFakeFacebook() {
   let messageNumber = 0
+  const sends = new Map<string, number>()
   const server = createHttpServer(async (request, response) => {
     const pathname = request.url ? new URL(request.url, 'http://fake-facebook').pathname : ''
+    if (request.method === 'GET' && pathname === '/__sent') {
+      const recipient = new URL(request.url ?? '/', 'http://fake-facebook').searchParams.get(
+        'recipient',
+      )
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ count: sends.get(recipient ?? '') ?? 0 }))
+      return
+    }
     if (request.method === 'GET' && pathname.startsWith('/attachments/')) {
       const file = pathname.split('/').at(-1)
       const attachment =
@@ -243,7 +254,9 @@ async function startFakeFacebook() {
     for await (const chunk of request) chunks.push(Buffer.from(chunk))
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
       message?: { text?: string }
+      recipient?: { id?: string }
     }
+    if (body.recipient?.id) sends.set(body.recipient.id, (sends.get(body.recipient.id) ?? 0) + 1)
     response.setHeader('content-type', 'application/json')
     if (body.message?.text === 'force failure') {
       response.statusCode = 400

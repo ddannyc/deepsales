@@ -8,6 +8,7 @@ import {
   channelIdentity,
   conversation,
   conversationMemberRead,
+  conversationMemberMute,
   customer,
   customerTag,
   customerTagDefinition,
@@ -362,6 +363,7 @@ export type InboxFilters = {
   updatedFrom?: string
   updatedTo?: string
   attention?: 'unread' | 'unanswered'
+  mute?: 'muted' | 'unmuted'
   properties?: { definitionId: string; value: string | number }[]
 }
 
@@ -472,6 +474,9 @@ export async function listConversations(
   const unread = sql<boolean>`exists (select 1 from message input where input.conversation_id = ${conversation.id} and input.sender_type = 'CUSTOMER' and not exists (select 1 from ${messageMemberRead} r where r.member_id = ${viewer.memberId} and r.message_id = input.id))`
   const unanswered = sql<boolean>`exists (select 1 from message input where input.id = ${conversation.lastCustomerMessageId} and not exists (select 1 from message reply where reply.conversation_id = ${conversation.id} and reply.direction = 'OUTBOUND' and reply.sender_type = 'MEMBER' and reply.delivery_state = 'SENT' and length(btrim(coalesce(reply.text, ''))) > 0 and (reply.created_at, reply.id) > (input.created_at, input.id)))`
   if (input.attention === 'unread') filters.push(unread)
+  const muted = sql<boolean>`exists (select 1 from ${conversationMemberMute} m where m.member_id = ${viewer.memberId} and m.conversation_id = ${conversation.id})`
+  if (input.mute === 'muted') filters.push(muted)
+  if (input.mute === 'unmuted') filters.push(sql`not (${muted})`)
   if (input.attention === 'unanswered') filters.push(unanswered)
   const sharedCustomerVisible =
     viewer.role === 'AGENT'
@@ -536,6 +541,7 @@ export async function listConversations(
     .select({
       id: conversation.id,
       unread,
+      muted,
       unanswered,
       cursorTime: sql<string>`to_char(${conversation.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       status: conversation.status,
@@ -600,7 +606,7 @@ export async function listMessages(
     limit?: number
   },
 ) {
-  await assertConversationAccess(db, input)
+  await assertInboxConversationAccess(db, input)
   const limit = Math.min(Math.max(input.limit ?? 100, 1), 100)
   const filters = [eq(message.conversationId, input.conversationId)]
   if (input.after) {
@@ -678,7 +684,7 @@ export async function acknowledgeConversationRead(
   input: { workspaceId: string; userId: string; conversationId: string; messageIds: string[] },
 ) {
   return db.transaction(async (tx) => {
-    const viewer = await assertConversationAccess(tx, input)
+    const viewer = await assertInboxConversationAccess(tx, input)
     const ids = [...new Set(input.messageIds)]
     const visible = await tx
       .select({ id: message.id, createdAt: message.createdAt })
@@ -732,7 +738,7 @@ export async function assertInboxViewer(db: QueryHandle, workspaceId: string, us
   return viewer
 }
 
-async function assertConversationAccess(
+export async function assertInboxConversationAccess(
   db: QueryHandle,
   input: { workspaceId: string; userId: string; conversationId: string },
 ) {

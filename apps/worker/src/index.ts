@@ -75,6 +75,9 @@ import {
   processFacebookInbound,
   processFacebookReceipt,
   acknowledgeConversationRead,
+  createInternalNote,
+  listInternalNotes,
+  setConversationMute,
   inboxFilterOptions,
   listInboxViews,
   saveInboxView,
@@ -282,6 +285,7 @@ const inboxFiltersInput = z
     updatedFrom: z.string().datetime({ offset: true }).optional(),
     updatedTo: z.string().datetime({ offset: true }).optional(),
     attention: z.enum(['unread', 'unanswered']).optional(),
+    mute: z.enum(['muted', 'unmuted']).optional(),
     properties: z
       .array(
         z
@@ -1122,6 +1126,7 @@ app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
         updatedFrom: c.req.query('updatedFrom'),
         updatedTo: c.req.query('updatedTo'),
         attention: c.req.query('attention'),
+        mute: c.req.query('mute'),
         properties,
       })
       if (!filters.success) throw new InboxError('INVALID_REQUEST', 'Invalid inbox filters')
@@ -1144,6 +1149,89 @@ app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
             })
           : null,
       })
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.put('/api/workspaces/:workspaceId/conversations/:conversationId/mute', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const parsed = z
+      .object({ muted: z.boolean() })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success)
+      return c.json({ error: { code: 'INVALID_REQUEST', message: 'Invalid mute preference' } }, 400)
+    try {
+      const result = await setConversationMute(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        conversationId: c.req.param('conversationId'),
+        ...parsed.data,
+      })
+      await publishInboxChange(
+        c.env,
+        c.req.param('workspaceId'),
+        c.req.param('conversationId'),
+        'conversation.changed',
+      )
+      return c.json(result)
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.get('/api/workspaces/:workspaceId/conversations/:conversationId/notes', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      const page = await listInternalNotes(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        conversationId: c.req.param('conversationId'),
+        before: decodeMessageCursor(c.req.query('before')),
+      })
+      return c.json({
+        notes: page.notes,
+        olderCursor: page.olderCursor ? encodeCursor(page.olderCursor) : null,
+      })
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/notes', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const parsed = z
+      .object({ clientKey: z.string().uuid(), text: z.string().trim().min(1).max(2000) })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success)
+      return c.json({ error: { code: 'INVALID_REQUEST', message: 'Invalid internal note' } }, 400)
+    try {
+      const result = await createInternalNote(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        conversationId: c.req.param('conversationId'),
+        ...parsed.data,
+      })
+      await publishInboxChange(
+        c.env,
+        c.req.param('workspaceId'),
+        c.req.param('conversationId'),
+        'conversation.changed',
+      )
+      return c.json(result, 201)
     } catch (error) {
       return inboxErrorResponse(c, error)
     }

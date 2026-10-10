@@ -442,6 +442,41 @@ export const conversation = pgTable(
 )
 
 export const customerFactLevel = pgEnum('customer_fact_level', ['CUSTOMER', 'CONVERSATION'])
+export const conversationMemberMute = pgTable(
+  'conversation_member_mute',
+  {
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+  },
+  (t) => [primaryKey({ columns: [t.memberId, t.conversationId] })],
+)
+export const conversationInternalNote = pgTable(
+  'conversation_internal_note',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    authorMemberId: uuid('author_member_id').references(() => member.id, { onDelete: 'set null' }),
+    authorName: text('author_name').notNull(),
+    clientKey: uuid('client_key').notNull(),
+    text: text().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('conversation_internal_note_retry_idx').on(
+      t.conversationId,
+      t.authorMemberId,
+      t.clientKey,
+    ),
+    index('conversation_internal_note_history_idx').on(t.conversationId, t.createdAt, t.id),
+    check('conversation_internal_note_text', sql`length(btrim(${t.text})) between 1 and 2000`),
+  ],
+)
 export const inboxSavedView = pgTable(
   'inbox_saved_view',
   {
