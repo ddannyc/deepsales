@@ -130,6 +130,7 @@ import {
   detectConfiguredHandoff,
   enforceGrounding,
   EMBEDDING_DIMENSIONS,
+  MAX_AI_CURRENT_INPUT_CODE_POINTS,
   isLlmProviderConfigurationUsable,
 } from './ai'
 import { knowledgeDocumentJobSchema, retrieveKnowledgeChunks } from './knowledge'
@@ -2221,6 +2222,19 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       const inputMessages = claimed.inputMessages
         .filter(({ text }) => Boolean(text?.trim()))
         .map(({ id, text }) => ({ id, text: text as string }))
+      if (
+        inputMessages.reduce((sum, { text }) => sum + Array.from(text).length, 0) >
+        MAX_AI_CURRENT_INPUT_CODE_POINTS
+      ) {
+        await completeAiHandoff(env, claimed, {
+          reason: 'UNABLE_TO_ANSWER',
+          noticeText: handoffNotice(currentSnapshot.responseLanguage),
+          failureCode: 'AI_INPUT_LIMIT',
+          failureMessage: 'Current input exceeds the supported context budget',
+        })
+        queueMessage.ack()
+        continue
+      }
       if (!inputMessages.length) {
         await completeAiHandoff(env, claimed, {
           reason: 'UNSUPPORTED_ATTACHMENT',
@@ -2245,7 +2259,10 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           retrieveKnowledgeChunks(db, embeddingProvider, env, {
             workspaceId: claimed.workspaceId,
             knowledgeBaseId: currentSnapshot.knowledgeBaseId,
-            query: inputMessages.map(({ text }) => text).join('\n'),
+            query: [
+              ...claimed.history.map(({ origin, text }) => `${origin}: ${text}`),
+              ...inputMessages.map(({ text }) => text),
+            ].join('\n'),
           }),
         )
       } catch (error) {
@@ -2277,6 +2294,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         instructions: currentSnapshot.instructions,
         responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,
+        history: claimed.history,
         knowledgeChunks: retrievedChunks.map(({ id, text }) => ({ id, text })),
       })
       const grounded = enforceGrounding(decision, retrievedChunkIds, currentSnapshot)

@@ -317,7 +317,29 @@ async function startFakeAI() {
       return
     }
     const content = body.messages?.[1]?.content ?? ''
-    const chunkId = /<knowledge_chunk id="([^"]+)">/.exec(content)?.[1]
+    const current = /<customer_messages>([\s\S]*?)<\/customer_messages>/.exec(content)?.[1] ?? ''
+    const history =
+      /<conversation_history>([\s\S]*?)<\/conversation_history>/.exec(content)?.[1] ?? ''
+    const options = current.includes('Compare Torch options')
+    const secondOption = current.includes('Does the second option come in blue?')
+    const humanContinuation = current.includes('Yes, the compact one.')
+    const hasReferent = secondOption
+      ? history.includes('Option two is Torch Two.')
+      : history.includes('origin="HUMAN"') &&
+        history.includes('Do you prefer the compact Torch Two?')
+    const chunkId =
+      options || secondOption || humanContinuation
+        ? /<knowledge_chunk id="([^"]+)">Torch One comes in red\. Torch Two comes in blue\./.exec(
+            content,
+          )?.[1]
+        : /<knowledge_chunk id="([^"]+)">/.exec(content)?.[1]
+    const answer = options
+      ? 'Option one is Torch One. Option two is Torch Two.'
+      : secondOption || humanContinuation
+        ? hasReferent && chunkId
+          ? 'Torch Two comes in blue.'
+          : 'Please clarify which option.'
+        : 'Shipping is free.'
     response.end(
       JSON.stringify({
         choices: [
@@ -325,7 +347,7 @@ async function startFakeAI() {
             message: {
               content: JSON.stringify({
                 decision: 'ANSWER',
-                response: 'Shipping is free.',
+                response: answer,
                 handoffReason: null,
                 containsBusinessFacts: Boolean(chunkId),
                 usedChunkIds: chunkId ? [chunkId] : [],

@@ -14,6 +14,7 @@ test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales de
 test.setTimeout(60_000)
 
 test('new inbound input receives a grounded AI reply and reaches SENT', async ({ page }) => {
+  test.setTimeout(180_000)
   const suffix = Date.now()
   await signInAndCreateWorkspace(page, 'ai-response', 'AI response acceptance')
   await expect(page.locator('.shell')).toBeVisible()
@@ -105,6 +106,23 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
     `/api/workspaces/${me.workspace.id}/ai-members/${ai.member.id}/publish`,
   )
   expect(publishResponse.ok()).toBeTruthy()
+  const optionsDocument = await page.request.post(
+    `/api/workspaces/${me.workspace.id}/knowledge-bases/${base.knowledgeBase.id}/documents/text`,
+    { data: { name: 'Torch options', text: 'Torch One comes in red. Torch Two comes in blue.' } },
+  )
+  expect(optionsDocument.ok()).toBeTruthy()
+  await expect
+    .poll(
+      async () => {
+        const result = await page.request.get(
+          `/api/workspaces/${me.workspace.id}/knowledge-bases/${base.knowledgeBase.id}/documents`,
+        )
+        const data = (await result.json()) as { documents: Array<{ status: string }> }
+        return data.documents.every(({ status }) => status === 'READY')
+      },
+      { timeout: 20_000 },
+    )
+    .toBe(true)
 
   await page.goto('/inbox')
   const inboundText = `What is shipping? ${suffix}`
@@ -127,6 +145,43 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
     ({ latestPreview }) => latestPreview === inboundText,
   )
   if (!conversation) throw new Error('AI conversation was not found')
+  await page.locator('.conversation-items button').first().click()
+  const waitSent = async (text: string, count = 1) => {
+    await expect
+      .poll(
+        async () => {
+          const result = await page.request.get(
+            `/api/workspaces/${me.workspace.id}/conversations/${conversation.id}/messages`,
+          )
+          const data = (await result.json()) as {
+            messages: Array<{ text: string | null; deliveryState: string | null }>
+          }
+          return data.messages.filter((item) => item.text === text && item.deliveryState === 'SENT')
+            .length
+        },
+        { timeout: 20_000 },
+      )
+      .toBe(count)
+  }
+  await sendInbound(
+    page,
+    pageId,
+    `customer-${suffix}`,
+    `mid-options-${suffix}`,
+    'Compare Torch options',
+  )
+  await waitSent('Option one is Torch One. Option two is Torch Two.')
+  await sendInbound(
+    page,
+    pageId,
+    `customer-${suffix}`,
+    `mid-second-${suffix}`,
+    'Does the second option come in blue?',
+  )
+  await waitSent('Torch Two comes in blue.')
+  await expect(
+    page.locator('.message-bubble').filter({ hasText: 'Torch Two comes in blue.' }).first(),
+  ).toBeVisible()
 
   const followUp = `Could you explain that again ${suffix}`
   await sendInbound(page, pageId, `customer-${suffix}`, `mid-follow-up-${suffix}`, followUp)
@@ -153,6 +208,29 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
       messages: Array<{ text: string | null }>
     }
     expect(messages.messages.filter(({ text }) => text === 'Shipping is free.')).toHaveLength(1)
+    const reply = await page.request.post(
+      `/api/workspaces/${me.workspace.id}/conversations/${conversation.id}/replies`,
+      {
+        data: { text: 'Do you prefer the compact Torch Two?' },
+      },
+    )
+    expect(reply.ok()).toBeTruthy()
+    await waitSent('Do you prefer the compact Torch Two?')
+    await sendInbound(
+      page,
+      pageId,
+      `customer-${suffix}`,
+      `mid-human-follow-up-${suffix}`,
+      'Yes, the compact one.',
+    )
+    const transfer = await page.request.post(
+      `/api/workspaces/${me.workspace.id}/conversations/${conversation.id}/transfer`,
+      {
+        data: { targetMemberId: ai.member.id },
+      },
+    )
+    expect(transfer.ok()).toBeTruthy()
+    await waitSent('Torch Two comes in blue.', 2)
   } finally {
     await statePool.end()
   }

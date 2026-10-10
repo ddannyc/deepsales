@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, lte, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, lte, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
   type AiMemberRuntimeSnapshot,
@@ -12,6 +12,17 @@ import {
 
 const MAX_AI_RESPONSE_TEXT_LENGTH = 2_000
 export const AI_GENERATION_TIMEOUT_MS = 5 * 60 * 1_000
+export const MAX_AI_HISTORY_CODE_POINTS = 8_000
+const MAX_AI_HISTORY_MESSAGES = 48
+
+export type AiConversationContextMessage = {
+  id: string
+  direction: 'INBOUND' | 'OUTBOUND'
+  origin: 'CUSTOMER' | 'AI' | 'HUMAN'
+  senderMemberId: string | null
+  createdAt: Date
+  text: string
+}
 
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 
@@ -32,6 +43,7 @@ export type AiResponseRunClaim = {
   inputLastMessageId: string
   publishedSnapshot: AiMemberRuntimeSnapshot | null
   inputMessages: AiResponseInputMessage[]
+  history: AiConversationContextMessage[]
 }
 
 export type AiResponseRunClaimResult =
@@ -162,17 +174,39 @@ export async function claimAiResponseRun(
       .where(eq(aiMemberConfig.memberId, current.memberId))
       .limit(1)
 
-    const messages = await tx
-      .select({
-        id: message.id,
-        direction: message.direction,
-        senderType: message.senderType,
-        messageType: message.messageType,
-        text: message.text,
-      })
+    const boundaries = await tx
+      // Keep PostgreSQL microseconds for cutoff comparisons; JavaScript Dates lose them.
+      .select({ id: message.id, createdAt: sql<string>`${message.createdAt}::text` })
       .from(message)
-      .where(eq(message.conversationId, current.conversationId))
-      .orderBy(asc(message.createdAt), asc(message.id))
+      .where(
+        and(
+          eq(message.conversationId, current.conversationId),
+          inArray(message.id, [current.inputFirstMessageId, current.inputLastMessageId]),
+        ),
+      )
+    const start = boundaries.find(({ id }) => id === current.inputFirstMessageId)
+    const end = boundaries.find(({ id }) => id === current.inputLastMessageId)
+    const messages =
+      start && end
+        ? await tx
+            .select({
+              id: message.id,
+              direction: message.direction,
+              senderType: message.senderType,
+              messageType: message.messageType,
+              text: message.text,
+              createdAt: message.createdAt,
+            })
+            .from(message)
+            .where(
+              and(
+                eq(message.conversationId, current.conversationId),
+                sql`(${message.createdAt}, ${message.id}) >= (${start.createdAt}::timestamptz, ${start.id}::uuid)`,
+                sql`(${message.createdAt}, ${message.id}) <= (${end.createdAt}::timestamptz, ${end.id}::uuid)`,
+              ),
+            )
+            .orderBy(asc(message.createdAt), asc(message.id))
+        : []
     const firstIndex = messages.findIndex(({ id }) => id === current.inputFirstMessageId)
     const lastIndex = messages.findIndex(({ id }) => id === current.inputLastMessageId)
     const inputMessages =
@@ -185,6 +219,81 @@ export async function claimAiResponseRun(
             .map(({ id, messageType, text }) => ({ id, messageType, text }))
         : []
 
+    const history: AiConversationContextMessage[] = []
+    const first = messages[firstIndex]
+    const last = messages[lastIndex]
+    if (first && last && start && end) {
+      const recent = await tx
+        .select({
+          id: message.id,
+          direction: message.direction,
+          senderType: message.senderType,
+          senderMemberId: message.senderMemberId,
+          memberType: member.type,
+          createdAt: message.createdAt,
+          text: message.text,
+        })
+        .from(message)
+        .innerJoin(
+          conversation,
+          and(
+            eq(conversation.id, message.conversationId),
+            eq(conversation.workspaceId, current.workspaceId),
+          ),
+        )
+        .leftJoin(
+          member,
+          and(eq(member.id, message.senderMemberId), eq(member.workspaceId, current.workspaceId)),
+        )
+        .where(
+          and(
+            eq(message.conversationId, current.conversationId),
+            sql`${message.text} is not null and trim(${message.text}) <> ''`,
+            sql`(${message.createdAt}, ${message.id}) < (${start.createdAt}::timestamptz, ${start.id}::uuid)`,
+            or(
+              and(eq(message.direction, 'INBOUND'), eq(message.senderType, 'CUSTOMER')),
+              and(
+                eq(message.direction, 'OUTBOUND'),
+                eq(message.senderType, 'MEMBER'),
+                eq(message.deliveryState, 'SENT'),
+                sql`(${message.deliveryCompletedAt} is null or ${message.deliveryCompletedAt} <= ${end.createdAt}::timestamptz)`,
+              ),
+            ),
+          ),
+        )
+        .orderBy(desc(message.createdAt), desc(message.id))
+        .limit(MAX_AI_HISTORY_MESSAGES + 1)
+      const turns: AiConversationContextMessage[][] = []
+      for (const item of recent.reverse()) {
+        const origin = item.senderType === 'CUSTOMER' ? 'CUSTOMER' : item.memberType
+        if (!origin || !item.text) continue
+        if (origin === 'CUSTOMER' && turns.at(-1)?.at(-1)?.origin !== 'CUSTOMER') turns.push([])
+        turns.at(-1)?.push({
+          id: item.id,
+          direction: item.direction,
+          origin,
+          senderMemberId: item.senderMemberId,
+          createdAt: item.createdAt,
+          text: item.text,
+        })
+      }
+      // A bounded scan may begin inside a turn; retain only subsequent complete turns.
+      if (recent.length > MAX_AI_HISTORY_MESSAGES && recent[0]?.senderType === 'CUSTOMER')
+        turns.shift()
+      let size = 0
+      for (const turn of turns.reverse()) {
+        if (turn.at(-1)?.origin === 'CUSTOMER') continue
+        const length = turn.reduce((sum, item) => sum + Array.from(item.text).length, 0)
+        if (
+          size + length > MAX_AI_HISTORY_CODE_POINTS ||
+          history.length + turn.length > MAX_AI_HISTORY_MESSAGES
+        )
+          break
+        size += length
+        history.unshift(...turn)
+      }
+    }
+
     return {
       kind: 'CLAIMED' as const,
       state: 'GENERATING' as const,
@@ -196,6 +305,7 @@ export async function claimAiResponseRun(
       inputLastMessageId: current.inputLastMessageId,
       publishedSnapshot: config?.publishedSnapshot ?? null,
       inputMessages,
+      history,
     }
   })
 }

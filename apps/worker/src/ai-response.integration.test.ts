@@ -13,13 +13,17 @@ import {
   createDatabase,
   createInlineKnowledgeDocument,
   createKnowledgeBase,
+  member,
   message,
   processFacebookInbound,
   publishAiMemberConfig,
+  setMemberChannelAccess,
+  takeOverConversation,
+  transferConversation,
   updateAiMemberConfig,
   user,
 } from '@deepsales/db'
-import { and, eq } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -42,6 +46,450 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+
+  it('uses the delivered options to retrieve and answer a second-option follow-up', async () => {
+    const fixture = await createFixture(db)
+    const queries: string[] = []
+    const prompts: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string)
+        if (String(input).endsWith('/embeddings')) {
+          const texts = body.input as string[]
+          return Response.json({
+            data: texts.map((text, index) => {
+              queries.push(text)
+              const second =
+                text.includes('Torch Two') &&
+                (text.includes('second option') || !text.includes('Compare'))
+              return { index, embedding: vector().map((_, i) => (i === (second ? 1 : 0) ? 1 : 0)) }
+            }),
+          })
+        }
+        const prompt = body.messages[1].content as string
+        prompts.push(prompt)
+        const second = prompt.includes('Does the second option come in blue?')
+        const chunkId = /<knowledge_chunk id="([^"]+)">/.exec(prompt)?.[1]
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: second
+                    ? 'Torch Two comes in blue.'
+                    : 'Option one is Torch One. Option two is Torch Two.',
+                  handoffReason: null,
+                  containsBusinessFacts: true,
+                  usedChunkIds: chunkId ? [chunkId] : [],
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    for (const text of ['Torch One comes in red.', 'Torch Two comes in blue.']) {
+      const doc = await createInlineKnowledgeDocument(db, {
+        workspaceId: fixture.workspaceId,
+        knowledgeBaseId: fixture.knowledgeBaseId,
+        createdByUserId: fixture.ownerId,
+        name: text,
+        text,
+      })
+      await handleDocumentsBatch(
+        batch(
+          'deepsales-documents',
+          queueMessage({
+            v: 1,
+            type: 'knowledge.document',
+            documentId: doc.id,
+          }),
+        ),
+        environment(),
+      )
+    }
+    const receive = async (text: string, now: Date) => {
+      const result = await processFacebookInbound(db, {
+        ingressId: crypto.randomUUID(),
+        pageId: fixture.pageId,
+        externalUserId: `customer-${fixture.ownerId}`,
+        externalMessageId: crypto.randomUUID(),
+        text,
+        providerSentAt: now,
+        receivedAt: now,
+        payloadSha256: 'a'.repeat(64),
+        eventFragment: {},
+      })
+      if (result.kind !== 'created') throw new Error('Inbound was not created')
+      return result
+    }
+    const firstTime = new Date(Date.now() - 30_000)
+    const first = await receive('Compare the available options.', firstTime)
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: first.conversationId,
+      now: firstTime,
+    })
+    await handleAiResponseBatch(
+      batch(
+        'deepsales-ai',
+        queueMessage({
+          v: 1,
+          type: 'ai.response',
+          runId: assigned.aiResponseRunId,
+        }),
+      ),
+      environment(),
+    )
+    await db
+      .update(message)
+      .set({
+        deliveryState: 'SENT',
+        deliveryCompletedAt: new Date(),
+      })
+      .where(
+        and(eq(message.conversationId, first.conversationId), eq(message.direction, 'OUTBOUND')),
+      )
+    const second = await receive(
+      'Does the second option come in blue?',
+      new Date(Date.now() - 10_000),
+    )
+    queries.length = 0
+    prompts.length = 0
+    await handleAiResponseBatch(
+      batch(
+        'deepsales-ai',
+        queueMessage({
+          v: 1,
+          type: 'ai.response',
+          runId: second.aiResponseRunId,
+        }),
+      ),
+      environment(),
+    )
+    expect(queries).toHaveLength(1)
+    expect(queries[0]).toContain('Option two is Torch Two.')
+    expect(queries[0]).toContain('Does the second option come in blue?')
+    expect(prompts[0]).toContain('Option two is Torch Two.')
+    expect(prompts[0]).toContain('Torch Two comes in blue.')
+    expect(
+      await db
+        .select({ text: message.text })
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, first.conversationId),
+            eq(message.deliveryState, 'PENDING'),
+          ),
+        ),
+    ).toEqual([{ text: 'Torch Two comes in blue.' }])
+  })
+
+  it('preserves human origin after transfer and excludes unsent, failed, foreign and later text', async () => {
+    const fixture = await createFixture(db)
+    const foreign = await createFixture(db)
+    const first = await receiveContextInput(db, fixture, 'Which option should I choose?')
+    const other = await receiveContextInput(db, foreign, 'FOREIGN SECRET')
+    const sameWorkspace = await receiveContextInput(
+      db,
+      { ...fixture, ownerId: crypto.randomUUID() },
+      'OTHER SECRET',
+    )
+    await db
+      .update(message)
+      .set({ createdAt: sql`'2025-12-31T23:59:59Z'::timestamptz` })
+      .where(inArray(message.id, [other.messageId, sameWorkspace.messageId]))
+    const [human] = await db
+      .select({ id: member.id })
+      .from(member)
+      .where(and(eq(member.workspaceId, fixture.workspaceId), eq(member.type, 'HUMAN')))
+    await setMemberChannelAccess(db, {
+      workspaceId: fixture.workspaceId,
+      actingUserId: fixture.ownerId,
+      memberId: human.id,
+      channelIds: [fixture.channelId],
+    })
+    await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: first.conversationId,
+      now: new Date(Date.now() - 10_000),
+    })
+    await takeOverConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: first.conversationId,
+      actingUserId: fixture.ownerId,
+    })
+    const sent = await db
+      .insert(message)
+      .values({
+        conversationId: first.conversationId,
+        channelId: fixture.channelId,
+        direction: 'OUTBOUND',
+        senderType: 'MEMBER',
+        senderMemberId: human.id,
+        messageType: 'TEXT',
+        deliveryState: 'SENT',
+        text: 'Do you prefer the compact Torch Two?',
+        deliveryCompletedAt: new Date(),
+      })
+      .returning({ id: message.id })
+    for (const deliveryState of ['PENDING', 'FAILED'] as const) {
+      await db.insert(message).values({
+        conversationId: first.conversationId,
+        channelId: fixture.channelId,
+        direction: 'OUTBOUND',
+        senderType: 'MEMBER',
+        senderMemberId: human.id,
+        messageType: 'TEXT',
+        deliveryState,
+        text: `EXCLUDED ${deliveryState}`,
+        createdAt: sql`'2026-01-01T00:00:00.000002Z'::timestamptz`,
+      })
+    }
+    const current = await receiveContextInput(db, fixture, 'Yes, that one.')
+    const transferred = await transferConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: current.conversationId,
+      actingUserId: fixture.ownerId,
+      targetMemberId: fixture.aiMemberId,
+    })
+    // Distinct PostgreSQL microseconds must not collapse to JavaScript milliseconds.
+    for (const [id, timestamp] of [
+      [first.messageId, '2026-01-01T00:00:00.000001Z'],
+      [sent[0].id, '2026-01-01T00:00:00.000002Z'],
+      [current.messageId, '2026-01-01T00:00:00.000003Z'],
+    ]) {
+      await db
+        .update(message)
+        .set({ createdAt: sql`${timestamp}::timestamptz` })
+        .where(eq(message.id, id))
+    }
+    await db
+      .update(message)
+      .set({ deliveryCompletedAt: sql`'2026-01-01T00:00:00.000002Z'::timestamptz` })
+      .where(eq(message.id, sent[0].id))
+    const tiedId = crypto.randomUUID()
+    await db.insert(message).values([
+      {
+        id: tiedId,
+        conversationId: current.conversationId,
+        channelId: fixture.channelId,
+        direction: 'OUTBOUND',
+        senderType: 'MEMBER',
+        senderMemberId: human.id,
+        messageType: 'TEXT',
+        deliveryState: 'SENT',
+        text: 'A second human reply at the same timestamp',
+        createdAt: sql`'2026-01-01T00:00:00.000002Z'::timestamptz`,
+        deliveryCompletedAt: sql`'2026-01-01T00:00:00.000002Z'::timestamptz`,
+      },
+      {
+        conversationId: current.conversationId,
+        channelId: fixture.channelId,
+        direction: 'OUTBOUND',
+        senderType: 'MEMBER',
+        senderMemberId: human.id,
+        messageType: 'TEXT',
+        deliveryState: 'SENT',
+        text: 'EXCLUDED late completion',
+        createdAt: sql`'2026-01-01T00:00:00.000002Z'::timestamptz`,
+        deliveryCompletedAt: sql`'2026-01-01T00:00:00.000004Z'::timestamptz`,
+      },
+    ])
+    await db.insert(message).values({
+      conversationId: first.conversationId,
+      channelId: fixture.channelId,
+      direction: 'OUTBOUND',
+      senderType: 'MEMBER',
+      senderMemberId: human.id,
+      messageType: 'TEXT',
+      deliveryState: 'SENT',
+      text: 'LATER SECRET',
+    })
+    // The late row must not redefine the claimed input; it simulates a delayed delivery record.
+    await db
+      .update(message)
+      .set({ createdAt: new Date(Date.now() + 60_000) })
+      .where(
+        and(eq(message.text, 'LATER SECRET'), eq(message.conversationId, current.conversationId)),
+      )
+    expect(transferred.toMemberId).toBe(fixture.aiMemberId)
+    const claimed = await claimAiResponseRun(db, {
+      runId: transferred.aiResponseRunId as string,
+      now: new Date(Date.now() + 3_000),
+    })
+    expect(claimed).toMatchObject({
+      kind: 'CLAIMED',
+      inputMessages: [{ id: current.messageId, text: 'Yes, that one.' }],
+      history: [
+        { id: first.messageId, origin: 'CUSTOMER', direction: 'INBOUND' },
+        ...[sent[0].id, tiedId].sort().map((id) => ({
+          id,
+          origin: 'HUMAN',
+          direction: 'OUTBOUND',
+          senderMemberId: human.id,
+        })),
+      ],
+    })
+    expect(JSON.stringify(claimed)).not.toMatch(/EXCLUDED|SECRET/)
+    expect(other.conversationId).not.toBe(current.conversationId)
+  })
+
+  it('retains 48 complete messages after a scan-boundary orphan reply and mixed captions', async () => {
+    const fixture = await createFixture(db)
+    const current = await receiveContextInput(db, fixture, 'What about that one?')
+    const base = Date.now() - 60_000
+    await db.insert(message).values({
+      conversationId: current.conversationId,
+      channelId: fixture.channelId,
+      direction: 'OUTBOUND',
+      senderType: 'MEMBER',
+      senderMemberId: fixture.aiMemberId,
+      messageType: 'TEXT',
+      deliveryState: 'SENT',
+      text: 'Orphan reply',
+      createdAt: new Date(base),
+    })
+    for (let index = 0; index < 24; index++) {
+      await db.insert(message).values([
+        {
+          conversationId: current.conversationId,
+          channelId: fixture.channelId,
+          direction: 'INBOUND',
+          senderType: 'CUSTOMER',
+          messageType: 'ATTACHMENT',
+          text: `Caption-${index}`,
+          createdAt: new Date(base + index * 100 + 1),
+        },
+        {
+          conversationId: current.conversationId,
+          channelId: fixture.channelId,
+          direction: 'OUTBOUND',
+          senderType: 'MEMBER',
+          senderMemberId: fixture.aiMemberId,
+          messageType: 'TEXT',
+          deliveryState: 'SENT',
+          text: `Reply-${index}`,
+          createdAt: new Date(base + index * 100 + 2),
+        },
+      ])
+    }
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: current.conversationId,
+      now: new Date(Date.now() - 10_000),
+    })
+    const claimed = await claimAiResponseRun(db, { runId: routed.aiResponseRunId as string })
+    if (claimed?.kind !== 'CLAIMED') throw new Error('Run not claimed')
+    expect(claimed.history).toHaveLength(48)
+    expect(claimed.history[0]?.text).toBe('Caption-0')
+    expect(claimed.history.at(-1)?.text).toBe('Reply-23')
+  })
+
+  it('keeps nearest complete turns within the Unicode history budget', async () => {
+    const fixture = await createFixture(db)
+    const current = await receiveContextInput(db, fixture, 'What about that one?')
+    for (let index = 0; index < 30; index++) {
+      const createdAt = new Date(Date.now() - 60_000 + index * 100)
+      await db.insert(message).values([
+        {
+          conversationId: current.conversationId,
+          channelId: fixture.channelId,
+          direction: 'INBOUND',
+          senderType: 'CUSTOMER',
+          messageType: 'TEXT',
+          text: `question-${index} ${'🙂'.repeat(300)}`,
+          createdAt,
+        },
+        {
+          conversationId: current.conversationId,
+          channelId: fixture.channelId,
+          direction: 'OUTBOUND',
+          senderType: 'MEMBER',
+          senderMemberId: fixture.aiMemberId,
+          messageType: 'TEXT',
+          deliveryState: 'SENT',
+          text: `answer-${index} ${'🙂'.repeat(300)}`,
+          createdAt: new Date(createdAt.getTime() + 1),
+          deliveryCompletedAt: createdAt,
+        },
+      ])
+    }
+    const routed = await autoAssignConversation(db, {
+      workspaceId: fixture.workspaceId,
+      conversationId: current.conversationId,
+      now: new Date(Date.now() - 10_000),
+    })
+    const claimed = await claimAiResponseRun(db, { runId: routed.aiResponseRunId as string })
+    if (claimed?.kind !== 'CLAIMED') throw new Error('Run not claimed')
+    expect(claimed.inputMessages).toMatchObject([{ text: 'What about that one?' }])
+    expect(claimed.history.at(-1)?.text).toContain('answer-29')
+    expect(claimed.history[0]?.origin).toBe('CUSTOMER')
+    expect(claimed.history.some(({ text }) => text.startsWith('question-0 '))).toBe(false)
+    expect(
+      claimed.history.reduce((sum, { text }) => sum + Array.from(text).length, 0),
+    ).toBeLessThanOrEqual(8_000)
+    expect(claimed.history.length % 2).toBe(0)
+  })
+
+  it.each([8_000, 8_001])(
+    'keeps %i current Unicode code points intact or safely hands off',
+    async (size) => {
+      const fixture = await createFixture(db)
+      const current = await receiveContextInput(db, fixture, '🙂'.repeat(size))
+      const routed = await autoAssignConversation(db, {
+        workspaceId: fixture.workspaceId,
+        conversationId: current.conversationId,
+        now: new Date(Date.now() - 10_000),
+      })
+      const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const body = JSON.parse(init?.body as string)
+        expect(body.messages[1].content).toContain('🙂'.repeat(8_000))
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Could you clarify your question?',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        })
+      })
+      vi.stubGlobal('fetch', fetcher)
+      await handleAiResponseBatch(
+        batch(
+          'deepsales-ai',
+          queueMessage({
+            v: 1,
+            type: 'ai.response',
+            runId: routed.aiResponseRunId,
+          }),
+        ),
+        environment(),
+      )
+      if (size === 8_000) expect(fetcher).toHaveBeenCalledOnce()
+      else expect(fetcher).not.toHaveBeenCalled()
+      expect(
+        await db
+          .select({ state: aiResponseRun.state, failureCode: aiResponseRun.failureCode })
+          .from(aiResponseRun)
+          .where(eq(aiResponseRun.id, routed.aiResponseRunId as string)),
+      ).toEqual([
+        {
+          state: size === 8_000 ? 'COMPLETED' : 'HANDOFF',
+          failureCode: size === 8_000 ? null : 'AI_INPUT_LIMIT',
+        },
+      ])
+    },
+  )
 
   it('retrieves published knowledge, commits a grounded response, and queues delivery', async () => {
     const fixture = await createFixture(db)
@@ -637,7 +1085,29 @@ async function createFixture(db: ReturnType<typeof createDatabase>) {
     pageId,
     knowledgeBaseId: base.id,
     aiMemberId: ai.id,
+    channelId: channel.id,
   }
+}
+
+async function receiveContextInput(
+  db: ReturnType<typeof createDatabase>,
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  text: string,
+) {
+  const receivedAt = new Date(Date.now() - 10_000)
+  const result = await processFacebookInbound(db, {
+    ingressId: crypto.randomUUID(),
+    pageId: fixture.pageId,
+    externalUserId: `customer-${fixture.ownerId}`,
+    externalMessageId: crypto.randomUUID(),
+    text,
+    providerSentAt: receivedAt,
+    receivedAt,
+    payloadSha256: 'a'.repeat(64),
+    eventFragment: {},
+  })
+  if (result.kind !== 'created') throw new Error('Inbound was not created')
+  return result
 }
 
 function environment(outboundQueue?: Queue, maintenanceQueue?: Queue): Bindings {
