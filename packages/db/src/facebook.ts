@@ -85,6 +85,7 @@ export async function listFacebookConversations(
     after?: ConversationCursor
     limit?: number
     conversationId?: string
+    tagId?: string
   },
 ) {
   const page = await listConversations(db, input)

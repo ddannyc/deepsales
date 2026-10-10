@@ -8,6 +8,9 @@ import {
   channelIdentity,
   conversation,
   customer,
+  customerTag,
+  customerTagDefinition,
+  memberChannelAccess,
   facebookAttachmentSource,
   facebookChannelConfig,
   facebookMessagingWindow,
@@ -347,11 +350,37 @@ export async function listConversations(
     after?: ConversationCursor
     limit?: number
     conversationId?: string
+    tagId?: string
   },
 ) {
   const viewer = await assertViewer(db, input.workspaceId, input.userId)
   const limit = Math.min(Math.max(input.limit ?? 50, 1), 100)
   const filters = [eq(conversation.workspaceId, input.workspaceId), eq(conversation.status, 'OPEN')]
+  const sharedCustomerVisible =
+    viewer.role === 'AGENT'
+      ? sql`not exists (select 1 from ${channelIdentity} ci where ci.customer_id = ${customer.id} and not exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = ci.channel_id)) and not exists (select 1 from jsonb_array_elements_text(${customer.profileSourceChannelIds}) s(channel_id) where not exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id::text = s.channel_id))`
+      : sql`true`
+  if (viewer.role === 'AGENT')
+    filters.push(
+      sql`exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = ${channelIdentity.channelId})`,
+    )
+  if (input.tagId) {
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.tagId))
+      throw new InboxError('INVALID_REQUEST', 'Invalid tag')
+    const [tag] = await db
+      .select({ id: customerTagDefinition.id })
+      .from(customerTagDefinition)
+      .where(
+        and(
+          eq(customerTagDefinition.id, input.tagId),
+          eq(customerTagDefinition.workspaceId, input.workspaceId),
+        ),
+      )
+    if (!tag) throw new InboxError('NOT_FOUND', 'Tag not found')
+    filters.push(
+      sql`exists (select 1 from ${customerTag} t where t.tag_id = ${input.tagId} and (t.customer_id = ${customer.id} or t.conversation_id = ${conversation.id}) ${viewer.role === 'AGENT' ? sql`and exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = t.source_channel_id) and not exists (select 1 from ${channelIdentity} ci where ci.customer_id = ${customer.id} and not exists (select 1 from ${memberChannelAccess} a where a.member_id = ${viewer.memberId} and a.channel_id = ci.channel_id))` : sql``})`,
+    )
+  }
 
   if (input.view === 'my') filters.push(eq(conversation.assigneeMemberId, viewer.memberId))
   if (input.view === 'waiting-human') {
@@ -384,7 +413,9 @@ export async function listConversations(
       lastCustomerMessageAt: conversation.lastCustomerMessageAt,
       updatedAt: conversation.updatedAt,
       customerId: customer.id,
-      customerName: customer.displayName,
+      customerName: sql<
+        string | null
+      >`case when ${sharedCustomerVisible} then ${customer.displayName} else null end`,
       channelId: channel.id,
       channelName: channel.displayName,
       assigneeMemberId: conversation.assigneeMemberId,
@@ -509,10 +540,11 @@ async function assertConversationAccess(
   db: QueryHandle,
   input: { workspaceId: string; userId: string; conversationId: string },
 ) {
-  await assertViewer(db, input.workspaceId, input.userId)
+  const viewer = await assertViewer(db, input.workspaceId, input.userId)
   const [found] = await db
-    .select({ id: conversation.id })
+    .select({ id: conversation.id, channelId: channelIdentity.channelId })
     .from(conversation)
+    .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
     .where(
       and(
         eq(conversation.id, input.conversationId),
@@ -521,6 +553,18 @@ async function assertConversationAccess(
     )
     .limit(1)
   if (!found) throw new InboxError('NOT_FOUND', 'Conversation not found')
+  if (viewer.role === 'AGENT') {
+    const [allowed] = await db
+      .select({ channelId: memberChannelAccess.channelId })
+      .from(memberChannelAccess)
+      .where(
+        and(
+          eq(memberChannelAccess.memberId, viewer.memberId),
+          eq(memberChannelAccess.channelId, found.channelId),
+        ),
+      )
+    if (!allowed) throw new InboxError('FORBIDDEN', 'Channel access required')
+  }
 }
 
 async function markReceiptProcessed(db: QueryHandle, receiptId: string, processedAt: Date) {

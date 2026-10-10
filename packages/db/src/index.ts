@@ -1,4 +1,5 @@
 export * from './database'
+export * from './customers'
 export * from './assignments'
 export * from './ai-members'
 export * from './ai-responses'

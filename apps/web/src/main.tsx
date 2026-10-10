@@ -36,6 +36,7 @@ import {
   useState,
 } from 'react'
 import { createRoot } from 'react-dom/client'
+import { CustomerSidebar } from './customer-sidebar'
 import { toast } from 'sonner'
 import {
   AlertDialog,
@@ -1135,6 +1136,7 @@ const inboxViews: Array<{ id: InboxView; label: string; icon: LucideIcon }> = [
 ]
 
 function InboxPage({ workspace }: { workspace: Workspace }) {
+  const [tagFilter, setTagFilter] = useState<{ id: string; name: string } | null>(null)
   const [view, setView] = useState<InboxView>('all-open')
   const [conversations, setConversations] = useState<InboxConversation[]>([])
   const [teamMembers, setTeamMembers] = useState<TeamMember[]>([])
@@ -1211,7 +1213,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
 
   const refresh = useCallback(async () => {
     const response = await fetch(
-      `/api/workspaces/${workspace.id}/conversations?view=${encodeURIComponent(view)}`,
+      `/api/workspaces/${workspace.id}/conversations?view=${encodeURIComponent(view)}${tagFilter ? `&tagId=${encodeURIComponent(tagFilter.id)}` : ''}`,
     )
     if (!response.ok) throw await responseError(response)
     const data = (await response.json()) as InboxPageData
@@ -1222,7 +1224,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
       return stillSelected ? current : (data.conversations[0]?.id ?? null)
     })
     setLoading(false)
-  }, [view, workspace.id])
+  }, [view, workspace.id, tagFilter])
 
   const refreshThread = useCallback(
     async (conversationId: string, showLoading = false) => {
@@ -1514,6 +1516,11 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
         </div>
         <Separator />
         <section className="conversation-list" aria-label="对话列表">
+          {tagFilter && (
+            <Button type="button" variant="ghost" onClick={() => setTagFilter(null)}>
+              清除标签筛选：{tagFilter.name}
+            </Button>
+          )}
           <div className="conversation-list-heading">
             <div>
               <span className="list-kicker">当前视图</span>
@@ -1558,6 +1565,18 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
         {selectedId && selectedConversation ? (
           <div className="thread-layout">
             <ConversationHeader
+              customerDetails={
+                <CustomerSidebar
+                  workspaceId={workspace.id}
+                  conversationId={selectedId}
+                  key={selectedId}
+                  manager={workspace.role !== 'AGENT'}
+                  canEdit={canManageSelected}
+                  members={teamMembers}
+                  onSaved={refresh}
+                  onFilter={setTagFilter}
+                />
+              }
               actionLoading={actionLoading}
               canManage={canManageSelected}
               conversation={selectedConversation}
@@ -1804,6 +1823,7 @@ function MessageThreadSkeleton() {
 }
 
 function ConversationHeader({
+  customerDetails,
   actionLoading,
   canManage,
   conversation,
@@ -1815,6 +1835,7 @@ function ConversationHeader({
   onTakeOver,
   onUnassign,
 }: {
+  customerDetails: ReactNode
   actionLoading: boolean
   canManage: boolean
   conversation: InboxConversation
@@ -1868,6 +1889,7 @@ function ConversationHeader({
         </div>
       </div>
       <div className="thread-actions">
+        {customerDetails}
         {conversation.aiGenerating && (
           <StatusBadge className="ai-generating" role="status" tone="info">
             <Bot aria-hidden="true" />

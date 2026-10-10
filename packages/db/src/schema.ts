@@ -337,6 +337,16 @@ export const customer = pgTable(
       .references(() => workspace.id, { onDelete: 'cascade' }),
     displayName: text('display_name'),
     avatarUrl: text('avatar_url'),
+    email: text(),
+    phone: text(),
+    preferredLanguage: text('preferred_language'),
+    notes: text(),
+    ownerMemberId: uuid('owner_member_id').references(() => member.id, { onDelete: 'set null' }),
+    profileRevision: integer('profile_revision').default(0).notNull(),
+    profileSourceChannelIds: jsonb('profile_source_channel_ids')
+      .$type<string[]>()
+      .default([])
+      .notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
@@ -428,6 +438,136 @@ export const conversation = pgTable(
     uniqueIndex('conversation_one_open_identity_idx')
       .on(table.channelIdentityId)
       .where(sql`${table.status} = 'OPEN'`),
+  ],
+)
+
+export const customerFactLevel = pgEnum('customer_fact_level', ['CUSTOMER', 'CONVERSATION'])
+export const customerPropertyType = pgEnum('customer_property_type', ['TEXT', 'NUMBER', 'OPTION'])
+
+export const customerPropertyDefinition = pgTable(
+  'customer_property_definition',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    level: customerFactLevel().notNull(),
+    type: customerPropertyType().notNull(),
+    options: jsonb().$type<string[]>().default([]).notNull(),
+    maxLength: integer('max_length').default(2000).notNull(),
+    revision: integer().default(0).notNull(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('customer_property_definition_name_idx')
+      .on(t.workspaceId, t.level, sql`lower(${t.name})`)
+      .where(sql`${t.deletedAt} is null`),
+    check('customer_property_definition_length', sql`${t.maxLength} between 1 and 2000`),
+  ],
+)
+
+export const customerPropertyValue = pgTable(
+  'customer_property_value',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    definitionId: uuid('definition_id')
+      .notNull()
+      .references(() => customerPropertyDefinition.id),
+    customerId: uuid('customer_id').references(() => customer.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id').references(() => conversation.id, {
+      onDelete: 'cascade',
+    }),
+    value: jsonb().$type<string | number | null>(),
+    revision: integer().default(1).notNull(),
+    allowAutomaticUpdate: boolean('allow_automatic_update').default(false).notNull(),
+    sourceMemberId: uuid('source_member_id').references(() => member.id, { onDelete: 'set null' }),
+    sourceChannelId: uuid('source_channel_id')
+      .notNull()
+      .references(() => channel.id),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    check(
+      'customer_property_value_target',
+      sql`(${t.customerId} is not null) <> (${t.conversationId} is not null)`,
+    ),
+    uniqueIndex('customer_property_value_customer_idx')
+      .on(t.definitionId, t.customerId)
+      .where(sql`${t.customerId} is not null`),
+    uniqueIndex('customer_property_value_conversation_idx')
+      .on(t.definitionId, t.conversationId)
+      .where(sql`${t.conversationId} is not null`),
+  ],
+)
+
+export const customerPropertyHistory = pgTable(
+  'customer_property_history',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    valueId: uuid('value_id')
+      .notNull()
+      .references(() => customerPropertyValue.id, { onDelete: 'cascade' }),
+    definitionName: text('definition_name').notNull(),
+    value: jsonb().$type<string | number | null>(),
+    revision: integer().notNull(),
+    allowAutomaticUpdate: boolean('allow_automatic_update').notNull(),
+    sourceMemberId: uuid('source_member_id').references(() => member.id, { onDelete: 'set null' }),
+    sourceName: text('source_name').default('Former member').notNull(),
+    sourceChannelId: uuid('source_channel_id')
+      .notNull()
+      .references(() => channel.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('customer_property_history_value_idx').on(t.valueId, t.createdAt)],
+)
+
+export const customerTagDefinition = pgTable(
+  'customer_tag_definition',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    level: customerFactLevel().notNull(),
+  },
+  (t) => [
+    uniqueIndex('customer_tag_definition_name_idx').on(
+      t.workspaceId,
+      t.level,
+      sql`lower(${t.name})`,
+    ),
+  ],
+)
+
+export const customerTag = pgTable(
+  'customer_tag',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    tagId: uuid('tag_id')
+      .notNull()
+      .references(() => customerTagDefinition.id, { onDelete: 'cascade' }),
+    customerId: uuid('customer_id').references(() => customer.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id').references(() => conversation.id, {
+      onDelete: 'cascade',
+    }),
+    sourceMemberId: uuid('source_member_id').references(() => member.id, { onDelete: 'set null' }),
+    sourceChannelId: uuid('source_channel_id')
+      .notNull()
+      .references(() => channel.id),
+  },
+  (t) => [
+    check(
+      'customer_tag_target',
+      sql`(${t.customerId} is not null) <> (${t.conversationId} is not null)`,
+    ),
+    uniqueIndex('customer_tag_customer_idx')
+      .on(t.tagId, t.customerId)
+      .where(sql`${t.customerId} is not null`),
+    uniqueIndex('customer_tag_conversation_idx')
+      .on(t.tagId, t.conversationId)
+      .where(sql`${t.conversationId} is not null`),
   ],
 )
 

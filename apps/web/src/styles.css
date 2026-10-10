@@ -4984,3 +4984,49 @@ form {
   }
 }
 /* biome-ignore-end lint/style/noDescendingSpecificity: Demo styles are scoped to their own workbench. */
+
+.customer-sheet {
+  width: min(100vw, 32rem);
+  max-width: 32rem;
+}
+
+.customer-facts {
+  overflow-y: auto;
+  padding: 0 1rem 1rem;
+  display: grid;
+  gap: 1rem;
+}
+
+.customer-facts fieldset,
+.customer-facts section,
+.customer-facts label,
+.customer-facts-dialog form {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.customer-facts section {
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+
+.customer-facts select,
+.customer-facts-dialog form select {
+  min-height: 2.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--background);
+  padding: 0.4rem;
+}
+
+.customer-facts .customer-checkbox,
+.customer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.customer-facts [role="alert"] {
+  color: var(--destructive);
+}

@@ -1,5 +1,17 @@
 import {
   acceptAnyInvitation,
+  CustomerError,
+  getCustomerProfile,
+  updateCustomerProfile,
+  savePropertyDefinition,
+  propertyDependencies,
+  setCustomerProperty,
+  saveCustomerTagDefinition,
+  removeCustomerTagDefinition,
+  setCustomerTag,
+  listCustomerLinkTargets,
+  changeCustomerIdentity,
+  listCustomerPropertyHistory,
   claimAiResponseRun,
   autoAssignConversation,
   AssignmentError,
@@ -985,6 +997,7 @@ app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
       const page = await listFacebookConversations(db, {
         workspaceId: c.req.param('workspaceId'),
         userId: session.user.id,
+        tagId: c.req.query('tagId'),
         view: viewResult.data,
         after: decodeConversationCursor(c.req.query('cursor')),
       })
@@ -1488,6 +1501,253 @@ app.delete('/api/workspaces/:workspaceId/members/:memberId', async (c) => {
     }
   })
 })
+
+const customerProfileInput = z
+  .object({
+    expectedCustomerId: z.string().uuid(),
+    expectedRevision: z.number().int().nonnegative(),
+    displayName: z.string().trim().max(100).nullable().optional(),
+    email: z.string().trim().email().max(254).nullable().optional(),
+    phone: z.string().trim().max(50).nullable().optional(),
+    preferredLanguage: z.string().trim().max(100).nullable().optional(),
+    notes: z.string().max(2000).nullable().optional(),
+    ownerMemberId: z.string().uuid().nullable().optional(),
+  })
+  .strict()
+
+async function customerRequest(
+  c: Context<{ Bindings: Bindings }>,
+  work: (
+    db: Database,
+    input: { workspaceId: string; userId: string; conversationId: string },
+  ) => Promise<unknown>,
+) {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  const workspaceId = c.req.param('workspaceId') ?? ''
+  const conversationId = c.req.param('conversationId') ?? ''
+  if (
+    !z.string().uuid().safeParse(workspaceId).success ||
+    !z.string().uuid().safeParse(conversationId).success
+  )
+    return c.json({ error: { code: 'INVALID_REQUEST', message: 'Invalid identifier' } }, 400)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    if (c.req.method !== 'GET') {
+      const limited = await rateLimit(c, `customer:${session.user.id}`)
+      if (limited) return limited
+    }
+    try {
+      const result = await work(db, { workspaceId, userId: session.user.id, conversationId })
+      if (c.req.method !== 'GET')
+        await publishInboxChange(c.env, workspaceId, conversationId, 'conversation.changed')
+      return c.json(result as Record<string, unknown>)
+    } catch (error) {
+      if (!(error instanceof CustomerError)) throw error
+      return c.json(
+        { error: { code: error.code, message: error.message } },
+        error.code === 'FORBIDDEN'
+          ? 403
+          : error.code === 'NOT_FOUND'
+            ? 404
+            : error.code === 'CONFLICT'
+              ? 409
+              : 400,
+      )
+    }
+  })
+}
+
+app.get('/api/workspaces/:workspaceId/conversations/:conversationId/customer-profile', (c) =>
+  customerRequest(c, getCustomerProfile),
+)
+app.patch('/api/workspaces/:workspaceId/conversations/:conversationId/customer-profile', (c) =>
+  customerRequest(c, async (db, context) => {
+    const parsed = customerProfileInput.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid customer profile')
+    return updateCustomerProfile(db, { ...context, ...parsed.data })
+  }),
+)
+
+const propertyDefinitionInput = z
+  .object({
+    name: z.string().trim().min(1).max(100),
+    level: z.enum(['CUSTOMER', 'CONVERSATION']),
+    type: z.enum(['TEXT', 'NUMBER', 'OPTION']),
+    options: z.array(z.string().trim().min(1).max(100)).max(50).default([]),
+    maxLength: z.number().int().min(1).max(2000).default(2000),
+    expectedRevision: z.number().int().nonnegative().optional(),
+  })
+  .strict()
+app.get('/api/workspaces/:workspaceId/conversations/:conversationId/property-history', (c) =>
+  customerRequest(c, (db, context) => {
+    const before = c.req.query('before')
+    if (before && !z.string().uuid().safeParse(before).success)
+      throw new CustomerError('INVALID_REQUEST', 'Invalid cursor')
+    return listCustomerPropertyHistory(db, { ...context, before })
+  }),
+)
+const propertyValueInput = z
+  .object({
+    expectedCustomerId: z.string().uuid(),
+    value: z.union([z.string().max(2000), z.number().finite(), z.null()]),
+    expectedRevision: z.number().int().nonnegative(),
+    allowAutomaticUpdate: z.boolean(),
+  })
+  .strict()
+function customerParam(c: Context<{ Bindings: Bindings }>, name: string) {
+  const parsed = z.string().uuid().safeParse(c.req.param(name))
+  if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid identifier')
+  return parsed.data
+}
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/property-definitions', (c) =>
+  customerRequest(c, async (db, context) => {
+    const parsed = propertyDefinitionInput.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid property definition')
+    return savePropertyDefinition(db, { ...context, ...parsed.data })
+  }),
+)
+app.patch(
+  '/api/workspaces/:workspaceId/conversations/:conversationId/property-definitions/:definitionId',
+  (c) =>
+    customerRequest(c, async (db, context) => {
+      const parsed = propertyDefinitionInput.safeParse(await c.req.json().catch(() => null))
+      if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid property definition')
+      return savePropertyDefinition(db, {
+        ...context,
+        ...parsed.data,
+        definitionId: customerParam(c, 'definitionId'),
+      })
+    }),
+)
+app.get(
+  '/api/workspaces/:workspaceId/conversations/:conversationId/property-definitions/:definitionId/dependencies',
+  (c) =>
+    customerRequest(c, (db, context) =>
+      propertyDependencies(db, { ...context, definitionId: customerParam(c, 'definitionId') }),
+    ),
+)
+app.delete(
+  '/api/workspaces/:workspaceId/conversations/:conversationId/property-definitions/:definitionId',
+  (c) =>
+    customerRequest(c, (db, context) =>
+      propertyDependencies(db, {
+        ...context,
+        definitionId: customerParam(c, 'definitionId'),
+        remove: true,
+      }),
+    ),
+)
+app.put(
+  '/api/workspaces/:workspaceId/conversations/:conversationId/properties/:definitionId',
+  (c) =>
+    customerRequest(c, async (db, context) => {
+      const parsed = propertyValueInput.safeParse(await c.req.json().catch(() => null))
+      if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid property value')
+      return setCustomerProperty(db, {
+        ...context,
+        ...parsed.data,
+        definitionId: customerParam(c, 'definitionId'),
+      })
+    }),
+)
+
+const customerTagInput = z
+  .object({ name: z.string().trim().min(1).max(100), level: z.enum(['CUSTOMER', 'CONVERSATION']) })
+  .strict()
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/tag-definitions', (c) =>
+  customerRequest(c, async (db, context) => {
+    const parsed = customerTagInput.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid tag')
+    return saveCustomerTagDefinition(db, { ...context, ...parsed.data })
+  }),
+)
+app.patch(
+  '/api/workspaces/:workspaceId/conversations/:conversationId/tag-definitions/:tagId',
+  (c) =>
+    customerRequest(c, async (db, context) => {
+      const parsed = customerTagInput.safeParse(await c.req.json().catch(() => null))
+      if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid tag')
+      return saveCustomerTagDefinition(db, {
+        ...context,
+        ...parsed.data,
+        tagId: customerParam(c, 'tagId'),
+      })
+    }),
+)
+app.delete(
+  '/api/workspaces/:workspaceId/conversations/:conversationId/tag-definitions/:tagId',
+  (c) =>
+    customerRequest(c, (db, context) =>
+      removeCustomerTagDefinition(db, { ...context, tagId: customerParam(c, 'tagId') }),
+    ),
+)
+app.put('/api/workspaces/:workspaceId/conversations/:conversationId/tags/:tagId', (c) =>
+  customerRequest(c, async (db, context) => {
+    const parsed = z
+      .object({ expectedCustomerId: z.string().uuid() })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Customer identifier required')
+    return setCustomerTag(db, { ...context, ...parsed.data, tagId: customerParam(c, 'tagId') })
+  }),
+)
+app.delete('/api/workspaces/:workspaceId/conversations/:conversationId/tags/:tagId', (c) =>
+  customerRequest(c, async (db, context) => {
+    const parsed = z
+      .object({ expectedCustomerId: z.string().uuid() })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Customer identifier required')
+    return setCustomerTag(db, {
+      ...context,
+      ...parsed.data,
+      tagId: customerParam(c, 'tagId'),
+      remove: true,
+    })
+  }),
+)
+
+const customerIdentityInput = z
+  .object({
+    targetCustomerId: z.string().uuid().nullable(),
+    expectedCustomerId: z.string().uuid(),
+    confirmed: z.literal(true).optional(),
+  })
+  .strict()
+app.get('/api/workspaces/:workspaceId/conversations/:conversationId/customer-link-targets', (c) =>
+  customerRequest(c, (db, context) => {
+    const after = c.req.query('after')
+    if (after && !z.string().uuid().safeParse(after).success)
+      throw new CustomerError('INVALID_REQUEST', 'Invalid cursor')
+    return listCustomerLinkTargets(db, { ...context, after })
+  }),
+)
+app.post(
+  '/api/workspaces/:workspaceId/conversations/:conversationId/identities/:identityId/preview',
+  (c) =>
+    customerRequest(c, async (db, context) => {
+      const parsed = customerIdentityInput.safeParse(await c.req.json().catch(() => null))
+      if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid identity link')
+      return changeCustomerIdentity(db, {
+        ...context,
+        ...parsed.data,
+        identityId: customerParam(c, 'identityId'),
+        preview: true,
+      })
+    }),
+)
+app.put('/api/workspaces/:workspaceId/conversations/:conversationId/identities/:identityId', (c) =>
+  customerRequest(c, async (db, context) => {
+    const parsed = customerIdentityInput.safeParse(await c.req.json().catch(() => null))
+    if (!parsed.success) throw new CustomerError('INVALID_REQUEST', 'Invalid identity link')
+    return changeCustomerIdentity(db, {
+      ...context,
+      ...parsed.data,
+      identityId: customerParam(c, 'identityId'),
+    })
+  }),
+)
 
 function hasApplicationBindings(env: Bindings): boolean {
   return Boolean(
