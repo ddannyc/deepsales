@@ -5,6 +5,9 @@ import {
   conversation,
   deliveryAttempt,
   member,
+  memberChannelAccess,
+  mediaAsset,
+  messageAttachment,
   message,
   workspaceUserAccess,
 } from './schema'
@@ -18,6 +21,8 @@ export type ReplyErrorCode =
   | 'INVALID_REQUEST'
   | 'CONVERSATION_CLOSED'
   | 'REPLY_WINDOW_CLOSED'
+  | 'RETRY_NOT_READY'
+  | 'RETRY_LIMIT_REACHED'
 
 export class ReplyError extends Error {
   constructor(
@@ -33,7 +38,9 @@ export type HumanReplyInput = {
   workspaceId: string
   conversationId: string
   actingUserId: string
-  text: string
+  text?: string
+  assetId?: string
+  clientKey?: string
   now?: Date
 }
 type ReplyWindowCheck = (tx: Transaction, channelIdentityId: string, now: Date) => Promise<boolean>
@@ -43,9 +50,9 @@ export async function createHumanReply(
   input: HumanReplyInput,
   isReplyWindowOpen: ReplyWindowCheck,
 ) {
-  if (typeof input.text !== 'string') throw new ReplyError('INVALID_REQUEST', 'Text is required')
-  const text = input.text.trim()
-  if (!text) throw new ReplyError('INVALID_REQUEST', 'Text is required')
+  const text = input.text?.trim() ?? ''
+  if (Boolean(text) === Boolean(input.assetId) || (input.assetId && !input.clientKey))
+    throw new ReplyError('INVALID_REQUEST', 'Provide text or one media asset')
   if (text.length > MAX_OUTBOUND_TEXT_LENGTH) {
     throw new ReplyError('INVALID_REQUEST', 'Text is too long')
   }
@@ -89,6 +96,39 @@ export async function createHumanReply(
       .where(eq(conversation.id, input.conversationId))
       .limit(1)
     if (!current) throw new ReplyError('NOT_FOUND', 'Conversation not found')
+    const [channelAccess] = await tx
+      .select({ id: memberChannelAccess.memberId })
+      .from(memberChannelAccess)
+      .where(
+        and(
+          eq(memberChannelAccess.memberId, viewer.memberId),
+          eq(memberChannelAccess.channelId, current.channelId),
+        ),
+      )
+    if (!channelAccess) throw new ReplyError('FORBIDDEN', 'Channel access required')
+
+    if (input.clientKey) {
+      const [existing] = await tx
+        .select()
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, input.conversationId),
+            eq(message.senderMemberId, viewer.memberId),
+            eq(message.clientKey, input.clientKey),
+          ),
+        )
+      if (existing) {
+        const [attachment] = await tx
+          .select({ assetId: messageAttachment.assetId })
+          .from(messageAttachment)
+          .where(eq(messageAttachment.messageId, existing.id))
+        if ((existing.text ?? '') !== text || (attachment?.assetId ?? undefined) !== input.assetId)
+          throw new ReplyError('INVALID_REQUEST', 'Retry key already used')
+        return { message: existing }
+      }
+    }
+
     if (current.status !== 'OPEN') {
       throw new ReplyError('CONVERSATION_CLOSED', 'Conversation is closed')
     }
@@ -100,6 +140,20 @@ export async function createHumanReply(
       throw new ReplyError('REPLY_WINDOW_CLOSED', 'Messenger reply window is closed')
     }
 
+    const [asset] = input.assetId
+      ? await tx
+          .select()
+          .from(mediaAsset)
+          .where(
+            and(
+              eq(mediaAsset.id, input.assetId),
+              eq(mediaAsset.workspaceId, input.workspaceId),
+              isNull(mediaAsset.deletedAt),
+            ),
+          )
+          .for('share')
+      : []
+    if (input.assetId && !asset) throw new ReplyError('NOT_FOUND', 'Media asset is unavailable')
     const [created] = await tx
       .insert(message)
       .values({
@@ -108,14 +162,26 @@ export async function createHumanReply(
         direction: 'OUTBOUND',
         senderType: 'MEMBER',
         senderMemberId: viewer.memberId,
-        messageType: 'TEXT',
-        text,
+        messageType: asset ? 'ATTACHMENT' : 'TEXT',
+        text: asset ? null : text,
+        clientKey: input.clientKey,
         deliveryState: 'PENDING',
         createdAt: sql`clock_timestamp()`,
         updatedAt: now,
       })
       .returning()
     if (!created) throw new ReplyError('INVALID_REQUEST', 'Message was not created')
+    if (asset)
+      await tx.insert(messageAttachment).values({
+        messageId: created.id,
+        assetId: asset.id,
+        kind: asset.kind,
+        filename: asset.filename,
+        mimeType: asset.mimeType,
+        byteSize: asset.byteSize,
+        storageKey: asset.storageKey,
+        storageState: 'READY',
+      })
 
     await tx
       .update(conversation)
@@ -206,6 +272,7 @@ export async function claimOutboundMessage(
         workspaceId: conversation.workspaceId,
         channelId: message.channelId,
         text: message.text,
+        messageType: message.messageType,
         deliveryStartedAt: message.deliveryStartedAt,
       })
       .from(message)
@@ -367,6 +434,7 @@ export async function failOutboundMessage(
     failureMessage: string
     attempt?: {
       httpStatus?: number | null
+      retryNotBefore?: Date | null
       code?: number | null
       subcode?: number | null
       type?: string | null
@@ -400,6 +468,7 @@ export async function failOutboundMessage(
       .update(deliveryAttempt)
       .set({
         httpStatus: input.attempt?.httpStatus ?? null,
+        retryNotBefore: input.attempt?.retryNotBefore ?? null,
         code: input.attempt?.code ?? null,
         subcode: input.attempt?.subcode ?? null,
         type: input.attempt?.type ?? null,

@@ -1,5 +1,6 @@
 import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
+import { assertInboxConversationAccess, InboxError } from './inbox'
 import {
   conversation,
   facebookAttachmentSource,
@@ -325,6 +326,7 @@ export async function getFacebookAttachmentForDownload(
   const [attachment] = await db
     .select({
       id: messageAttachment.id,
+      conversationId: conversation.id,
       kind: messageAttachment.kind,
       filename: messageAttachment.filename,
       mimeType: messageAttachment.mimeType,
@@ -337,11 +339,22 @@ export async function getFacebookAttachmentForDownload(
     .where(
       and(
         eq(messageAttachment.id, input.attachmentId),
-        eq(message.direction, 'INBOUND'),
         eq(conversation.workspaceId, input.workspaceId),
       ),
     )
     .limit(1)
+  if (attachment) {
+    try {
+      await assertInboxConversationAccess(db, {
+        ...input,
+        conversationId: attachment.conversationId,
+      })
+    } catch (error) {
+      if (error instanceof InboxError)
+        throw new AttachmentError(error.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'FORBIDDEN')
+      throw error
+    }
+  }
   if (attachment?.storageState !== 'READY' || !attachment.storageKey) {
     throw new AttachmentError('NOT_FOUND', 'Attachment not found')
   }

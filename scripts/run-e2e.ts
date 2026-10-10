@@ -33,6 +33,8 @@ const e2eOwnerKeys = [
   'inbox-search-agent',
   'inbox-collaboration',
   'inbox-collaboration-agent',
+  'media',
+  'media-other',
   'knowledge',
   'reply',
   'routing',
@@ -218,6 +220,7 @@ function startWorker(
 async function startFakeFacebook() {
   let messageNumber = 0
   const sends = new Map<string, number>()
+  const uploads = new Map<string, { filename: string; rejected: boolean }>()
   const server = createHttpServer(async (request, response) => {
     const pathname = request.url ? new URL(request.url, 'http://fake-facebook').pathname : ''
     if (request.method === 'GET' && pathname === '/__sent') {
@@ -244,6 +247,26 @@ async function startFakeFacebook() {
       response.end(attachment.body)
       return
     }
+    if (request.method === 'POST' && pathname.endsWith('/message_attachments')) {
+      const chunks: Buffer[] = []
+      for await (const chunk of request) chunks.push(Buffer.from(chunk))
+      const form = await new Request('http://fake-facebook/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': request.headers['content-type'] ?? '' },
+        body: Buffer.concat(chunks),
+      }).formData()
+      const file = form.get('filedata')
+      if (!(file instanceof File) || !file.size) {
+        response.statusCode = 400
+        response.end('{}')
+        return
+      }
+      const id = crypto.randomUUID()
+      uploads.set(id, { filename: file.name, rejected: false })
+      response.setHeader('content-type', 'application/json')
+      response.end(JSON.stringify({ attachment_id: id }))
+      return
+    }
     if (request.method !== 'POST' || !pathname.endsWith('/messages')) {
       response.statusCode = 404
       response.end()
@@ -253,12 +276,15 @@ async function startFakeFacebook() {
     const chunks: Buffer[] = []
     for await (const chunk of request) chunks.push(Buffer.from(chunk))
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as {
-      message?: { text?: string }
+      message?: { text?: string; attachment?: { payload?: { attachment_id?: string } } }
       recipient?: { id?: string }
     }
     if (body.recipient?.id) sends.set(body.recipient.id, (sends.get(body.recipient.id) ?? 0) + 1)
     response.setHeader('content-type', 'application/json')
-    if (body.message?.text === 'force failure') {
+    const uploaded = uploads.get(body.message?.attachment?.payload?.attachment_id ?? '')
+    const rejectMedia = uploaded?.filename === 'reject-once.pdf' && !uploaded.rejected
+    if (rejectMedia && uploaded) uploaded.rejected = true
+    if (body.message?.text === 'force failure' || rejectMedia) {
       response.statusCode = 400
       response.end(
         JSON.stringify({

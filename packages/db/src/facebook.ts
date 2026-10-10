@@ -1,7 +1,8 @@
 import { and, asc, eq, gt, inArray, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import { type ConversationCursor, type ConversationView, listConversations } from './inbox'
-import { createHumanReply, type HumanReplyInput } from './outbound'
+import { createHumanReply, type HumanReplyInput, ReplyError } from './outbound'
+import { assertInboxViewer } from './inbox'
 import {
   channel,
   channelIdentity,
@@ -12,6 +13,9 @@ import {
   member,
   memberChannelAccess,
   message,
+  messageAttachment,
+  facebookMediaUpload,
+  deliveryAttempt,
   workspaceUserAccess,
 } from './schema'
 
@@ -41,6 +45,96 @@ type QueryHandle = Database | Transaction
 
 export function createFacebookHumanReply(db: Database, input: HumanReplyInput) {
   return createHumanReply(db, input, facebookReplyWindowOpen)
+}
+
+export async function retryFacebookHumanReply(
+  db: Database,
+  input: { workspaceId: string; conversationId: string; actingUserId: string; messageId: string },
+) {
+  return db.transaction(async (tx) => {
+    const viewer = await assertInboxViewer(tx, input.workspaceId, input.actingUserId)
+    const [current] = await tx
+      .select({
+        status: conversation.status,
+        owner: conversation.assigneeMemberId,
+        channelId: channelIdentity.channelId,
+        identityId: channelIdentity.id,
+      })
+      .from(conversation)
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+      .where(
+        and(
+          eq(conversation.id, input.conversationId),
+          eq(conversation.workspaceId, input.workspaceId),
+        ),
+      )
+      .for('update', { of: conversation })
+    if (!current) throw new ReplyError('NOT_FOUND', 'Conversation not found')
+    const [allowed] = await tx
+      .select()
+      .from(memberChannelAccess)
+      .where(
+        and(
+          eq(memberChannelAccess.memberId, viewer.memberId),
+          eq(memberChannelAccess.channelId, current.channelId),
+        ),
+      )
+    if (!allowed || current.owner !== viewer.memberId)
+      throw new ReplyError('FORBIDDEN', 'Only the current authorized human may retry')
+    if (current.status !== 'OPEN')
+      throw new ReplyError('CONVERSATION_CLOSED', 'Conversation is closed')
+    if (!(await facebookReplyWindowOpen(tx, current.identityId, new Date())))
+      throw new ReplyError('REPLY_WINDOW_CLOSED', 'Messenger reply window is closed')
+    const [original] = await tx
+      .select()
+      .from(message)
+      .where(
+        and(
+          eq(message.id, input.messageId),
+          eq(message.conversationId, input.conversationId),
+          eq(message.senderMemberId, viewer.memberId),
+          eq(message.direction, 'OUTBOUND'),
+        ),
+      )
+      .for('update')
+    if (!original) throw new ReplyError('NOT_FOUND', 'Message not found')
+    if (original.deliveryState !== 'FAILED') return { message: original }
+    const [attempt] = await tx
+      .select()
+      .from(deliveryAttempt)
+      .where(eq(deliveryAttempt.messageId, original.id))
+      .orderBy(sql`${deliveryAttempt.attemptNumber} desc`)
+      .limit(1)
+    const rejected = attempt?.httpStatus && attempt.httpStatus >= 400 && attempt.httpStatus < 500
+    if (
+      original.failureCode === 'AMBIGUOUS_DELIVERY' ||
+      (!rejected &&
+        original.failureCode !== 'REPLY_WINDOW_CLOSED' &&
+        original.failureCode !== 'FACEBOOK_MEDIA_PREPARATION_FAILED')
+    )
+      throw new ReplyError('INVALID_REQUEST', 'Unknown delivery result cannot be retried')
+    if (!attempt || attempt.attemptNumber >= 3)
+      throw new ReplyError('RETRY_LIMIT_REACHED', 'Retry limit reached')
+    const delayMs = attempt.attemptNumber === 1 ? 30_000 : 120_000
+    const notBefore = Math.max(
+      (attempt.completedAt ?? attempt.startedAt).getTime() + delayMs,
+      attempt.retryNotBefore?.getTime() ?? 0,
+    )
+    if (Date.now() < notBefore)
+      throw new ReplyError('RETRY_NOT_READY', 'Retry delay has not elapsed')
+    const [updated] = await tx
+      .update(message)
+      .set({
+        deliveryState: 'PENDING',
+        deliveryStartedAt: null,
+        failureCode: null,
+        failureMessage: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(message.id, original.id))
+      .returning()
+    return { message: updated }
+  })
 }
 
 async function facebookReplyWindowOpen(tx: Transaction, channelIdentityId: string, now: Date) {
@@ -74,6 +168,35 @@ export async function getFacebookOutboundDelivery(db: Database, messageId: strin
     .where(and(eq(message.id, messageId), eq(message.direction, 'OUTBOUND')))
     .limit(1)
   return delivery ?? null
+}
+
+export async function getFacebookOutboundMedia(db: Database, messageId: string) {
+  const [attachment] = await db
+    .select({
+      id: messageAttachment.id,
+      kind: messageAttachment.kind,
+      filename: messageAttachment.filename,
+      mimeType: messageAttachment.mimeType,
+      storageKey: messageAttachment.storageKey,
+      providerAttachmentId: facebookMediaUpload.providerAttachmentId,
+    })
+    .from(messageAttachment)
+    .leftJoin(facebookMediaUpload, eq(facebookMediaUpload.attachmentId, messageAttachment.id))
+    .where(
+      and(eq(messageAttachment.messageId, messageId), eq(messageAttachment.storageState, 'READY')),
+    )
+  return attachment ?? null
+}
+
+export async function storeFacebookMediaUpload(
+  db: Database,
+  attachmentId: string,
+  providerAttachmentId: string,
+) {
+  await db
+    .insert(facebookMediaUpload)
+    .values({ attachmentId, providerAttachmentId })
+    .onConflictDoNothing()
 }
 
 export async function listFacebookConversations(

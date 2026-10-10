@@ -78,6 +78,17 @@ import {
   createInternalNote,
   listInternalNotes,
   setConversationMute,
+  assertInboxViewer,
+  createMediaAsset,
+  getMediaAsset,
+  getFacebookOutboundMedia,
+  storeFacebookMediaUpload,
+  retryFacebookHumanReply,
+  listMediaAssets,
+  updateMediaAsset,
+  listReplyTemplates,
+  saveReplyTemplate,
+  deleteReplyTemplate,
   inboxFilterOptions,
   listInboxViews,
   saveInboxView,
@@ -139,6 +150,7 @@ import {
 
 import { publishRealtime, WorkspaceRealtime } from './realtime'
 import { createObjectStorage } from './object-storage'
+import { MAX_MEDIA_BYTES, validateMediaFile } from './media-files'
 import { createJobQueue, type JobQueue } from './queue'
 import {
   ALIBABA_LLM_PROVIDER,
@@ -308,8 +320,17 @@ const conversationCursorInput = z.object({
 })
 const messageCursorInput = z.object({ createdAt: z.string().datetime(), id: z.string().uuid() })
 const replyInput = z
-  .object({ text: z.string().trim().min(1).max(MAX_OUTBOUND_TEXT_LENGTH) })
+  .object({
+    text: z.string().trim().min(1).max(MAX_OUTBOUND_TEXT_LENGTH).optional(),
+    assetId: z.string().uuid().optional(),
+    clientKey: z.string().uuid().optional(),
+  })
   .strict()
+  .refine(
+    (value) =>
+      Boolean(value.text) !== Boolean(value.assetId) &&
+      (!value.assetId || Boolean(value.clientKey)),
+  )
 const transferInput = z
   .object({ targetMemberId: z.string().uuid(), confirmOverride: z.boolean().optional() })
   .strict()
@@ -1155,6 +1176,206 @@ app.get('/api/workspaces/:workspaceId/conversations', async (c) => {
   })
 })
 
+app.on(['GET', 'POST'], '/api/workspaces/:workspaceId/media-assets', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const context = { workspaceId: c.req.param('workspaceId'), userId: session.user.id }
+    try {
+      if (c.req.method === 'GET')
+        return c.json(
+          await listMediaAssets(db, { ...context, query: c.req.query('query')?.slice(0, 200) }),
+        )
+      await assertInboxViewer(db, context.workspaceId, context.userId)
+      const limited = await rateLimit(c, `media-upload:${session.user.id}`)
+      if (limited) return limited
+      if (!c.env.OBJECTS) return notReady(c)
+      const id = z.string().uuid().safeParse(c.req.header('X-Upload-Id'))
+      if (!id.success) throw new InboxError('INVALID_REQUEST', 'Invalid upload ID')
+      const body = await readLimitedRequestBody(c.req.raw, MAX_MEDIA_BYTES)
+      if (!body)
+        return c.json({ error: { code: 'MEDIA_TOO_LARGE', message: 'Media is too large' } }, 413)
+      let validated: ReturnType<typeof validateMediaFile>
+      try {
+        validated = validateMediaFile(
+          decodeURIComponent(c.req.header('X-Filename') ?? ''),
+          c.req.header('Content-Type') ?? '',
+          new Uint8Array(body),
+        )
+      } catch {
+        throw new InboxError('INVALID_REQUEST', 'Unsupported media type, signature or size')
+      }
+      const sha256 = await sha256Hex(body)
+      const storageKey = `media/${context.workspaceId}/${id.data}/${sha256}`
+      await createObjectStorage(c.env.OBJECTS).put(
+        storageKey,
+        new Uint8Array(body),
+        validated.mimeType,
+      )
+      const result = await createMediaAsset(db, {
+        ...context,
+        asset: {
+          ...validated,
+          id: id.data,
+          workspaceId: context.workspaceId,
+          title: validated.filename,
+          sha256,
+          storageKey,
+          byteSize: body.byteLength,
+          inLibrary: c.req.header('X-Library') === 'true',
+        },
+      })
+      return c.json(result, 201)
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.get('/api/workspaces/:workspaceId/media-assets/:assetId/file', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      const asset = await getMediaAsset(db, {
+        workspaceId: c.req.param('workspaceId'),
+        userId: session.user.id,
+        assetId: c.req.param('assetId'),
+      })
+      if (!c.env.OBJECTS) return notReady(c)
+      const object = await createObjectStorage(c.env.OBJECTS).get(asset.storageKey)
+      if (!object) throw new InboxError('NOT_FOUND', 'Media is unavailable')
+      return new Response(object.body, {
+        headers: {
+          'Cache-Control': 'private, no-store',
+          'X-Content-Type-Options': 'nosniff',
+          'Content-Type': safeContentType(asset.mimeType),
+          'Content-Disposition': contentDisposition(asset.filename, asset.kind),
+        },
+      })
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.on(['PATCH', 'DELETE'], '/api/workspaces/:workspaceId/media-assets/:assetId', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      const parsed = z
+        .object({
+          title: z.string().trim().min(1).max(100).optional(),
+          inLibrary: z.boolean().optional(),
+        })
+        .strict()
+        .safeParse(c.req.method === 'DELETE' ? {} : await c.req.json().catch(() => null))
+      if (!parsed.success || (c.req.method === 'PATCH' && !Object.keys(parsed.data).length))
+        throw new InboxError('INVALID_REQUEST', 'Invalid media metadata')
+      return c.json(
+        await updateMediaAsset(db, {
+          workspaceId: c.req.param('workspaceId'),
+          userId: session.user.id,
+          assetId: c.req.param('assetId'),
+          ...parsed.data,
+          deleted: c.req.method === 'DELETE',
+        }),
+      )
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.on(['GET', 'POST'], '/api/workspaces/:workspaceId/reply-templates', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const context = { workspaceId: c.req.param('workspaceId'), userId: session.user.id }
+    try {
+      if (c.req.method === 'GET')
+        return c.json(
+          await listReplyTemplates(db, { ...context, query: c.req.query('query')?.slice(0, 200) }),
+        )
+      const parsed = z
+        .object({
+          title: z.string().trim().min(1).max(100),
+          text: z.string().trim().min(1).max(2000),
+        })
+        .strict()
+        .safeParse(await c.req.json().catch(() => null))
+      if (!parsed.success) throw new InboxError('INVALID_REQUEST', 'Invalid reply template')
+      return c.json(await saveReplyTemplate(db, { ...context, ...parsed.data }), 201)
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.on(['PUT', 'DELETE'], '/api/workspaces/:workspaceId/reply-templates/:templateId', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const context = {
+      workspaceId: c.req.param('workspaceId'),
+      userId: session.user.id,
+      id: c.req.param('templateId'),
+    }
+    try {
+      if (c.req.method === 'DELETE') return c.json(await deleteReplyTemplate(db, context))
+      const parsed = z
+        .object({
+          title: z.string().trim().min(1).max(100),
+          text: z.string().trim().min(1).max(2000),
+        })
+        .strict()
+        .safeParse(await c.req.json().catch(() => null))
+      if (!parsed.success) throw new InboxError('INVALID_REQUEST', 'Invalid reply template')
+      return c.json(await saveReplyTemplate(db, { ...context, ...parsed.data }))
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
+
+app.post(
+  '/api/workspaces/:workspaceId/conversations/:conversationId/messages/:messageId/retry',
+  async (c) => {
+    if (!hasAuthBindings(c.env)) return notReady(c)
+    return withDatabase(c.env, async (db) => {
+      const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+      if (!session) return unauthorized(c)
+      const limited = await rateLimit(c, `outbound-retry:${session.user.id}`)
+      if (limited) return limited
+      try {
+        const result = await retryFacebookHumanReply(db, {
+          workspaceId: c.req.param('workspaceId'),
+          conversationId: c.req.param('conversationId'),
+          actingUserId: session.user.id,
+          messageId: c.req.param('messageId'),
+        })
+        if (result.message.deliveryState === 'PENDING')
+          await enqueueOutboundMessage(c.env, result.message.id)
+        await publishInboxChange(
+          c.env,
+          c.req.param('workspaceId'),
+          result.message.id,
+          'message.changed',
+        )
+        return c.json(result)
+      } catch (error) {
+        return replyErrorResponse(c, error)
+      }
+    })
+  },
+)
+
 app.put('/api/workspaces/:workspaceId/conversations/:conversationId/mute', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
   return withDatabase(c.env, async (db) => {
@@ -1507,7 +1728,7 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/replies', a
         workspaceId: c.req.param('workspaceId'),
         conversationId: c.req.param('conversationId'),
         actingUserId: session.user.id,
-        text: input.data.text,
+        ...input.data,
       })
       await enqueueOutboundMessage(c.env, created.message.id)
       await publishInboxChange(
@@ -2319,6 +2540,7 @@ function assignmentErrorResponse(c: Context<{ Bindings: Bindings }>, error: unkn
 }
 
 function replyErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
+  if (error instanceof InboxError) return inboxErrorResponse(c, error)
   if (!(error instanceof ReplyError)) throw error
   const status =
     error.code === 'FORBIDDEN'
@@ -3389,6 +3611,7 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
 
     let pageAccessToken = ''
     let recipientId = ''
+    let recipientSendStarted = false
     try {
       const facebookDelivery = await withDatabase(env, (db) =>
         getFacebookOutboundDelivery(db, claimed.id),
@@ -3409,7 +3632,6 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
         queueMessage.ack()
         continue
       }
-      if (!claimed.text) throw new Error('Outbound text is missing')
 
       pageAccessToken = await decryptFacebookToken(
         {
@@ -3419,17 +3641,50 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
         },
         env.TOKEN_ENCRYPTION_KEY,
       )
-      const sent = await createFacebookAdapter({
+      const adapter = createFacebookAdapter({
         appId: env.META_APP_ID,
         appSecret: env.META_APP_SECRET,
         graphApiVersion: env.META_GRAPH_API_VERSION,
         graphBaseUrl: env.FACEBOOK_GRAPH_BASE_URL,
-      }).sendText(
-        facebookDelivery.pageId,
-        facebookDelivery.externalUserId,
-        claimed.text ?? '',
-        pageAccessToken,
-      )
+      })
+      let sent: { externalMessageId: string }
+      if (claimed.messageType === 'ATTACHMENT') {
+        const attachment = await withDatabase(env, (db) => getFacebookOutboundMedia(db, claimed.id))
+        if (!attachment?.storageKey || !env.OBJECTS) throw new Error('Private media is unavailable')
+        let providerAttachmentId = attachment.providerAttachmentId
+        if (!providerAttachmentId) {
+          const object = await createObjectStorage(env.OBJECTS).get(attachment.storageKey)
+          if (!object) throw new Error('Private media is unavailable')
+          const bytes = await new Response(object.body).arrayBuffer()
+          const uploadedId = await adapter.uploadAttachment(
+            facebookDelivery.pageId,
+            attachment.kind,
+            new File([bytes], attachment.filename ?? 'attachment', {
+              type: attachment.mimeType ?? 'application/octet-stream',
+            }),
+            pageAccessToken,
+          )
+          await withDatabase(env, (db) => storeFacebookMediaUpload(db, attachment.id, uploadedId))
+          providerAttachmentId = uploadedId
+        }
+        recipientSendStarted = true
+        sent = await adapter.sendAttachment(
+          facebookDelivery.pageId,
+          recipientId,
+          attachment.kind,
+          providerAttachmentId,
+          pageAccessToken,
+        )
+      } else {
+        if (!claimed.text) throw new Error('Outbound text is missing')
+        recipientSendStarted = true
+        sent = await adapter.sendText(
+          facebookDelivery.pageId,
+          recipientId,
+          claimed.text,
+          pageAccessToken,
+        )
+      }
       await withDatabase(env, (db) =>
         completeOutboundMessage(db, {
           messageId: claimed.id,
@@ -3454,9 +3709,15 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
         subcode: error instanceof FacebookProviderError ? error.providerSubcode : null,
         type: error instanceof FacebookProviderError ? error.providerType : null,
         message: providerFailure.message,
+        retryNotBefore:
+          error instanceof FacebookProviderError && error.retryAfterSeconds !== null
+            ? new Date(Date.now() + error.retryAfterSeconds * 1000)
+            : null,
       }
-      const ambiguous = error instanceof FacebookProviderError && error.status === 0
-      if (isRetryableFacebookFailure(error)) {
+      const preparationFailure = claimed.messageType === 'ATTACHMENT' && !recipientSendStarted
+      const ambiguous =
+        !preparationFailure && error instanceof FacebookProviderError && error.status === 0
+      if (claimed.messageType !== 'ATTACHMENT' && isRetryableFacebookFailure(error)) {
         try {
           await withDatabase(env, (db) =>
             releaseOutboundMessage(db, {
@@ -3474,7 +3735,11 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
           failOutboundMessage(db, {
             messageId: claimed.id,
             attemptId: claimed.attemptId,
-            failureCode: ambiguous ? 'AMBIGUOUS_DELIVERY' : 'FACEBOOK_DELIVERY_FAILED',
+            failureCode: ambiguous
+              ? 'AMBIGUOUS_DELIVERY'
+              : preparationFailure
+                ? 'FACEBOOK_MEDIA_PREPARATION_FAILED'
+                : 'FACEBOOK_DELIVERY_FAILED',
             failureMessage: ambiguous
               ? 'Delivery result was ambiguous'
               : 'Facebook delivery failed',

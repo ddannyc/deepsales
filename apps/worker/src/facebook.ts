@@ -38,6 +38,7 @@ export class FacebookProviderError extends Error {
     readonly providerSubcode: number | null,
     readonly providerType: string | null,
     readonly providerMessage: string,
+    readonly retryAfterSeconds: number | null = null,
   ) {
     super('Facebook provider request failed')
   }
@@ -140,6 +141,60 @@ export function createFacebookAdapter(
       ) {
         throw invalidProviderResponse()
       }
+    },
+
+    async uploadAttachment(
+      pageId: string,
+      kind: FacebookAttachmentKind,
+      file: File,
+      pageAccessToken: string,
+    ) {
+      const form = new FormData()
+      form.set(
+        'message',
+        JSON.stringify({
+          attachment: { type: kind.toLowerCase(), payload: { is_reusable: true } },
+        }),
+      )
+      form.set('filedata', file)
+      const result = await graphRequest(
+        fetcher,
+        new URL(`${graphBase}/${encodeURIComponent(pageId)}/message_attachments`),
+        { method: 'POST', headers: { Authorization: `Bearer ${pageAccessToken}` }, body: form },
+      )
+      const uploaded = z.object({ attachment_id: z.string().min(1) }).safeParse(result)
+      if (!uploaded.success) throw invalidProviderResponse()
+      return uploaded.data.attachment_id
+    },
+
+    async sendAttachment(
+      pageId: string,
+      externalUserId: string,
+      kind: FacebookAttachmentKind,
+      attachmentId: string,
+      pageAccessToken: string,
+    ) {
+      const result = await graphRequest(
+        fetcher,
+        new URL(`${graphBase}/${encodeURIComponent(pageId)}/messages`),
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${pageAccessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            recipient: { id: externalUserId },
+            messaging_type: 'RESPONSE',
+            message: {
+              attachment: { type: kind.toLowerCase(), payload: { attachment_id: attachmentId } },
+            },
+          }),
+        },
+      )
+      const sent = z.object({ message_id: z.string().min(1) }).safeParse(result)
+      if (!sent.success) throw invalidProviderResponse()
+      return { externalMessageId: sent.data.message_id }
     },
 
     async sendText(
@@ -482,9 +537,18 @@ async function graphRequest(fetcher: Fetcher, url: URL, init: RequestInit): Prom
       numberOrNull(error.error_subcode),
       stringOrNull(error.type),
       stringOrNull(error.message) ?? 'Facebook request failed',
+      parseRetryAfter(response.headers.get('Retry-After')),
     )
   }
   return result
+}
+
+function parseRetryAfter(value: string | null): number | null {
+  if (!value) return null
+  const seconds = /^\d+$/.test(value.trim())
+    ? Number(value)
+    : Math.ceil((Date.parse(value) - Date.now()) / 1000)
+  return Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds, 2_147_483_647) : null
 }
 
 function isGraphError(value: unknown): value is { error: Record<string, unknown> } {

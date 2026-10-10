@@ -1,0 +1,1 @@
+ALTER TABLE "facebook_delivery_attempt" ADD COLUMN "retry_not_before" timestamp with time zone;

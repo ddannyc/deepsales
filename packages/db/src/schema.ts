@@ -657,6 +657,7 @@ export const message = pgTable(
     senderType: messageSenderType('sender_type').notNull(),
     senderMemberId: uuid('sender_member_id').references(() => member.id, { onDelete: 'set null' }),
     messageType: messageType('message_type').default('TEXT').notNull(),
+    clientKey: uuid('client_key'),
     text: text(),
     externalMessageId: text('external_message_id'),
     providerSentAt: timestamp('provider_sent_at', { withTimezone: true }),
@@ -670,6 +671,11 @@ export const message = pgTable(
   },
   (table) => [
     index('message_conversation_created_idx').on(table.conversationId, table.createdAt, table.id),
+    uniqueIndex('message_human_retry_idx').on(
+      table.conversationId,
+      table.senderMemberId,
+      table.clientKey,
+    ),
     index('message_delivery_recovery_idx').on(
       table.direction,
       table.deliveryState,
@@ -791,6 +797,7 @@ export const messageAttachment = pgTable(
     messageId: uuid('message_id')
       .notNull()
       .references(() => message.id, { onDelete: 'cascade' }),
+    assetId: uuid('asset_id').references(() => mediaAsset.id, { onDelete: 'set null' }),
     kind: messageAttachmentKind().notNull(),
     filename: text(),
     mimeType: text('mime_type'),
@@ -811,6 +818,49 @@ export const messageAttachment = pgTable(
     ),
     check('message_attachment_byte_size', sql`${table.byteSize} is null or ${table.byteSize} >= 0`),
   ],
+)
+
+export const mediaAsset = pgTable(
+  'media_asset',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    title: text().notNull(),
+    filename: text().notNull(),
+    kind: messageAttachmentKind().notNull(),
+    mimeType: text('mime_type').notNull(),
+    byteSize: integer('byte_size').notNull(),
+    sha256: text().notNull(),
+    storageKey: text('storage_key').notNull(),
+    inLibrary: boolean('in_library').default(false).notNull(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('media_asset_workspace_idx').on(t.workspaceId, t.inLibrary, t.deletedAt)],
+)
+
+export const facebookMediaUpload = pgTable('facebook_media_upload', {
+  attachmentId: uuid('attachment_id')
+    .primaryKey()
+    .references(() => messageAttachment.id, { onDelete: 'cascade' }),
+  providerAttachmentId: text('provider_attachment_id').notNull(),
+})
+
+export const replyTemplate = pgTable(
+  'reply_template',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    title: text().notNull(),
+    text: text().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('reply_template_workspace_idx').on(t.workspaceId)],
 )
 
 export const facebookAttachmentSource = pgTable(
@@ -838,6 +888,7 @@ export const deliveryAttempt = pgTable(
       .references(() => message.id, { onDelete: 'cascade' }),
     attemptNumber: integer('attempt_number').notNull(),
     httpStatus: integer('http_status'),
+    retryNotBefore: timestamp('retry_not_before', { withTimezone: true }),
     code: integer(),
     subcode: integer(),
     type: text(),

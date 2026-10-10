@@ -37,6 +37,7 @@ import {
 } from 'react'
 import { createRoot } from 'react-dom/client'
 import { InternalNotes } from './internal-notes'
+import { ReplyContent } from './reply-content'
 import { InboxFilterControls, inboxQuery, type InboxFilters } from './inbox-filters'
 import { toast } from 'sonner'
 import {
@@ -2015,6 +2016,30 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                         message={message}
                         teamMembers={teamMembers}
                         workspaceId={workspace.id}
+                        onRetry={
+                          message.deliveryState === 'FAILED' &&
+                          message.failureCode !== 'AMBIGUOUS_DELIVERY' &&
+                          message.senderMemberId === workspace.memberId &&
+                          selectedConversation.assigneeMemberId === workspace.memberId &&
+                          replyWindowOpen &&
+                          !actionLoading
+                            ? async () => {
+                                setActionLoading(true)
+                                try {
+                                  await request(
+                                    `/api/workspaces/${workspace.id}/conversations/${selectedId}/messages/${message.id}/retry`,
+                                    {},
+                                  )
+                                  await refreshThread(selectedId)
+                                  await refresh()
+                                } catch (cause) {
+                                  setError(inboxErrorMessage(cause))
+                                } finally {
+                                  setActionLoading(false)
+                                }
+                              }
+                            : undefined
+                        }
                       />
                     ))
                   ) : (
@@ -2023,6 +2048,24 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                 </div>
               )}
             </ScrollArea>
+            <ReplyContent
+              key={`content:${selectedId}`}
+              workspaceId={workspace.id}
+              conversationId={selectedId}
+              canSend={
+                !actionLoading &&
+                selectedConversation.status === 'OPEN' &&
+                selectedConversation.assigneeMemberId === workspace.memberId &&
+                selectedConversation.assigneeType === 'HUMAN' &&
+                replyWindowOpen
+              }
+              onText={setReply}
+              onEmoji={() => setReply((current) => `${current}😊`)}
+              onSent={async () => {
+                await refresh()
+                await refreshThread(selectedId)
+              }}
+            />
             <ConversationComposer
               closed={selectedConversation.status === 'CLOSED'}
               actionLoading={actionLoading}
@@ -2348,10 +2391,12 @@ function MessageBubble({
   message,
   teamMembers,
   workspaceId,
+  onRetry,
 }: {
   message: InboxMessage
   teamMembers: TeamMember[]
   workspaceId: string
+  onRetry?: () => Promise<void>
 }) {
   const inbound = message.direction === 'INBOUND'
   const senderMember = message.senderMemberId
@@ -2388,6 +2433,11 @@ function MessageBubble({
       )}
       {message.deliveryState === 'FAILED' && (
         <span className="delivery-failure">{deliveryFailureLabel(message.failureCode)}</span>
+      )}
+      {onRetry && (
+        <Button type="button" variant="ghost" onClick={() => void onRetry()}>
+          检查并重试发送
+        </Button>
       )}
     </article>
   )
@@ -4639,6 +4689,8 @@ function inboxErrorMessage(cause: unknown): string {
       ALREADY_ASSIGNED: '该对话已被其他成员接管。',
       CONVERSATION_CLOSED: '该对话已关闭。',
       REPLY_WINDOW_CLOSED: 'Messenger 回复窗口已关闭。',
+      RETRY_NOT_READY: '重试间隔至少为首次 30 秒、再次 120 秒；渠道要求更长时请继续等待。',
+      RETRY_LIMIT_REACHED: '该消息已用完两次重试机会，请检查渠道配置。',
     }[cause.code] ?? '收件箱加载失败，请稍后重试。'
   )
 }

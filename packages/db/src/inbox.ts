@@ -472,7 +472,7 @@ export async function listConversations(
   if (!input.includeClosed)
     filters.push(eq(conversation.status, input.view === 'closed' ? 'CLOSED' : 'OPEN'))
   const unread = sql<boolean>`exists (select 1 from message input where input.conversation_id = ${conversation.id} and input.sender_type = 'CUSTOMER' and not exists (select 1 from ${messageMemberRead} r where r.member_id = ${viewer.memberId} and r.message_id = input.id))`
-  const unanswered = sql<boolean>`exists (select 1 from message input where input.id = ${conversation.lastCustomerMessageId} and not exists (select 1 from message reply where reply.conversation_id = ${conversation.id} and reply.direction = 'OUTBOUND' and reply.sender_type = 'MEMBER' and reply.delivery_state = 'SENT' and length(btrim(coalesce(reply.text, ''))) > 0 and (reply.created_at, reply.id) > (input.created_at, input.id)))`
+  const unanswered = sql<boolean>`exists (select 1 from message input where input.id = ${conversation.lastCustomerMessageId} and not exists (select 1 from message reply where reply.conversation_id = ${conversation.id} and reply.direction = 'OUTBOUND' and reply.sender_type = 'MEMBER' and reply.delivery_state = 'SENT' and (length(btrim(coalesce(reply.text, ''))) > 0 or reply.message_type = 'ATTACHMENT') and (reply.created_at, reply.id) > (input.created_at, input.id)))`
   if (input.attention === 'unread') filters.push(unread)
   const muted = sql<boolean>`exists (select 1 from ${conversationMemberMute} m where m.member_id = ${viewer.memberId} and m.conversation_id = ${conversation.id})`
   if (input.mute === 'muted') filters.push(muted)
