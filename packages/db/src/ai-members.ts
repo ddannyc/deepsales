@@ -38,6 +38,8 @@ type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 type QueryHandle = Database | Transaction
 
 export type AiMemberConfig = {
+  automaticLanguageEnabled: boolean
+  timeZone: string
   naturalToneEnabled: boolean
   replyWaitEnabled: boolean
   memberId: string
@@ -61,6 +63,8 @@ export type AiMemberConfig = {
 }
 
 export type UpdateAiMemberConfigInput = {
+  automaticLanguageEnabled?: boolean
+  timeZone?: string
   naturalToneEnabled?: boolean
   replyWaitEnabled?: boolean
   workspaceId: string
@@ -112,6 +116,8 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
     } else {
       await tx.insert(aiMemberConfig).values({
         memberId: target.id,
+        automaticLanguageEnabled: draft.automaticLanguageEnabled ?? false,
+        timeZone: draft.timeZone ?? 'UTC',
         instructions: draft.instructions ?? '',
         responseLanguage: draft.responseLanguage ?? '',
         knowledgeBaseId: draft.knowledgeBaseId ?? null,
@@ -178,6 +184,8 @@ export async function publishAiMemberConfig(
     }
 
     const snapshot: AiMemberRuntimeSnapshot = {
+      automaticLanguageEnabled: config.automaticLanguageEnabled,
+      timeZone: config.timeZone,
       instructions: config.instructions,
       responseLanguage: config.responseLanguage,
       knowledgeBaseId: config.knowledgeBaseId,
@@ -251,6 +259,8 @@ async function selectAiMemberConfig(
       memberDisplayName: member.displayName,
       memberStatus: member.status,
       configMemberId: aiMemberConfig.memberId,
+      automaticLanguageEnabled: aiMemberConfig.automaticLanguageEnabled,
+      timeZone: aiMemberConfig.timeZone,
       instructions: aiMemberConfig.instructions,
       responseLanguage: aiMemberConfig.responseLanguage,
       knowledgeBaseId: aiMemberConfig.knowledgeBaseId,
@@ -279,6 +289,8 @@ async function selectAiMemberConfig(
     memberDisplayName: row.memberDisplayName,
     memberStatus: row.memberStatus,
     instructions: row.instructions ?? '',
+    automaticLanguageEnabled: row.automaticLanguageEnabled ?? false,
+    timeZone: row.timeZone ?? 'UTC',
     responseLanguage: row.responseLanguage ?? '',
     knowledgeBaseId: row.knowledgeBaseId ?? null,
     handoffOnCustomerRequest: row.handoffOnCustomerRequest ?? true,
@@ -399,6 +411,8 @@ export async function restoreAiConfigVersion(
       .update(aiMemberConfig)
       .set({
         ...version.snapshot,
+        automaticLanguageEnabled: version.snapshot.automaticLanguageEnabled ?? false,
+        timeZone: version.snapshot.timeZone ?? 'UTC',
         adLearningEnabled: version.snapshot.adLearningEnabled ?? false,
         adMappings: version.snapshot.adMappings ?? [],
         naturalToneEnabled: version.snapshot.naturalToneEnabled ?? false,
@@ -424,6 +438,8 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
     input.handoffKeywords === undefined ? undefined : normalizeKeywords(input.handoffKeywords)
   return {
     instructions,
+    automaticLanguageEnabled: input.automaticLanguageEnabled,
+    timeZone: input.timeZone === undefined ? undefined : normalizeAiTimeZone(input.timeZone),
     responseLanguage,
     knowledgeBaseId: input.knowledgeBaseId,
     handoffOnCustomerRequest: input.handoffOnCustomerRequest,
@@ -467,6 +483,8 @@ function cleanText(value: string, maxCodePoints: number, label: string) {
 
 function defaultConfig(memberId: string) {
   return {
+    automaticLanguageEnabled: false,
+    timeZone: 'UTC',
     memberId,
     instructions: '',
     responseLanguage: '',
@@ -486,6 +504,20 @@ function defaultConfig(memberId: string) {
     runtimeError: null,
     createdAt: new Date(),
     updatedAt: new Date(),
+  }
+}
+
+export function normalizeAiTimeZone(value: string) {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)*$/.test(value.trim()) ||
+    value.length > 100
+  )
+    throw new AiMemberError('INVALID_REQUEST', 'Time zone is invalid')
+  try {
+    return new Intl.DateTimeFormat('en', { timeZone: value.trim() }).resolvedOptions().timeZone
+  } catch {
+    throw new AiMemberError('INVALID_REQUEST', 'Time zone is invalid')
   }
 }
 

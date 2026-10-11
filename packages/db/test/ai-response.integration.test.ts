@@ -37,6 +37,75 @@ describe.skipIf(!connectionString)('AI response runs', () => {
 
   afterAll(() => pool.end())
 
+  it('retains the automatic language across runs and commits a requested switch only for current input', async () => {
+    const f = await createFixture(db)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      automaticLanguageEnabled: true,
+      replyWaitEnabled: false,
+      timeZone: 'America/New_York',
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const start = new Date()
+    const first = await receive(db, f, 'I need help with my account.', start)
+    const routed = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: first.conversationId,
+      now: start,
+    })
+    const runId = routed.aiResponseRunId as string
+    expect(await claimAiResponseRun(db, { runId, now: start })).toMatchObject({
+      replyLanguage: null,
+      publishedSnapshot: { automaticLanguageEnabled: true, timeZone: 'America/New_York' },
+    })
+    await commitAiResponse(db, {
+      runId,
+      text: 'How can I help?',
+      languageSelection: { language: 'en', explicitSwitch: false },
+    })
+    const next = await receive(db, f, 'Please reply in French.', new Date(start.getTime() + 3000))
+    const nextRun = next.aiResponseRunId as string
+    expect(
+      await claimAiResponseRun(db, { runId: nextRun, now: new Date(start.getTime() + 3000) }),
+    ).toMatchObject({ replyLanguage: 'en' })
+    const later = await receive(
+      db,
+      f,
+      'Please keep using English.',
+      new Date(start.getTime() + 4000),
+    )
+    expect(
+      await commitAiResponse(db, {
+        runId: nextRun,
+        text: 'Bonjour.',
+        languageSelection: { language: 'fr', explicitSwitch: true },
+      }),
+    ).toBeNull()
+    const lastRun = later.aiResponseRunId as string
+    expect(
+      await claimAiResponseRun(db, { runId: lastRun, now: new Date(start.getTime() + 4000) }),
+    ).toMatchObject({ replyLanguage: 'en' })
+    await commitAiResponse(db, {
+      runId: lastRun,
+      text: 'Bien sûr.',
+      languageSelection: { language: 'fr', explicitSwitch: true },
+    })
+    const lowInfo = await receive(db, f, '🙂', new Date(start.getTime() + 5000))
+    expect(
+      await claimAiResponseRun(db, {
+        runId: lowInfo.aiResponseRunId as string,
+        now: new Date(start.getTime() + 5000),
+      }),
+    ).toMatchObject({ replyLanguage: 'fr' })
+  })
+
   it.each(['existing', 'new'])(
     'uses the published wait setting during a concurrent %s run update',
     async (kind) => {

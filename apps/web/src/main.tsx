@@ -293,6 +293,8 @@ type KnowledgeDocument = {
 }
 
 type AiMemberRuntimeSnapshot = {
+  automaticLanguageEnabled?: boolean
+  timeZone?: string
   naturalToneEnabled?: boolean
   replyWaitEnabled?: boolean
   adLearningEnabled?: boolean
@@ -308,6 +310,8 @@ type AiMemberRuntimeSnapshot = {
 }
 
 type AiMemberConfig = {
+  automaticLanguageEnabled: boolean
+  timeZone: string
   naturalToneEnabled: boolean
   replyWaitEnabled: boolean
   adLearningEnabled: boolean
@@ -344,6 +348,8 @@ type AiMemberDraft = Pick<
   | 'adMappings'
   | 'naturalToneEnabled'
   | 'replyWaitEnabled'
+  | 'automaticLanguageEnabled'
+  | 'timeZone'
 >
 
 class ApiError extends Error {
@@ -3954,6 +3960,44 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                 发布前需要填写。说明 AI 应如何回答客户问题。
               </span>
             </label>
+            <div className="switch-field">
+              <div>
+                <span className="form-field-label" id="ai-auto-language-label">
+                  自动回复语言
+                </span>
+                <p className="field-description" id="ai-auto-language-help">
+                  从早期有效客户文字确定语言并沿用；客户明确要求时切换。数字、表情或简短问候不改变语言，无法识别时使用下方回复语言。
+                </p>
+              </div>
+              <Switch
+                aria-labelledby="ai-auto-language-label"
+                aria-describedby="ai-auto-language-help"
+                checked={draft.automaticLanguageEnabled}
+                disabled={busy}
+                onCheckedChange={(value) =>
+                  setDraft((current) =>
+                    current ? { ...current, automaticLanguageEnabled: value } : current,
+                  )
+                }
+              />
+            </div>
+            <label className="form-field" htmlFor="ai-time-zone">
+              <span className="form-field-label">当前时间时区</span>
+              <Input
+                id="ai-time-zone"
+                disabled={busy}
+                name="timeZone"
+                value={draft.timeZone}
+                maxLength={100}
+                onChange={(event) => {
+                  const value = event.currentTarget.value
+                  setDraft((current) => (current ? { ...current, timeZone: value } : current))
+                }}
+              />
+              <span className="field-description">
+                使用服务端当前时间。填写 UTC 或 Asia/Hong_Kong 等时区；保存并发布后生效。
+              </span>
+            </label>
             <div className="form-grid-two">
               <label className="form-field" htmlFor="ai-response-language">
                 <span className="form-field-label">回复语言</span>
@@ -3969,7 +4013,9 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                     )
                   }}
                 />
-                <span className="field-description">发布前需要填写。</span>
+                <span className="field-description">
+                  发布前需要填写。固定模式使用此语言；自动模式在尚未确定语言时使用此回退。
+                </span>
               </label>
               <div className="form-field">
                 <span className="form-field-label" id="ai-knowledge-base-label">
@@ -4250,6 +4296,14 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                   <dd>{config.publishedSnapshot.responseLanguage}</dd>
                 </div>
                 <div>
+                  <dt>自动回复语言</dt>
+                  <dd>{config.publishedSnapshot.automaticLanguageEnabled ? '启用' : '停用'}</dd>
+                </div>
+                <div>
+                  <dt>当前时间时区</dt>
+                  <dd>{config.publishedSnapshot.timeZone ?? 'UTC'}</dd>
+                </div>
+                <div>
                   <dt>知识库</dt>
                   <dd>
                     {knowledgeBases.find(
@@ -4347,6 +4401,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.adMappings ?? [],
       left.naturalToneEnabled ?? false,
       left.replyWaitEnabled ?? true,
+      left.automaticLanguageEnabled ?? false,
+      left.timeZone ?? 'UTC',
     ]) ===
     JSON.stringify([
       right.instructions,
@@ -4361,6 +4417,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       right.adMappings ?? [],
       right.naturalToneEnabled ?? false,
       right.replyWaitEnabled ?? true,
+      right.automaticLanguageEnabled ?? false,
+      right.timeZone ?? 'UTC',
     ])
   )
 }
@@ -4370,6 +4428,8 @@ function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
     instructions: config.instructions,
     naturalToneEnabled: config.naturalToneEnabled ?? false,
     replyWaitEnabled: config.replyWaitEnabled ?? true,
+    automaticLanguageEnabled: config.automaticLanguageEnabled ?? false,
+    timeZone: config.timeZone ?? 'UTC',
     adLearningEnabled: config.adLearningEnabled ?? false,
     adMappings: config.adMappings ?? [],
     responseLanguage: config.responseLanguage,

@@ -186,6 +186,8 @@ export function aiOperationsRoutes(
               fetcher,
             )
             const decision = await llm.generateResponse({
+              automaticLanguageEnabled: snapshot.automaticLanguageEnabled,
+              timeZone: snapshot.timeZone,
               naturalToneEnabled: snapshot.naturalToneEnabled,
               instructions: snapshot.instructions,
               responseLanguage: snapshot.responseLanguage,
@@ -193,13 +195,19 @@ export function aiOperationsRoutes(
               history: [],
               knowledgeChunks: chunks.map(({ id, text }) => ({ id, text })),
             })
+            const replyConfig = {
+              ...snapshot,
+              responseLanguage: snapshot.automaticLanguageEnabled
+                ? (decision.languageSelection?.language ?? snapshot.responseLanguage)
+                : snapshot.responseLanguage,
+            }
             const result = applyHandoffPolicy(
               enforceGrounding(
                 decision,
                 chunks.map(({ id }) => id),
-                snapshot,
+                replyConfig,
               ).decision,
-              snapshot,
+              replyConfig,
             )
             await recordAiTestResult(db, {
               id: input.id,

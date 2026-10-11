@@ -396,6 +396,9 @@ async function startFakeAI() {
                 handoffReason: null,
                 containsBusinessFacts: Boolean(chunkId),
                 usedChunkIds: chunkId ? [chunkId] : [],
+                ...(body.messages?.[0]?.content.includes('Automatic language mode.')
+                  ? { languageSelection: null }
+                  : {}),
               }),
             },
           },

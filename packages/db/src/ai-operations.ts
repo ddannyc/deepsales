@@ -336,6 +336,8 @@ export async function createAiTest(
   let versionId: string | null = null
   if (input.source === 'DRAFT' && config.knowledgeBaseId)
     snapshot = {
+      automaticLanguageEnabled: config.automaticLanguageEnabled,
+      timeZone: config.timeZone,
       instructions: config.instructions,
       responseLanguage: config.responseLanguage,
       knowledgeBaseId: config.knowledgeBaseId,

@@ -51,6 +51,10 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await expect(page.getByRole('heading', { name: 'Answer Bot', exact: true })).toBeVisible()
     await page.locator('#ai-instructions').fill('Answer from support facts only.')
     await page.locator('#ai-response-language').fill('English')
+    await expect(page.getByRole('switch', { name: '自动回复语言', exact: true })).not.toBeChecked()
+    await expect(page.locator('#ai-time-zone')).toHaveValue('UTC')
+    await page.getByRole('switch', { name: '自动回复语言', exact: true }).click()
+    await page.locator('#ai-time-zone').fill('America/New_York')
     await page.getByRole('combobox', { name: '知识库' }).click()
     await page.getByRole('option', { name: 'Support facts' }).click()
     await page.locator('#ai-handoff-keywords').fill('Human, agent')
@@ -67,7 +71,25 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await upload([{ adId: '123456', content: 'Lamp reference.' }])
     await expect(page.locator('#ai-ad-preview')).toContainText('Lamp reference.')
     await expect(page.getByRole('button', { name: '发布', exact: true })).toBeDisabled()
-    await page.getByRole('button', { name: '保存草稿' }).click()
+    let releaseDraftSave = () => {}
+    const saveGate = new Promise<void>((resolve) => {
+      releaseDraftSave = resolve
+    })
+    const configRoute = `**/api/workspaces/${workspace.id}/ai-members/${member.id}/config`
+    await page.route(
+      configRoute,
+      async (route) => {
+        await saveGate
+        await route.continue()
+      },
+      { times: 1 },
+    )
+    try {
+      await page.getByRole('button', { name: '保存草稿' }).click()
+      await expect(page.locator('#ai-time-zone')).toBeDisabled()
+    } finally {
+      releaseDraftSave()
+    }
     await expect(
       page.locator('.ai-published-panel [data-runtime-status="UNPUBLISHED"]'),
     ).toBeVisible()
@@ -79,6 +101,8 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     )
     await expect(page.locator('.ai-published-panel')).toContainText('启用 · 1 条映射')
     await expect(page.locator('.ai-published-panel')).toContainText('自然语气启用')
+    await expect(page.locator('.ai-published-panel')).toContainText('自动回复语言启用')
+    await expect(page.locator('.ai-published-panel')).toContainText('America/New_York')
     await expect(page.locator('.ai-published-panel')).toContainText('等待合并输入停用')
     await page
       .locator('#ai-ad-upload')
@@ -99,6 +123,8 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     ).rejects.toThrow('Failed query')
 
     await page.locator('#ai-instructions').fill('Use the updated support policy.')
+    await page.getByRole('switch', { name: '自动回复语言', exact: true }).click()
+    await page.locator('#ai-time-zone').fill('Asia/Tokyo')
     await page.getByRole('switch', { name: '自然语气', exact: true }).click()
     await page.getByRole('switch', { name: '等待合并输入', exact: true }).click()
     await upload([{ adId: '789', content: 'Torch reference.' }])
@@ -118,6 +144,8 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await expect(history).toContainText('Answer from support facts only.')
     await history.getByRole('button', { name: '还原到草稿' }).click()
     await expect(page.locator('#ai-instructions')).toHaveValue('Answer from support facts only.')
+    await expect(page.getByRole('switch', { name: '自动回复语言', exact: true })).toBeChecked()
+    await expect(page.locator('#ai-time-zone')).toHaveValue('America/New_York')
     await expect(page.getByRole('switch', { name: '自然语气', exact: true })).toBeChecked()
     await expect(page.getByRole('switch', { name: '等待合并输入', exact: true })).not.toBeChecked()
     await expect(page.locator('#ai-ad-preview')).toContainText('Lamp reference.')

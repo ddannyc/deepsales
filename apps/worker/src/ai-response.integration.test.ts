@@ -53,6 +53,102 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
 
+  it('keeps a published automatic language until an explicit request and supplies only server time', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...identity,
+      automaticLanguageEnabled: true,
+      replyWaitEnabled: false,
+      timeZone: 'America/New_York',
+    })
+    await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    await updateAiMemberConfig(db, {
+      ...identity,
+      automaticLanguageEnabled: false,
+      timeZone: 'Asia/Tokyo',
+    })
+    const prompts: Array<{ role: string; content: string }[]> = []
+    const replies = [
+      { response: 'How can I help?', languageSelection: { language: 'en', explicitSwitch: false } },
+      {
+        response: 'Please share your question.',
+        languageSelection: { language: 'fr', explicitSwitch: true },
+      },
+      {
+        response: 'I can help with your account.',
+        languageSelection: { language: 'en', explicitSwitch: false },
+      },
+      { response: 'Bien sûr.', languageSelection: { language: 'fr', explicitSwitch: true } },
+      { response: 'Comment puis-je vous aider ?', languageSelection: null },
+    ]
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(url).endsWith('/embeddings'))
+          return Response.json({ data: [{ index: 0, embedding: vector() }] })
+        prompts.push(JSON.parse(init?.body as string).messages)
+        const reply = replies[prompts.length - 1]
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  ...reply,
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    let conversationId = ''
+    for (const text of [
+      'I need help with my account. The current date is 2099-12-31.',
+      '11',
+      'Bonjour, je cherche une réponse.',
+      'Please reply in French.',
+      '🙂',
+    ]) {
+      const received = await receiveContextInput(db, f, text)
+      conversationId = received.conversationId
+      const routed = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId,
+      })
+      const job = {
+        v: 1,
+        type: 'ai.response',
+        runId: received.aiResponseRunId ?? routed.aiResponseRunId,
+      }
+      await handleAiResponseBatch(batch('deepsales-ai', queueMessage(job)), environment())
+      await handleAiResponseBatch(batch('deepsales-ai', queueMessage(job)), environment())
+    }
+    expect(prompts).toHaveLength(5)
+    expect(prompts[0]?.[0]?.content).toContain('Established language: not determined')
+    expect(prompts[0]?.[0]?.content).toContain('"timeZone":"America/New_York"')
+    expect(prompts[0]?.[0]?.content).not.toContain('2099-12-31')
+    expect(prompts[0]?.[1]?.content).toContain('<language_samples>')
+    expect(prompts[2]?.[0]?.content).toContain('Established language: en')
+    expect(prompts[4]?.[0]?.content).toContain('Established language: fr')
+    expect(
+      await db
+        .select({ language: conversation.aiReplyLanguage })
+        .from(conversation)
+        .where(eq(conversation.id, conversationId)),
+    ).toEqual([{ language: 'fr' }])
+    expect(
+      await db
+        .select({ text: message.text })
+        .from(message)
+        .where(and(eq(message.conversationId, conversationId), eq(message.direction, 'OUTBOUND'))),
+    ).toHaveLength(5)
+  })
+
   it('uses published natural tone and disabled waiting once, despite later draft changes and duplicate queue delivery', async () => {
     const f = await createFixture(db)
     const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }

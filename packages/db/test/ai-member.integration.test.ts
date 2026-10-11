@@ -57,6 +57,8 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
       adMappings: original,
       naturalToneEnabled: true,
       replyWaitEnabled: false,
+      automaticLanguageEnabled: true,
+      timeZone: 'America/New_York',
     })
     const published = await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
     const versionId = published.publishedVersionId as string
@@ -66,6 +68,8 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
       adMappings: [],
       naturalToneEnabled: false,
       replyWaitEnabled: true,
+      automaticLanguageEnabled: false,
+      timeZone: 'Asia/Tokyo',
     })
     expect((await getAiMemberConfig(db, identity)).publishedSnapshot?.adMappings).toEqual(original)
     const restored = await restoreAiConfigVersion(db, { ...identity, versionId })
@@ -74,6 +78,8 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
       adMappings: original,
       naturalToneEnabled: true,
       replyWaitEnabled: false,
+      automaticLanguageEnabled: true,
+      timeZone: 'America/New_York',
     })
     const snapshot = published.publishedSnapshot
     if (!snapshot) throw new Error('No published snapshot')
@@ -82,6 +88,8 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
       adMappings: _mappings,
       naturalToneEnabled: _tone,
       replyWaitEnabled: _wait,
+      automaticLanguageEnabled: _auto,
+      timeZone: _zone,
       ...legacy
     } = snapshot
     const [old] = await db
@@ -93,6 +101,8 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
       adMappings: [],
       naturalToneEnabled: false,
       replyWaitEnabled: true,
+      automaticLanguageEnabled: false,
+      timeZone: 'UTC',
       publishedSnapshot: snapshot,
     })
   })

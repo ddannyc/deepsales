@@ -397,6 +397,7 @@ export const conversation = pgTable(
       .notNull()
       .references(() => channelIdentity.id, { onDelete: 'cascade' }),
     status: conversationStatus().default('OPEN').notNull(),
+    aiReplyLanguage: text('ai_reply_language'),
     assigneeMemberId: uuid('assignee_member_id').references(() => member.id, {
       onDelete: 'set null',
     }),
@@ -974,6 +975,8 @@ export const knowledgeBase = pgTable(
 )
 
 export type AiMemberRuntimeSnapshot = {
+  automaticLanguageEnabled?: boolean
+  timeZone?: string
   naturalToneEnabled?: boolean
   replyWaitEnabled?: boolean
   instructions: string
@@ -997,6 +1000,8 @@ export type AdvertisingContext = {
 }
 
 export const aiMemberConfig = pgTable('ai_member_config', {
+  automaticLanguageEnabled: boolean('automatic_language_enabled').default(false).notNull(),
+  timeZone: text('time_zone').default('UTC').notNull(),
   naturalToneEnabled: boolean('natural_tone_enabled').default(false).notNull(),
   replyWaitEnabled: boolean('reply_wait_enabled').default(true).notNull(),
   memberId: uuid('member_id')

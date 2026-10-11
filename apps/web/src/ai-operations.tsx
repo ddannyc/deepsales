@@ -752,6 +752,14 @@ function SnapshotPreview({ snapshot }: { snapshot: Record<string, unknown> | nul
   return (
     <dl className="runtime-details">
       <div>
+        <dt>自动回复语言</dt>
+        <dd>{snapshot.automaticLanguageEnabled ? '启用' : '停用'}</dd>
+      </div>
+      <div>
+        <dt>当前时间时区</dt>
+        <dd>{String(snapshot.timeZone ?? 'UTC')}</dd>
+      </div>
+      <div>
         <dt>指令</dt>
         <dd>{String(snapshot.instructions ?? '')}</dd>
       </div>

@@ -171,6 +171,7 @@ import {
   AIProviderError,
   applyHandoffPolicy,
   aiMemberRuntimeSnapshotSchema,
+  aiTimeZoneSchema,
   createAlibabaLlmProvider,
   createAlibabaEmbeddingProvider,
   DEFAULT_EMBEDDING_MODEL,
@@ -356,6 +357,8 @@ const knowledgeTextInput = z
   .strict()
 const aiMemberConfigInput = z
   .object({
+    automaticLanguageEnabled: z.boolean().optional(),
+    timeZone: aiTimeZoneSchema.optional(),
     instructions: z.string().max(20_000).optional(),
     responseLanguage: z.string().max(100).optional(),
     knowledgeBaseId: z.string().uuid().nullable().optional(),
@@ -3147,7 +3150,13 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
     try {
       const parsedSnapshot = aiMemberRuntimeSnapshotSchema.safeParse(claimed.publishedSnapshot)
       if (!parsedSnapshot.success) throw new AIOutputError()
-      const currentSnapshot = parsedSnapshot.data
+      const currentSnapshot = {
+        ...parsedSnapshot.data,
+        responseLanguage:
+          parsedSnapshot.data.automaticLanguageEnabled && claimed.replyLanguage
+            ? claimed.replyLanguage
+            : parsedSnapshot.data.responseLanguage,
+      }
       snapshot = currentSnapshot
 
       const configuredReason = detectConfiguredHandoff(claimed.inputMessages, currentSnapshot)
@@ -3254,6 +3263,11 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         meteredFetch,
       )
       const decision = await llmProvider.generateResponse({
+        automaticLanguageEnabled: currentSnapshot.automaticLanguageEnabled,
+        establishedLanguage: currentSnapshot.automaticLanguageEnabled
+          ? claimed.replyLanguage
+          : null,
+        timeZone: currentSnapshot.timeZone,
         naturalToneEnabled: currentSnapshot.naturalToneEnabled,
         instructions: currentSnapshot.instructions,
         responseLanguage: currentSnapshot.responseLanguage,
@@ -3265,8 +3279,14 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       await withDatabase(env, (db) =>
         finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
       )
-      const grounded = enforceGrounding(decision, retrievedChunkIds, currentSnapshot)
-      const policy = applyHandoffPolicy(grounded.decision, currentSnapshot)
+      const replyConfig = {
+        ...currentSnapshot,
+        responseLanguage: currentSnapshot.automaticLanguageEnabled
+          ? (decision.languageSelection?.language ?? currentSnapshot.responseLanguage)
+          : currentSnapshot.responseLanguage,
+      }
+      const grounded = enforceGrounding(decision, retrievedChunkIds, replyConfig)
+      const policy = applyHandoffPolicy(grounded.decision, replyConfig)
       if (policy.kind === 'HANDOFF') {
         await completeAiHandoff(env, claimed, {
           reason: policy.decision.handoffReason ?? 'UNABLE_TO_ANSWER',
@@ -3287,7 +3307,13 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       }
 
       const result = await withDatabase(env, (db) =>
-        commitAiResponse(db, { runId: claimed.id, text: policy.decision.response }),
+        commitAiResponse(db, {
+          runId: claimed.id,
+          text: policy.decision.response,
+          languageSelection: currentSnapshot.automaticLanguageEnabled
+            ? decision.languageSelection
+            : undefined,
+        }),
       )
       if (!result) {
         queueMessage.ack()

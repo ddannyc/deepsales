@@ -150,11 +150,20 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
     )
     expect((await f.configCall({ replyWaitEnabled: 'false' })).status).toBe(400)
     expect((await f.configCall({ naturalToneEnabled: 'true' })).status).toBe(400)
+    expect(
+      (await f.configCall({ automaticLanguageEnabled: true, timeZone: 'America/New_York' })).status,
+    ).toBe(200)
+    expect((await f.configCall({ automaticLanguageEnabled: 'true' })).status).toBe(400)
+    expect((await f.configCall({ timeZone: 'Invalid/Zone' })).status).toBe(400)
+    expect((await f.configCall({ timeZone: '' })).status).toBe(400)
     await db
       .update(workspaceUserAccess)
       .set({ role: 'AGENT' })
       .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
     expect((await f.configCall({ adLearningEnabled: false })).status).toBe(403)
+    expect((await f.configCall({ automaticLanguageEnabled: false, timeZone: 'UTC' })).status).toBe(
+      403,
+    )
     expect((await f.configCall({ naturalToneEnabled: false, replyWaitEnabled: true })).status).toBe(
       403,
     )

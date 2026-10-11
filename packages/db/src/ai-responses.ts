@@ -36,6 +36,7 @@ export type AiResponseInputMessage = {
 }
 
 export type AiResponseRunClaim = {
+  replyLanguage: string | null
   kind: 'CLAIMED'
   state: 'GENERATING'
   id: string
@@ -67,6 +68,20 @@ export class AiResponseError extends Error {
     message: string = code,
   ) {
     super(message)
+  }
+}
+
+export function normalizeAiReplyLanguage(value: string) {
+  if (
+    typeof value !== 'string' ||
+    value.length > 50 ||
+    !/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/.test(value)
+  )
+    throw new AiResponseError('INVALID_REQUEST', 'Reply language is invalid')
+  try {
+    return Intl.getCanonicalLocales(value)[0] as string
+  } catch {
+    throw new AiResponseError('INVALID_REQUEST', 'Reply language is invalid')
   }
 }
 
@@ -146,6 +161,7 @@ export async function claimAiResponseRun(
         workspaceId: conversation.workspaceId,
         conversationStatus: conversation.status,
         assigneeMemberId: conversation.assigneeMemberId,
+        replyLanguage: conversation.aiReplyLanguage,
       })
       .from(aiResponseRun)
       .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
@@ -365,6 +381,7 @@ export async function claimAiResponseRun(
       inputFirstMessageId: current.inputFirstMessageId,
       inputLastMessageId: current.inputLastMessageId,
       publishedSnapshot: snapshot,
+      replyLanguage: current.replyLanguage,
       configVersionId,
       inputMessages,
       history,
@@ -510,13 +527,21 @@ export type CommitAiResponseResult =
 
 export async function commitAiResponse(
   db: Database,
-  input: { runId: string; text: string; now?: Date },
+  input: {
+    runId: string
+    text: string
+    now?: Date
+    languageSelection?: { language: string; explicitSwitch: boolean } | null
+  },
 ): Promise<CommitAiResponseResult> {
   const text = input.text.trim()
   if (!text || text.length > MAX_AI_RESPONSE_TEXT_LENGTH) {
     throw new AiResponseError('INVALID_REQUEST', 'AI response text is invalid')
   }
   const now = input.now ?? new Date()
+  const selectedLanguage = input.languageSelection
+    ? normalizeAiReplyLanguage(input.languageSelection.language)
+    : undefined
 
   return db.transaction(async (tx) => {
     const [reference] = await tx
@@ -545,6 +570,7 @@ export async function commitAiResponse(
         channelId: channelIdentity.channelId,
         latestMessageAt: conversation.latestMessageAt,
         lastCustomerMessageId: conversation.lastCustomerMessageId,
+        replyLanguage: conversation.aiReplyLanguage,
       })
       .from(conversation)
       .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
@@ -557,6 +583,7 @@ export async function commitAiResponse(
         memberId: aiResponseRun.memberId,
         state: aiResponseRun.state,
         inputLastMessageId: aiResponseRun.inputLastMessageId,
+        configSnapshot: aiResponseRun.configSnapshot,
       })
       .from(aiResponseRun)
       .where(eq(aiResponseRun.id, input.runId))
@@ -595,6 +622,17 @@ export async function commitAiResponse(
       return { kind: 'CANCELLED' as const, cancellationReason: 'NEW_CUSTOMER_MESSAGE' as const }
     }
 
+    const replyLanguage = run.configSnapshot?.automaticLanguageEnabled
+      ? selectedLanguage
+      : undefined
+    if (
+      replyLanguage &&
+      current.replyLanguage &&
+      replyLanguage !== current.replyLanguage &&
+      input.languageSelection?.explicitSwitch !== true
+    )
+      throw new AiResponseError('INVALID_REQUEST', 'Language change needs an explicit request')
+
     const [created] = await tx
       .insert(message)
       .values({
@@ -617,6 +655,7 @@ export async function commitAiResponse(
       .set({
         latestMessageAt: later(current.latestMessageAt, now),
         lastOutboundMessageAt: now,
+        aiReplyLanguage: replyLanguage,
         updatedAt: now,
       })
       .where(eq(conversation.id, current.id))
