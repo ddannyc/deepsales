@@ -4,6 +4,8 @@ Issue #24 adds Messenger human attachments, recording, reusable text templates,
 and workspace-private media. Selecting a template only fills the editable text
 draft. Uploading, recording, or selecting media never sends it automatically.
 One attachment is submitted per message; the separate text draft stays intact.
+The reply tools and text composer share one centered dock. File selection uses
+the shared button treatment; limits expand on request and previews stay bounded.
 
 ## Access and delivery
 
@@ -65,7 +67,9 @@ provider and storage substitutes. Browser acceptance covers recording preview an
 cancellation, editable templates, upload failure recovery, workspace isolation,
 library selection, and committed media delivery after library deletion.
 
-Actual Messenger acceptance remains pending. Use a dedicated test account to
+Actual image upload and Messenger receipt were confirmed in the deployed
+environment on 2026-10-11. File, audio, video, and channel-revocation acceptance
+remain pending. Use a dedicated test account to
 message the connected Page, open that conversation in the target DeepSales
 environment, and obtain its internal UUID from the Network request
 `/api/workspaces/<workspaceId>/conversations/<conversationId>/messages`.

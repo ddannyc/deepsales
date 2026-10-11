@@ -2048,36 +2048,38 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                 </div>
               )}
             </ScrollArea>
-            <ReplyContent
-              key={`content:${selectedId}`}
-              workspaceId={workspace.id}
-              conversationId={selectedId}
-              canSend={
-                !actionLoading &&
-                selectedConversation.status === 'OPEN' &&
-                selectedConversation.assigneeMemberId === workspace.memberId &&
-                selectedConversation.assigneeType === 'HUMAN' &&
-                replyWindowOpen
-              }
-              onText={setReply}
-              onEmoji={() => setReply((current) => `${current}😊`)}
-              onSent={async () => {
-                await refresh()
-                await refreshThread(selectedId)
-              }}
-            />
-            <ConversationComposer
-              closed={selectedConversation.status === 'CLOSED'}
-              actionLoading={actionLoading}
-              canReply={
-                selectedConversation.assigneeMemberId === workspace.memberId &&
-                selectedConversation.assigneeType === 'HUMAN'
-              }
-              reply={reply}
-              replyWindowOpen={replyWindowOpen}
-              setReply={setReply}
-              onSubmit={sendReply}
-            />
+            <div className="reply-composer-dock">
+              <ReplyContent
+                key={`content:${selectedId}`}
+                workspaceId={workspace.id}
+                conversationId={selectedId}
+                canSend={
+                  !actionLoading &&
+                  selectedConversation.status === 'OPEN' &&
+                  selectedConversation.assigneeMemberId === workspace.memberId &&
+                  selectedConversation.assigneeType === 'HUMAN' &&
+                  replyWindowOpen
+                }
+                onText={setReply}
+                onEmoji={() => setReply((current) => `${current}😊`)}
+                onSent={async () => {
+                  await refresh()
+                  await refreshThread(selectedId)
+                }}
+              />
+              <ConversationComposer
+                closed={selectedConversation.status === 'CLOSED'}
+                actionLoading={actionLoading}
+                canReply={
+                  selectedConversation.assigneeMemberId === workspace.memberId &&
+                  selectedConversation.assigneeType === 'HUMAN'
+                }
+                reply={reply}
+                replyWindowOpen={replyWindowOpen}
+                setReply={setReply}
+                onSubmit={sendReply}
+              />
+            </div>
           </div>
         ) : selectedId ? (
           <div className="thread-empty">
@@ -2492,7 +2494,7 @@ function ConversationComposer({
           : ''
 
   return (
-    <div className="reply-composer-dock">
+    <div>
       {hint && (
         <p className="reply-hint" id="reply-help" role="status">
           <CircleAlert aria-hidden="true" />

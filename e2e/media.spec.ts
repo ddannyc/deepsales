@@ -69,7 +69,28 @@ test('previews and cancels recording, edits text drafts and safely sends private
     await page.reload()
     await page.getByText('Media greeting', { exact: true }).first().click()
     await page.getByRole('button', { name: '接管', exact: true }).click()
-    await page.getByLabel('上传附件').setInputFiles({
+    await expect(page.getByLabel('回复客户')).toBeEnabled()
+    for (const width of [1440, 1024, 768, 320]) {
+      await page.setViewportSize({ width, height: 900 })
+      const toolbar = page.getByRole('button', { name: '话术与素材', exact: true }).locator('../..')
+      await expect(toolbar).toBeVisible()
+      const mediaBox = await toolbar.boundingBox()
+      const textBox = await page.locator('.reply-composer').boundingBox()
+      if (!mediaBox || !textBox) throw new Error('Reply controls missing')
+      expect(Math.abs(mediaBox.x - textBox.x)).toBeLessThan(2)
+      expect(Math.abs(mediaBox.width - textBox.width)).toBeLessThan(2)
+      expect(textBox.y + textBox.height).toBeLessThanOrEqual(900)
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+        width,
+      )
+      if (width === 320)
+        await page.screenshot({ path: test.info().outputPath('composer-mobile.png') })
+    }
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.screenshot({ path: test.info().outputPath('composer-desktop.png') })
+    const fileChooser = page.waitForEvent('filechooser')
+    await page.getByRole('button', { name: '上传附件', exact: true }).click()
+    await (await fileChooser).setFiles({
       name: 'renamed.png',
       mimeType: 'image/png',
       buffer: Buffer.from('RIFF0000WEBPVP8 '),

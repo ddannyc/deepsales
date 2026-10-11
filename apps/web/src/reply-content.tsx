@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { BookOpen, Mic, Paperclip, Smile } from 'lucide-react'
 import { Button } from '#components/ui/button'
 import { Input } from '#components/ui/input'
 import { Textarea } from '#components/ui/textarea'
@@ -98,6 +99,7 @@ export function ReplyContent({
   const loadEpoch = useRef(0)
   const deleteTrigger = useRef<HTMLButtonElement | null>(null)
   const searchInput = useRef<HTMLInputElement | null>(null)
+  const fileInput = useRef<HTMLInputElement | null>(null)
   const uploadId = useRef(crypto.randomUUID())
   const sendKey = useRef(crypto.randomUUID())
 
@@ -343,11 +345,12 @@ export function ReplyContent({
   }
 
   return (
-    <div className="space-y-2 p-3 border-t border-border">
-      <div className="flex flex-wrap items-center gap-2">
+    <div className="reply-content">
+      <fieldset className="reply-content-toolbar" aria-label="回复工具">
         <Sheet open={open} onOpenChange={setOpen}>
           <SheetTrigger asChild>
-            <Button type="button" variant="outline">
+            <Button type="button" variant="ghost" size="sm">
+              <BookOpen aria-hidden="true" />
               话术与素材
             </Button>
           </SheetTrigger>
@@ -492,10 +495,24 @@ export function ReplyContent({
             {feedback && <p role="status">{feedback}</p>}
           </SheetContent>
         </Sheet>
-        <label htmlFor="reply-file">上传附件</label>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          disabled={busy || recording}
+          onClick={() => fileInput.current?.click()}
+        >
+          <Paperclip aria-hidden="true" />
+          上传附件
+        </Button>
         <Input
+          ref={fileInput}
           id="reply-file"
+          aria-label="上传附件"
+          aria-describedby="reply-file-help"
+          className="reply-file-input"
           type="file"
+          accept=".png,.jpg,.jpeg,.gif,.pdf,.txt,.zip,.docx,.mp3,.wav,.ogg,.m4a,.mp4"
           disabled={busy || recording}
           onChange={(event) => {
             const value = event.target.files?.[0]
@@ -506,32 +523,42 @@ export function ReplyContent({
         {!recording ? (
           <Button
             type="button"
-            variant="outline"
+            variant="ghost"
+            size="sm"
             disabled={busy}
             onClick={() => void startRecording()}
           >
+            <Mic aria-hidden="true" />
             开始录音
           </Button>
         ) : (
           <>
-            <span role="status">录音中，最多 60 秒</span>
-            <Button onClick={() => recorder.current?.stop()}>停止录音并预览</Button>
-            <Button variant="ghost" onClick={cancelRecording}>
+            <span className="reply-content-status" role="status">
+              录音中，最多 60 秒
+            </span>
+            <Button size="sm" variant="outline" onClick={() => recorder.current?.stop()}>
+              停止录音并预览
+            </Button>
+            <Button size="sm" variant="ghost" onClick={cancelRecording}>
               取消录音
             </Button>
           </>
         )}
-        <Button type="button" variant="ghost" onClick={onEmoji}>
+        <Button type="button" size="sm" variant="ghost" onClick={onEmoji}>
+          <Smile aria-hidden="true" />
           插入表情
         </Button>
-      </div>
-      <p className="text-xs text-muted-foreground">
-        图片 PNG/JPEG/GIF ≤8 MiB；PDF/TXT/ZIP/DOCX、MP3/WAV/OGG/M4A、MP4 ≤25
-        MiB。附件单独发送，文字草稿保留。
-      </p>
+      </fieldset>
+      <details className="reply-content-help">
+        <summary>附件格式与限制</summary>
+        <p id="reply-file-help">
+          图片 PNG/JPEG/GIF ≤8 MiB；PDF/TXT/ZIP/DOCX、MP3/WAV/OGG/M4A、MP4 ≤25
+          MiB。附件单独发送，文字草稿保留。
+        </p>
+      </details>
       {file && (
-        <div>
-          <span>
+        <div className="reply-attachment-preview">
+          <span className="reply-attachment-name">
             {file.name} · {Math.ceil(file.size / 1024)} KiB
           </span>
           {file.type.startsWith('audio/') && (
@@ -539,38 +566,38 @@ export function ReplyContent({
               <track kind="captions" />
             </audio>
           )}
-          {file.type.startsWith('image/') && (
-            <img className="max-h-32" src={preview} alt="待上传图片预览" />
-          )}
+          {file.type.startsWith('image/') && <img src={preview} alt="待上传图片预览" />}
           {file.type.startsWith('video/') && (
-            <video controls className="max-h-32" src={preview} aria-label="待上传视频预览">
+            <video controls src={preview} aria-label="待上传视频预览">
               <track kind="captions" />
             </video>
           )}
           {!selected && (
-            <Button disabled={busy} onClick={() => void upload()}>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => void upload()}>
               {busy ? '上传中…' : '上传所选附件'}
             </Button>
           )}
         </div>
       )}
       {selected && (
-        <div className="flex flex-wrap gap-2 items-center">
-          <span>附件草稿：{selected.filename}</span>
+        <div className="reply-attachment-actions">
+          <span className="reply-attachment-name">附件草稿：{selected.filename}</span>
           <Button
+            size="sm"
             variant="ghost"
             disabled={busy}
             onClick={() => void mutateAsset(selected, { inLibrary: true })}
           >
             加入素材库
           </Button>
-          <Button disabled={busy || !canSend} onClick={() => void send()}>
+          <Button size="sm" disabled={busy || !canSend} onClick={() => void send()}>
             {busy ? '提交中…' : '发送附件'}
           </Button>
         </div>
       )}
       {(file || selected) && (
         <Button
+          size="sm"
           variant="ghost"
           disabled={busy}
           onClick={() => {
@@ -582,8 +609,16 @@ export function ReplyContent({
           取消附件草稿
         </Button>
       )}
-      {error && !open && <p role="alert">{error}</p>}
-      {feedback && !open && <p role="status">{feedback}</p>}
+      {error && !open && (
+        <p className="reply-content-error" role="alert">
+          {error}
+        </p>
+      )}
+      {feedback && !open && (
+        <p className="reply-content-status" role="status">
+          {feedback}
+        </p>
+      )}
       <AlertDialog
         open={Boolean(deleteTarget)}
         onOpenChange={(value) => {
