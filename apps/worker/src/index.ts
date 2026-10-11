@@ -36,6 +36,9 @@ import {
   createAiMember,
   createInvitation,
   createFacebookHumanReply,
+  createMessageTranslation,
+  completeMessageTranslation,
+  TRANSLATION_LANGUAGES,
   createKnowledgeBase,
   createFileKnowledgeDocument,
   createInlineKnowledgeDocument,
@@ -338,6 +341,15 @@ const replyInput = z
     text: z.string().trim().min(1).max(MAX_OUTBOUND_TEXT_LENGTH).optional(),
     assetId: z.string().uuid().optional(),
     clientKey: z.string().uuid().optional(),
+    translation: z
+      .object({
+        id: z.string().uuid(),
+        sourceText: z.string().trim().min(1).max(2000),
+        sourceVersion: z.string().uuid(),
+        targetLanguage: z.string().max(20),
+      })
+      .strict()
+      .optional(),
   })
   .strict()
   .refine(
@@ -1867,6 +1879,90 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/replies', a
       )
       return c.json({ message: created.message }, 201)
     } catch (error) {
+      return replyErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/translations', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `translation:${session.user.id}`)
+    if (limited) return limited
+    const input = z
+      .object({
+        id: z.string().uuid(),
+        sourceMessageId: z.string().uuid().optional(),
+        sourceText: z.string().trim().min(1).max(2000).optional(),
+        sourceVersion: z.string().uuid(),
+        targetLanguage: z.enum(TRANSLATION_LANGUAGES),
+      })
+      .strict()
+      .refine((v) => Boolean(v.sourceMessageId) !== Boolean(v.sourceText))
+      .safeParse(await c.req.json().catch(() => null))
+    if (!input.success) return c.json({ error: { code: 'INVALID_REQUEST' } }, 400)
+    const identity = {
+      workspaceId: c.req.param('workspaceId'),
+      conversationId: c.req.param('conversationId'),
+      userId: session.user.id,
+    }
+    let operationId: string | undefined
+    try {
+      const record = await createMessageTranslation(db, { ...identity, ...input.data })
+      if (record.translatedText) return c.json({ translation: record })
+      operationId = record.id
+      const provider = createAlibabaLlmProvider(
+        {
+          provider: c.env.LLM_PROVIDER,
+          apiKey: c.env.AI_API_KEY,
+          baseUrl: c.env.AI_BASE_URL,
+          model: c.env.LLM_MODEL,
+        },
+        meteredAiFetch((work) => withDatabase(c.env, work), {
+          id: record.id,
+          workspaceId: identity.workspaceId,
+          memberId: record.requesterMemberId,
+          kind: 'TRANSLATION',
+          text: record.sourceText,
+        }),
+      )
+      const decision = await provider.generateResponse({
+        purpose: 'TRANSLATION',
+        instructions: '',
+        responseLanguage: record.targetLanguage,
+        messages: [{ id: record.id, text: record.sourceText }],
+        history: [],
+        knowledgeChunks: [],
+      })
+      if (
+        decision.decision !== 'ANSWER' ||
+        decision.handoffReason !== null ||
+        decision.usedChunkIds.length ||
+        decision.mediaAssetId ||
+        decision.handoffRuleId ||
+        decision.containsBusinessFacts
+      )
+        throw new AIOutputError()
+      const translated = await completeMessageTranslation(db, {
+        ...identity,
+        id: record.id,
+        text: decision.response,
+      })
+      await finishAiOperation(db, { operationId: record.id, state: 'COMPLETED' })
+      return c.json({ translation: translated })
+    } catch (error) {
+      if (error instanceof AiUsageError)
+        return c.json({ error: { code: error.code, retryAfterMs: error.retryAfterMs } }, 409)
+      if (operationId && !(error instanceof AIProviderError && error.retryable))
+        await finishAiOperation(db, {
+          operationId,
+          state: 'FAILED',
+          failureCode: 'TRANSLATION_FAILED',
+        })
+      if (error instanceof AIProviderError || error instanceof AIOutputError)
+        return c.json({ error: { code: 'TRANSLATION_FAILED' } }, 502)
       return replyErrorResponse(c, error)
     }
   })

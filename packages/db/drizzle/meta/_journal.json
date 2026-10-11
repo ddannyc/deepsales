@@ -253,6 +253,13 @@
       "when": 1791732165500,
       "tag": "0035_ai_handoff_rules",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1791734932442,
+      "tag": "0036_message_translations",
+      "breakpoints": true
     }
   ]
 }

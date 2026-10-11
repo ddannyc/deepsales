@@ -1,19 +1,21 @@
 import { randomUUID } from 'node:crypto'
-import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { and, eq } from 'drizzle-orm'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
   bootstrapWorkspace,
+  channelIdentity,
+  claimOutboundMessage,
+  completeMessageTranslation,
+  completeOutboundMessage,
   connectFacebookPages,
   conversation,
   conversationAssignment,
   createAiMember,
   createDatabase,
   createFacebookHumanReply as createHumanReply,
-  claimOutboundMessage,
-  completeOutboundMessage,
-  channelIdentity,
+  createMessageTranslation,
   deliveryAttempt,
   facebookMessagingWindow,
   member,
@@ -36,6 +38,62 @@ describe.skipIf(!connectionString)('human reply delivery', () => {
   })
 
   afterAll(() => pool.end())
+
+  it('requires confirmation of the exact translated draft and sends the persisted version once', async () => {
+    const f = await createFixture(db)
+    await takeOverConversation(db, { ...f, actingUserId: f.ownerId })
+    const sourceVersion = randomUUID()
+    const translated = await createMessageTranslation(db, {
+      ...f,
+      userId: f.ownerId,
+      id: randomUUID(),
+      sourceText: '你好',
+      sourceVersion,
+      targetLanguage: 'en',
+    })
+    await completeMessageTranslation(db, {
+      ...f,
+      userId: f.ownerId,
+      id: translated.id,
+      text: 'Hello',
+    })
+    const reply = {
+      ...f,
+      actingUserId: f.ownerId,
+      text: 'Hello',
+      clientKey: translated.id,
+      translation: { id: translated.id, sourceText: '你好', sourceVersion, targetLanguage: 'en' },
+    }
+    await expect(
+      createHumanReply(db, { ...reply, translation: { ...reply.translation, sourceText: '再见' } }),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    const first = await createHumanReply(db, reply)
+    expect(first.message.text).toBe('Hello')
+    expect((await createHumanReply(db, reply)).message.id).toBe(first.message.id)
+  })
+
+  it('keeps translation inputs and results immutable under concurrent completions', async () => {
+    const f = await createFixture(db)
+    await takeOverConversation(db, { ...f, actingUserId: f.ownerId })
+    const input = {
+      ...f,
+      userId: f.ownerId,
+      id: randomUUID(),
+      sourceText: '你好',
+      sourceVersion: randomUUID(),
+      targetLanguage: 'en',
+    }
+    const record = await createMessageTranslation(db, input)
+    await expect(
+      createMessageTranslation(db, { ...input, sourceText: '再见' }),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    const results = await Promise.allSettled([
+      completeMessageTranslation(db, { ...input, id: record.id, text: 'Hello' }),
+      completeMessageTranslation(db, { ...input, id: record.id, text: 'Goodbye' }),
+    ])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1)
+  })
 
   it('lets the current active human take over an unassigned conversation once', async () => {
     const ownerId = randomUUID()

@@ -9,6 +9,7 @@ import {
   mediaAsset,
   messageAttachment,
   message,
+  messageTranslation,
   workspaceUserAccess,
 } from './schema'
 
@@ -43,6 +44,7 @@ export type HumanReplyInput = {
   text?: string
   assetId?: string
   clientKey?: string
+  translation?: { id: string; sourceText: string; sourceVersion: string; targetLanguage: string }
   now?: Date
 }
 type ReplyWindowCheck = (tx: Transaction, channelIdentityId: string, now: Date) => Promise<boolean>
@@ -109,6 +111,28 @@ export async function createHumanReply(
       )
     if (!channelAccess) throw new ReplyError('FORBIDDEN', 'Channel access required')
 
+    if (input.translation) {
+      const confirmed = input.translation
+      const [record] = await tx
+        .select()
+        .from(messageTranslation)
+        .where(eq(messageTranslation.id, confirmed.id))
+      if (
+        !record ||
+        record.workspaceId !== input.workspaceId ||
+        record.conversationId !== input.conversationId ||
+        record.requesterMemberId !== viewer.memberId ||
+        record.sourceMessageId ||
+        record.sourceText !== confirmed.sourceText.trim() ||
+        record.sourceVersion !== confirmed.sourceVersion ||
+        record.targetLanguage !== confirmed.targetLanguage ||
+        record.translatedText !== text ||
+        input.clientKey !== record.id ||
+        input.assetId
+      )
+        throw new ReplyError('INVALID_REQUEST', 'Translation confirmation is stale or invalid')
+    }
+
     if (input.clientKey) {
       const [existing] = await tx
         .select()
@@ -173,6 +197,11 @@ export async function createHumanReply(
       })
       .returning()
     if (!created) throw new ReplyError('INVALID_REQUEST', 'Message was not created')
+    if (input.translation)
+      await tx
+        .update(messageTranslation)
+        .set({ sentMessageId: created.id })
+        .where(eq(messageTranslation.id, input.translation.id))
     if (asset)
       await tx.insert(messageAttachment).values({
         messageId: created.id,

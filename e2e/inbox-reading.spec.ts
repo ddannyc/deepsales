@@ -194,7 +194,8 @@ test('pages all conversations and history, confirms visible inputs, and separate
     for (let index = 0; index < (await inputs.count()); index += 1)
       await inputs.nth(index).scrollIntoViewIfNeeded()
     await expect.poll(unread, { timeout: 20_000 }).toBe(false)
-    await expect(page.locator('.message-bubble')).toHaveCount(0)
+    // Bulk read confirmations finish refreshing both list pages before clearing selection.
+    await expect(page.locator('.message-bubble')).toHaveCount(0, { timeout: 20_000 })
     await page.reload()
     await expect.poll(unread).toBe(false)
     const readConversation = page

@@ -1140,12 +1140,45 @@ export const aiOperation = pgTable(
     index('ai_operation_workspace_period_idx').on(table.workspaceId, table.period),
     check(
       'ai_operation_kind_valid',
-      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX')`,
+      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION')`,
     ),
     check(
       'ai_operation_state_valid',
       sql`${table.state} in ('RESERVED', 'STARTED', 'COMPLETED', 'FAILED', 'UNKNOWN', 'CANCELLED')`,
     ),
+  ],
+)
+
+export const messageTranslation = pgTable(
+  'message_translation',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    requesterMemberId: uuid('requester_member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    sourceMessageId: uuid('source_message_id').references(() => message.id, {
+      onDelete: 'cascade',
+    }),
+    sourceVersion: uuid('source_version').notNull(),
+    sourceText: text('source_text').notNull(),
+    targetLanguage: text('target_language').notNull(),
+    translatedText: text('translated_text'),
+    sentMessageId: uuid('sent_message_id').references(() => message.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex('message_translation_source_language_idx').on(
+      table.requesterMemberId,
+      table.sourceMessageId,
+      table.targetLanguage,
+    ),
+    index('message_translation_conversation_idx').on(table.conversationId),
   ],
 )
 

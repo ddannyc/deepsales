@@ -369,6 +369,32 @@ async function startFakeAI() {
       return
     }
     const content = body.messages?.[1]?.content ?? ''
+    if (body.messages?.[0]?.content.startsWith('Translate')) {
+      const text = (JSON.parse(content) as { text: string }).text
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response:
+                    text === '你好'
+                      ? 'Hello'
+                      : text === '再见'
+                        ? 'Goodbye'
+                        : '来自 Messenger 的问候',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        }),
+      )
+      return
+    }
     const current = /<customer_messages>([\s\S]*?)<\/customer_messages>/.exec(content)?.[1] ?? ''
     const history =
       /<conversation_history>([\s\S]*?)<\/conversation_history>/.exec(content)?.[1] ?? ''

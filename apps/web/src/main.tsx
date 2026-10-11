@@ -83,14 +83,15 @@ import { Switch } from '#components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '#components/ui/table'
 import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
-import { AiOperations } from './ai-operations'
-import { AiStopSettings, emptyStopRules, type AiStopRules } from './ai-stop-settings'
 import { AiHandoffSettings } from './ai-handoff-settings'
+import { AiOperations } from './ai-operations'
+import { type AiStopRules, AiStopSettings, emptyStopRules } from './ai-stop-settings'
 import { CustomerSidebar } from './customer-sidebar'
 import { DemoPage } from './demo'
 import { InboxFilterControls, type InboxFilters, inboxQuery } from './inbox-filters'
 import { InternalNotes } from './internal-notes'
 import { LandingPage } from './landing'
+import { MessageTranslation, type Translation } from './message-translation'
 import { ReplyContent } from './reply-content'
 
 import './styles.css'
@@ -179,6 +180,7 @@ type InboxConversation = {
   failedMessage: boolean
 }
 type InboxMessage = {
+  conversationId: string
   delivered: boolean
   read: boolean
   id: string
@@ -1601,6 +1603,35 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     }
   }
 
+  async function sendTranslatedReply(translation: Translation) {
+    if (!selectedId) return
+    const conversationId = selectedId
+    setActionLoading(true)
+    try {
+      const result = (await request(
+        `/api/workspaces/${workspace.id}/conversations/${conversationId}/replies`,
+        {
+          text: translation.translatedText,
+          clientKey: translation.id,
+          translation: {
+            id: translation.id,
+            sourceText: translation.sourceText,
+            sourceVersion: translation.sourceVersion,
+            targetLanguage: translation.targetLanguage,
+          },
+        },
+      )) as { message: InboxMessage }
+      if (selectedIdRef.current === conversationId) {
+        updateMessages([result.message])
+        setReply((current) => (current.trim() === translation.sourceText ? '' : current))
+        await refreshThread(conversationId)
+      }
+      await refresh()
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   async function toggleMute() {
     if (!selectedConversation) return
     setActionLoading(true)
@@ -2109,6 +2140,10 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                 }}
               />
               <ConversationComposer
+                key={selectedId}
+                workspaceId={workspace.id}
+                conversationId={selectedId}
+                onSendTranslation={sendTranslatedReply}
                 closed={selectedConversation.status === 'CLOSED'}
                 actionLoading={actionLoading}
                 canReply={
@@ -2477,6 +2512,14 @@ function MessageBubble({
         </time>
       </div>
       {message.text ? <p>{message.text}</p> : !message.attachments.length && <p>附件消息</p>}
+      {message.text && (
+        <MessageTranslation
+          workspaceId={workspaceId}
+          conversationId={message.conversationId}
+          text={message.text}
+          messageId={message.id}
+        />
+      )}
       {message.attachments?.map((attachment) => (
         <AttachmentPreview attachment={attachment} key={attachment.id} workspaceId={workspaceId} />
       ))}
@@ -2522,6 +2565,9 @@ function DeliveryStatus({ state }: { state: NonNullable<InboxMessage['deliverySt
 }
 
 function ConversationComposer({
+  workspaceId,
+  conversationId,
+  onSendTranslation,
   closed = false,
   actionLoading,
   canReply,
@@ -2530,6 +2576,9 @@ function ConversationComposer({
   setReply,
   onSubmit,
 }: {
+  workspaceId: string
+  conversationId: string
+  onSendTranslation: (translation: Translation) => Promise<void>
   closed?: boolean
   actionLoading: boolean
   canReply: boolean
@@ -2538,6 +2587,7 @@ function ConversationComposer({
   setReply: (value: string) => void
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
+  const [translationEnabled, setTranslationEnabled] = useState(false)
   const disabled = closed || actionLoading || !canReply || !replyWindowOpen
   const hint = actionLoading
     ? '正在处理，请稍候。'
@@ -2557,10 +2607,18 @@ function ConversationComposer({
           {hint}
         </p>
       )}
-      <form className="reply-composer" onSubmit={onSubmit}>
+      <form
+        className="reply-composer"
+        onSubmit={(event) => {
+          if (translationEnabled) event.preventDefault()
+          else onSubmit(event)
+        }}
+      >
         <div className="reply-composer-heading">
           <label htmlFor="reply-text">回复客户</label>
-          <span>Enter 发送 · Shift+Enter 换行</span>
+          <span>
+            {translationEnabled ? '先预览译文，再确认发送' : 'Enter 发送 · Shift+Enter 换行'}
+          </span>
         </div>
         <Textarea
           aria-describedby={hint ? 'reply-help' : undefined}
@@ -2578,12 +2636,32 @@ function ConversationComposer({
           }}
         />
         <div className="reply-composer-footer">
+          <label className="switch-field" htmlFor={`translation-${conversationId}`}>
+            发送前翻译
+            <Switch
+              id={`translation-${conversationId}`}
+              checked={translationEnabled}
+              onCheckedChange={setTranslationEnabled}
+              disabled={disabled}
+            />
+          </label>
           <span>{reply.length.toLocaleString('zh-CN')}/2,000</span>
-          <Button disabled={disabled || !reply.trim()} type="submit">
-            <Send aria-hidden="true" />
-            {actionLoading ? '发送中…' : '发送回复'}
-          </Button>
+          {!translationEnabled && (
+            <Button disabled={disabled || !reply.trim()} type="submit">
+              <Send aria-hidden="true" />
+              {actionLoading ? '发送中…' : '发送回复'}
+            </Button>
+          )}
         </div>
+        {translationEnabled && (
+          <MessageTranslation
+            workspaceId={workspaceId}
+            conversationId={conversationId}
+            text={reply}
+            disabled={disabled}
+            onSend={onSendTranslation}
+          />
+        )}
       </form>
     </div>
   )

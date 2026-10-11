@@ -1,4 +1,4 @@
-@import "tailwindcss";
+﻿@import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
@@ -1031,6 +1031,30 @@ form {
 .message-delivery-status {
   margin-top: 10px;
 }
+.message-translation {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-2);
+}
+
+.message-translation-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.message-translation-controls > button {
+  width: auto;
+}
+.message-translation .translation-text {
+  margin: 0;
+  border-left: 2px solid var(--border);
+  padding-left: var(--space-3);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
 .delivery-failure {
   display: block;
   margin-top: 6px;
@@ -1525,6 +1549,12 @@ form {
   border-bottom: 1px solid var(--border);
   padding: var(--space-2) 0;
   font-size: var(--type-dense-size);
+}
+.message-translation .switch-field {
+  justify-content: flex-start;
+  min-height: 32px;
+  border: 0;
+  padding: 0;
 }
 .selection-group {
   display: grid;
