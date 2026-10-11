@@ -763,6 +763,14 @@ export const aiResponseRun = pgTable(
     memberId: uuid('member_id')
       .notNull()
       .references(() => member.id, { onDelete: 'cascade' }),
+    configVersionId: uuid('config_version_id').references(() => aiConfigVersion.id, {
+      onDelete: 'set null',
+    }),
+    configSnapshot: jsonb('config_snapshot').$type<AiMemberRuntimeSnapshot>(),
+    contextMessageIds: uuid('context_message_ids').array(),
+    outputMessageId: uuid('output_message_id').references(() => message.id, {
+      onDelete: 'set null',
+    }),
     state: aiResponseRunState().default('QUEUED').notNull(),
     inputFirstMessageId: uuid('input_first_message_id')
       .notNull()
@@ -965,11 +973,116 @@ export const aiMemberConfig = pgTable('ai_member_config', {
   handoffKeywords: text('handoff_keywords').array().default(sql`ARRAY[]::text[]`).notNull(),
   publishedSnapshot: jsonb('published_snapshot').$type<AiMemberRuntimeSnapshot | null>(),
   publishedAt: timestamp('published_at', { withTimezone: true }),
+  publishedVersionId: uuid('published_version_id').references(() => aiConfigVersion.id, {
+    onDelete: 'set null',
+  }),
   runtimeStatus: aiRuntimeStatus('runtime_status').default('UNPUBLISHED').notNull(),
   runtimeError: text('runtime_error'),
   createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 })
+
+export const aiConfigVersion = pgTable('ai_config_version', {
+  id: uuid().defaultRandom().primaryKey(),
+  memberId: uuid('member_id')
+    .notNull()
+    .references(() => member.id, { onDelete: 'cascade' }),
+  snapshot: jsonb().$type<AiMemberRuntimeSnapshot>().notNull(),
+  publishedAt: timestamp('published_at', { withTimezone: true }).defaultNow().notNull(),
+})
+
+export const aiBudget = pgTable(
+  'ai_budget',
+  {
+    workspaceId: uuid('workspace_id')
+      .primaryKey()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    monthlyLimit: integer('monthly_limit'),
+  },
+  (table) => [check('ai_budget_limit_nonnegative', sql`${table.monthlyLimit} >= 0`)],
+)
+
+export const aiOperation = pgTable(
+  'ai_operation',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id').references(() => member.id, { onDelete: 'set null' }),
+    configVersionId: uuid('config_version_id').references(() => aiConfigVersion.id, {
+      onDelete: 'set null',
+    }),
+    kind: text().notNull(),
+    state: text().default('RESERVED').notNull(),
+    period: text().notNull(),
+    charged: boolean().default(false).notNull(),
+    failureCode: text('failure_code'),
+    input: text(),
+    output: jsonb(),
+    snapshot: jsonb().$type<AiMemberRuntimeSnapshot>(),
+    chunkIds: uuid('chunk_ids').array().default(sql`ARRAY[]::uuid[]`).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    index('ai_operation_workspace_period_idx').on(table.workspaceId, table.period),
+    check(
+      'ai_operation_kind_valid',
+      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX')`,
+    ),
+    check(
+      'ai_operation_state_valid',
+      sql`${table.state} in ('RESERVED', 'STARTED', 'COMPLETED', 'FAILED', 'UNKNOWN', 'CANCELLED')`,
+    ),
+  ],
+)
+
+export const aiProviderAttempt = pgTable(
+  'ai_provider_attempt',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    operationId: uuid('operation_id')
+      .notNull()
+      .references(() => aiOperation.id, { onDelete: 'cascade' }),
+    stage: text().notNull(),
+    state: text().default('STARTED').notNull(),
+    httpStatus: integer('http_status'),
+    response: jsonb(),
+    retryAt: timestamp('retry_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('ai_provider_attempt_operation_idx').on(table.operationId),
+    check(
+      'ai_provider_attempt_state_valid',
+      sql`${table.state} in ('STARTED', 'SUCCESS', 'FAILED', 'UNKNOWN')`,
+    ),
+  ],
+)
+
+export const aiFeedback = pgTable(
+  'ai_feedback',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').references(() => aiResponseRun.id, { onDelete: 'cascade' }),
+    operationId: uuid('operation_id').references(() => aiOperation.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    category: text().notNull(),
+    note: text().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    check('ai_feedback_one_source', sql`num_nonnulls(${table.runId}, ${table.operationId}) = 1`),
+    check('ai_feedback_category_valid', sql`${table.category} in ('KNOWLEDGE', 'MODEL', 'OTHER')`),
+  ],
+)
 
 export const knowledgeDocument = pgTable(
   'knowledge_document',

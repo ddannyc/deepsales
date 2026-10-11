@@ -1694,6 +1694,48 @@ form {
   display: grid;
   gap: var(--space-3);
 }
+
+.ai-operations {
+  display: grid;
+  gap: var(--space-6);
+  margin-top: var(--space-6);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-6);
+  min-width: 0;
+}
+.ai-operations .field {
+  display: grid;
+  gap: var(--space-2);
+  max-width: 720px;
+}
+.ai-operation-list {
+  display: grid;
+  gap: var(--space-2);
+}
+.ai-operation-list > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.ai-analytics-filters {
+  display: flex;
+  gap: var(--space-3);
+  align-items: end;
+  flex-wrap: wrap;
+}
+.ai-diagnostic-dialog {
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.ai-diagnostic-dialog pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--type-meta-size);
+}
 .runtime-section .table-muted {
   margin: 0;
   line-height: var(--type-meta-leading);

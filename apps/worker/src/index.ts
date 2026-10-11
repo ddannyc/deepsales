@@ -1,5 +1,8 @@
 import {
   acceptAnyInvitation,
+  AiUsageError,
+  finishAiOperation,
+  recoverAiOperations,
   CustomerError,
   getCustomerProfile,
   updateCustomerProfile,
@@ -119,6 +122,8 @@ import { Hono, type Context } from 'hono'
 import { Pool } from 'pg'
 import { z } from 'zod'
 import { createAuth } from './auth'
+import { meteredAiFetch } from './ai-usage'
+import { aiOperationsRoutes } from './ai-operations'
 import type { Bindings } from './bindings'
 import {
   FacebookProviderError,
@@ -782,6 +787,8 @@ app.post('/api/workspaces/:workspaceId/ai-members/:memberId/publish', async (c) 
     }
   })
 })
+
+app.route('/', aiOperationsRoutes(withDatabase))
 
 app.get('/api/workspaces/:workspaceId/knowledge-bases', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
@@ -3020,13 +3027,23 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
 
-      const embeddingProvider = createAlibabaEmbeddingProvider({
-        provider: env.EMBEDDING_PROVIDER,
-        apiKey: env.AI_API_KEY,
-        baseUrl: env.AI_BASE_URL,
-        model: env.EMBEDDING_MODEL,
-        dimensions: env.EMBEDDING_DIMENSIONS,
+      const meteredFetch = meteredAiFetch((work) => withDatabase(env, work), {
+        id: claimed.id,
+        workspaceId: claimed.workspaceId,
+        memberId: claimed.memberId,
+        configVersionId: claimed.configVersionId,
+        kind: 'LIVE_REPLY',
       })
+      const embeddingProvider = createAlibabaEmbeddingProvider(
+        {
+          provider: env.EMBEDDING_PROVIDER,
+          apiKey: env.AI_API_KEY,
+          baseUrl: env.AI_BASE_URL,
+          model: env.EMBEDDING_MODEL,
+          dimensions: env.EMBEDDING_DIMENSIONS,
+        },
+        meteredFetch,
+      )
       let retrievedChunks: Awaited<ReturnType<typeof retrieveKnowledgeChunks>> = []
       try {
         retrievedChunks = await withDatabase(env, (db) =>
@@ -3058,12 +3075,15 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
 
-      const llmProvider = createAlibabaLlmProvider({
-        provider: env.LLM_PROVIDER,
-        apiKey: env.AI_API_KEY,
-        baseUrl: env.AI_BASE_URL,
-        model: env.LLM_MODEL,
-      })
+      const llmProvider = createAlibabaLlmProvider(
+        {
+          provider: env.LLM_PROVIDER,
+          apiKey: env.AI_API_KEY,
+          baseUrl: env.AI_BASE_URL,
+          model: env.LLM_MODEL,
+        },
+        meteredFetch,
+      )
       const decision = await llmProvider.generateResponse({
         instructions: currentSnapshot.instructions,
         responseLanguage: currentSnapshot.responseLanguage,
@@ -3071,6 +3091,9 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         history: claimed.history,
         knowledgeChunks: retrievedChunks.map(({ id, text }) => ({ id, text })),
       })
+      await withDatabase(env, (db) =>
+        finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+      )
       const grounded = enforceGrounding(decision, retrievedChunkIds, currentSnapshot)
       const policy = applyHandoffPolicy(grounded.decision, currentSnapshot)
       if (policy.kind === 'HANDOFF') {
@@ -3118,6 +3141,21 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       }
       queueMessage.ack()
     } catch (error) {
+      if (error instanceof AiUsageError && error.code === 'RETRY_LATER') {
+        await withDatabase(env, (db) => retryAiResponseRun(db, { runId: claimed.id }))
+        queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(error.retryAfterMs / 1_000)) })
+        continue
+      }
+      if (error instanceof AiUsageError) {
+        await completeAiHandoff(env, claimed, {
+          reason: 'PROVIDER_FAILURE',
+          failureCode: error.code,
+          failureMessage: 'AI usage unavailable; human assistance required',
+          noticeText: handoffNotice(snapshot?.responseLanguage ?? 'English'),
+        })
+        queueMessage.ack()
+        continue
+      }
       if (isRetryableAiFailure(error)) {
         try {
           const retried = await withDatabase(env, (db) =>
@@ -3131,6 +3169,9 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
       try {
+        await withDatabase(env, (db) =>
+          finishAiOperation(db, { operationId: claimed.id, state: 'FAILED' }),
+        )
         await completeAiHandoff(env, claimed, {
           reason: 'PROVIDER_FAILURE',
           runState: 'FAILED',
@@ -3237,7 +3278,7 @@ class AttachmentRetryError extends Error {
   }
 }
 
-type DocumentQueueMessage = { ack(): void; retry(): void }
+type DocumentQueueMessage = { ack(): void; retry(options?: { delaySeconds: number }): void }
 
 async function handleKnowledgeDocument(
   queueMessage: DocumentQueueMessage,
@@ -3285,13 +3326,20 @@ async function handleKnowledgeDocument(
     const chunks = chunkKnowledgeText(text)
     if (!chunks.length) throw new KnowledgeProcessingError('EMPTY_CONTENT')
 
-    const embeddingProvider = createAlibabaEmbeddingProvider({
-      provider: env.EMBEDDING_PROVIDER,
-      apiKey: env.AI_API_KEY,
-      baseUrl: env.AI_BASE_URL,
-      model: env.EMBEDDING_MODEL,
-      dimensions: env.EMBEDDING_DIMENSIONS,
-    })
+    const embeddingProvider = createAlibabaEmbeddingProvider(
+      {
+        provider: env.EMBEDDING_PROVIDER,
+        apiKey: env.AI_API_KEY,
+        baseUrl: env.AI_BASE_URL,
+        model: env.EMBEDDING_MODEL,
+        dimensions: env.EMBEDDING_DIMENSIONS,
+      },
+      meteredAiFetch((work) => withDatabase(env, work), {
+        id: claimed.id,
+        workspaceId: claimed.workspaceId,
+        kind: 'KNOWLEDGE_INDEX',
+      }),
+    )
     const embeddings = await embeddingProvider.embed(chunks)
     if (embeddings.length !== chunks.length) throw new AIEmbeddingError()
     const contentSha256 = await hashKnowledgeText(text)
@@ -3308,12 +3356,29 @@ async function handleKnowledgeDocument(
       }),
     )
     if (completed) await publishKnowledgeChange(env, claimed.workspaceId, claimed.id)
+    await withDatabase(env, (db) =>
+      finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+    )
     queueMessage.ack()
   } catch (error) {
+    if (error instanceof AiUsageError && error.code === 'RETRY_LATER') {
+      await withDatabase(env, (db) =>
+        releaseKnowledgeDocument(db, {
+          documentId: claimed.id,
+          processingStartedAt: claimed.processingStartedAt,
+        }),
+      )
+      queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(error.retryAfterMs / 1_000)) })
+      return
+    }
     const retryable =
       error instanceof AIProviderError
         ? error.retryable
-        : !(error instanceof KnowledgeProcessingError || error instanceof AIEmbeddingError)
+        : !(
+            error instanceof KnowledgeProcessingError ||
+            error instanceof AIEmbeddingError ||
+            error instanceof AiUsageError
+          )
     if (retryable) {
       try {
         await withDatabase(env, (db) =>
@@ -3328,12 +3393,17 @@ async function handleKnowledgeDocument(
     }
 
     const failureCode =
-      error instanceof KnowledgeProcessingError
+      error instanceof AiUsageError
         ? error.code
-        : error instanceof AIEmbeddingError
-          ? 'INVALID_EMBEDDING'
-          : 'AI_PROVIDER_ERROR'
+        : error instanceof KnowledgeProcessingError
+          ? error.code
+          : error instanceof AIEmbeddingError
+            ? 'INVALID_EMBEDDING'
+            : 'AI_PROVIDER_ERROR'
     try {
+      await withDatabase(env, (db) =>
+        finishAiOperation(db, { operationId: claimed.id, state: 'FAILED' }),
+      )
       const failed = await withDatabase(env, (db) =>
         failKnowledgeDocument(db, {
           documentId: claimed.id,
@@ -3794,6 +3864,7 @@ export async function handleScheduled(env: Bindings) {
   if (!env.HYPERDRIVE?.connectionString) return
 
   try {
+    await withDatabase(env, (db) => recoverAiOperations(db))
     const stale = await withDatabase(env, (db) => recoverStaleOutboundMessages(db))
     if (stale.length) {
       console.warn(JSON.stringify({ event: 'outbound_claims_recovered', messages: stale.length }))

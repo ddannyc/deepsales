@@ -10,6 +10,17 @@ import {
   getAiMemberConfig,
   listTeam,
   publishAiMemberConfig,
+  listAiConfigVersions,
+  restoreAiConfigVersion,
+  saveAiBudget,
+  reserveAiOperation,
+  beginAiProviderAttempt,
+  finishAiProviderAttempt,
+  getAiBudget,
+  recoverAiOperations,
+  aiOperation,
+  aiProviderAttempt,
+  knowledgeBase,
   setMemberChannelAccess,
   updateMember,
   updateAiMemberConfig,
@@ -17,6 +28,7 @@ import {
   channel,
   workspaceUserAccess,
 } from '../src'
+import { eq } from 'drizzle-orm'
 
 const connectionString = process.env.DATABASE_URL
 
@@ -107,6 +119,21 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
     })
     expect(republished.publishedSnapshot?.instructions).toBe('Use the updated support policy.')
 
+    const identity = {
+      workspaceId: fixture.workspaceId,
+      memberId: fixture.memberId,
+      actingUserId: fixture.userId,
+    }
+    const history = await listAiConfigVersions(db, identity)
+    expect(history).toHaveLength(2)
+    const original = history[1]
+    if (!original) throw new Error('Original version was not recorded')
+    const restored = await restoreAiConfigVersion(db, { ...identity, versionId: original.id })
+    expect(restored.instructions).toBe('Answer from support facts only.')
+    expect(restored.publishedSnapshot?.instructions).toBe('Use the updated support policy.')
+    expect(restored.publishedVersionId).toBe(republished.publishedVersionId)
+    expect(await listAiConfigVersions(db, identity)).toEqual(history)
+
     const team = await listTeam(db, fixture.workspaceId)
     expect(team.members.find(({ id }) => id === fixture.memberId)?.configurationStatus).toBe(
       'USABLE',
@@ -164,6 +191,35 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
     ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' })
   })
 
+  it('reserves a monthly hard limit concurrently and charges retries once', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, actingUserId: f.userId }
+    await saveAiBudget(db, { ...identity, monthlyLimit: 1 })
+    const id = randomUUID()
+    const results = await Promise.allSettled(
+      [id, randomUUID()].map((operationId) =>
+        reserveAiOperation(db, { id: operationId, workspaceId: f.workspaceId, kind: 'TEST' }),
+      ),
+    )
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1)
+    const winner = results.find((r) => r.status === 'fulfilled')
+    if (winner?.status !== 'fulfilled') throw new Error('No reservation')
+    const operation = winner.value
+    const first = await beginAiProviderAttempt(db, { operationId: operation.id, stage: 'LLM' })
+    await finishAiProviderAttempt(db, { attemptId: first.id, state: 'FAILED', httpStatus: 429 })
+    await reserveAiOperation(db, { id: operation.id, workspaceId: f.workspaceId, kind: 'TEST' })
+    const retry = await beginAiProviderAttempt(db, {
+      operationId: operation.id,
+      stage: 'LLM',
+      now: new Date(Date.now() + 31_000),
+    })
+    await finishAiProviderAttempt(db, { attemptId: retry.id, state: 'SUCCESS', httpStatus: 200 })
+    expect(await getAiBudget(db, identity)).toMatchObject({ used: 1, reserved: 0, monthlyLimit: 1 })
+    await expect(
+      beginAiProviderAttempt(db, { operationId: operation.id, stage: 'LLM' }),
+    ).rejects.toMatchObject({ code: 'OPERATION_PAUSED' })
+  })
+
   it('keeps AI configuration manager-only', async () => {
     const fixture = await createFixture(db)
     const agentId = randomUUID()
@@ -189,6 +245,74 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
         instructions: 'Must not save',
       }),
     ).rejects.toMatchObject({ code: 'FORBIDDEN' })
+  })
+
+  it('restores missing references as a repairable draft and serializes concurrent publications', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.memberId, actingUserId: f.userId }
+    await setMemberChannelAccess(db, { ...identity, channelIds: [f.channelId] })
+    await updateAiMemberConfig(db, {
+      ...identity,
+      knowledgeBaseId: f.knowledgeBaseId,
+      instructions: 'Be helpful.',
+      responseLanguage: 'English',
+    })
+    await Promise.all([
+      publishAiMemberConfig(db, { ...identity, providerConfigured: true }),
+      publishAiMemberConfig(db, { ...identity, providerConfigured: true }),
+    ])
+    const versions = await listAiConfigVersions(db, identity)
+    expect(versions).toHaveLength(2)
+    const version = versions[0]
+    if (!version) throw new Error('No version')
+    await db.delete(knowledgeBase).where(eq(knowledgeBase.id, f.knowledgeBaseId))
+    expect((await listAiConfigVersions(db, identity))[0]?.invalidReferences).toEqual([
+      'knowledgeBaseId',
+    ])
+    const restored = await restoreAiConfigVersion(db, { ...identity, versionId: version.id })
+    expect(restored.knowledgeBaseId).toBeNull()
+    expect(restored.publishedSnapshot?.knowledgeBaseId).toBe(f.knowledgeBaseId)
+    await expect(
+      publishAiMemberConfig(db, { ...identity, providerConfigured: true }),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' })
+  })
+
+  it('recovers unused reservations and interrupted attempts without refunding or repeating calls', async () => {
+    const f = await createFixture(db)
+    const now = new Date()
+    const old = new Date(now.getTime() - 10 * 60_000)
+    const unused = randomUUID()
+    const started = randomUUID()
+    await reserveAiOperation(db, { id: unused, workspaceId: f.workspaceId, kind: 'TEST', now: old })
+    await reserveAiOperation(db, {
+      id: started,
+      workspaceId: f.workspaceId,
+      kind: 'TEST',
+      now: old,
+    })
+    await beginAiProviderAttempt(db, { operationId: started, stage: 'LLM', now: old })
+    await recoverAiOperations(db, now)
+    expect(
+      await db
+        .select({ state: aiOperation.state, charged: aiOperation.charged })
+        .from(aiOperation)
+        .where(eq(aiOperation.id, unused)),
+    ).toEqual([{ state: 'CANCELLED', charged: false }])
+    expect(
+      await db
+        .select({ state: aiOperation.state, charged: aiOperation.charged })
+        .from(aiOperation)
+        .where(eq(aiOperation.id, started)),
+    ).toEqual([{ state: 'UNKNOWN', charged: true }])
+    expect(
+      await db
+        .select({ state: aiProviderAttempt.state })
+        .from(aiProviderAttempt)
+        .where(eq(aiProviderAttempt.operationId, started)),
+    ).toEqual([{ state: 'UNKNOWN' }])
+    await expect(
+      beginAiProviderAttempt(db, { operationId: started, stage: 'LLM' }),
+    ).rejects.toMatchObject({ code: 'OPERATION_PAUSED' })
   })
 })
 

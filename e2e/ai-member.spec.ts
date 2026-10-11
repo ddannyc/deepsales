@@ -1,4 +1,5 @@
-import { channel, createDatabase, createKnowledgeBase } from '@deepsales/db'
+import { channel, createDatabase, createKnowledgeBase, aiConfigVersion } from '@deepsales/db'
+import { eq } from 'drizzle-orm'
 import { expect, test } from '@playwright/test'
 import { Pool } from 'pg'
 import { signInAndCreateWorkspace } from './auth'
@@ -65,6 +66,18 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
       'Answer from support facts only.',
     )
 
+    const publishedVersions = (await (
+      await page.request.get(`/api/workspaces/${workspace.id}/ai-operations/${member.id}/versions`)
+    ).json()) as { versions: { id: string }[] }
+    const version = publishedVersions.versions[0]
+    if (!version) throw new Error('Missing history version')
+    await expect(
+      db
+        .update(aiConfigVersion)
+        .set({ publishedAt: new Date() })
+        .where(eq(aiConfigVersion.id, version.id)),
+    ).rejects.toThrow('Failed query')
+
     await page.locator('#ai-instructions').fill('Use the updated support policy.')
     await expect(page.getByRole('button', { name: '发布', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: '保存草稿' }).click()
@@ -77,6 +90,38 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await expect(page.locator('.ai-published-panel')).toContainText(
       'Use the updated support policy.',
     )
+    await page.getByRole('button', { name: '预览版本' }).last().click()
+    const history = page.getByRole('dialog')
+    await expect(history).toContainText('Answer from support facts only.')
+    await history.getByRole('button', { name: '还原到草稿' }).click()
+    await expect(page.locator('#ai-instructions')).toHaveValue('Answer from support facts only.')
+    await expect(page.locator('.ai-published-panel')).toContainText(
+      'Use the updated support policy.',
+    )
+    await page.getByRole('button', { name: '发布', exact: true }).click()
+    await expect(page.locator('.ai-published-panel')).toContainText(
+      'Answer from support facts only.',
+    )
+
+    await page.getByLabel('测试问题').fill('Hello')
+    await page.getByRole('button', { name: '运行测试', exact: true }).click()
+    const diagnostics = page.getByRole('dialog')
+    await expect(diagnostics).toContainText('已完成')
+    await diagnostics.getByLabel('问题说明').fill('Review response tone.')
+    await diagnostics.getByRole('button', { name: '保存反馈' }).click()
+    await expect(diagnostics).toContainText('模型问题：Review response tone.')
+    await diagnostics.press('Escape')
+    await page.getByLabel('本月硬限额').fill('1')
+    await page.getByRole('button', { name: '保存限额', exact: true }).click()
+    await expect(page.getByText('限额已保存', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '新测试', exact: true }).click()
+    await page.getByLabel('测试问题').fill('Another hello')
+    await page.getByRole('button', { name: '运行测试', exact: true }).click()
+    await expect(page.getByRole('alert')).toContainText('本月额度已耗尽')
+    await page.getByRole('button', { name: '查询统计', exact: true }).click()
+    await expect(page.getByRole('row').filter({ hasText: '隔离测试' })).toContainText('1')
+    const conversations = await page.request.get(`/api/workspaces/${workspace.id}/conversations`)
+    expect((await conversations.json()).conversations).toEqual([])
   } finally {
     await pool.end()
   }

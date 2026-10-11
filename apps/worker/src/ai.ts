@@ -1,5 +1,5 @@
 import { z } from 'zod'
-import type { AiConversationContextMessage } from '@deepsales/db'
+import { AiUsageError, type AiConversationContextMessage } from '@deepsales/db'
 
 export const ALIBABA_EMBEDDING_PROVIDER = 'alibaba'
 export const DEFAULT_EMBEDDING_MODEL = 'qwen3.7-text-embedding'
@@ -303,7 +303,8 @@ export class AlibabaEmbeddingProvider implements EmbeddingProvider {
           encoding_format: 'float',
         }),
       })
-    } catch {
+    } catch (error) {
+      if (error instanceof AiUsageError) throw error
       throw new AIProviderError(0, true)
     }
 
@@ -397,7 +398,8 @@ export class AlibabaLlmProvider implements LlmProvider {
           response_format: { type: 'json_object' },
         }),
       })
-    } catch {
+    } catch (error) {
+      if (error instanceof AiUsageError) throw error
       throw new AIProviderError(0, true)
     }
 

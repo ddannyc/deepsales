@@ -624,6 +624,7 @@ async function executeAiHandoff(
     .update(aiResponseRun)
     .set({
       state: command.runState ?? 'HANDOFF',
+      outputMessageId: messageId,
       completedAt: now,
       failureCode: (command.failureCode ?? command.reason).slice(0, 100),
       failureMessage: command.failureMessage?.slice(0, 500) ?? null,

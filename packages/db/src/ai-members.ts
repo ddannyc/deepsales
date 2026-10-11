@@ -1,7 +1,8 @@
-import { and, eq, sql } from 'drizzle-orm'
+import { and, desc, eq, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
   aiMemberConfig,
+  aiConfigVersion,
   channel,
   knowledgeBase,
   member,
@@ -48,6 +49,7 @@ export type AiMemberConfig = {
   handoffKeywords: string[]
   publishedSnapshot: AiMemberRuntimeSnapshot | null
   publishedAt: Date | null
+  publishedVersionId: string | null
   runtimeStatus: 'UNPUBLISHED' | 'USABLE' | 'UNHEALTHY'
   runtimeError: string | null
 }
@@ -171,12 +173,22 @@ export async function publishAiMemberConfig(
       handoffOnUnableToAnswer: config.handoffOnUnableToAnswer,
       handoffKeywords: config.handoffKeywords,
     }
+    const [version] = await tx
+      .insert(aiConfigVersion)
+      .values({
+        memberId: target.id,
+        snapshot,
+        publishedAt: now,
+      })
+      .returning({ id: aiConfigVersion.id })
+    if (!version) throw new Error('Version was not created')
     if (stored) {
       await tx
         .update(aiMemberConfig)
         .set({
           publishedSnapshot: snapshot,
           publishedAt: now,
+          publishedVersionId: version.id,
           runtimeStatus: 'USABLE',
           runtimeError: null,
           updatedAt: now,
@@ -187,6 +199,7 @@ export async function publishAiMemberConfig(
         ...config,
         publishedSnapshot: snapshot,
         publishedAt: now,
+        publishedVersionId: version.id,
         runtimeStatus: 'USABLE',
         runtimeError: null,
         updatedAt: now,
@@ -218,6 +231,7 @@ async function selectAiMemberConfig(
       handoffKeywords: aiMemberConfig.handoffKeywords,
       publishedSnapshot: aiMemberConfig.publishedSnapshot,
       publishedAt: aiMemberConfig.publishedAt,
+      publishedVersionId: aiMemberConfig.publishedVersionId,
       runtimeStatus: aiMemberConfig.runtimeStatus,
       runtimeError: aiMemberConfig.runtimeError,
     })
@@ -240,6 +254,7 @@ async function selectAiMemberConfig(
     handoffKeywords: row.handoffKeywords ?? [],
     publishedSnapshot: row.publishedSnapshot ?? null,
     publishedAt: row.publishedAt ?? null,
+    publishedVersionId: row.publishedVersionId ?? null,
     runtimeStatus: row.runtimeStatus ?? 'UNPUBLISHED',
     runtimeError: row.runtimeError ?? null,
   }
@@ -265,17 +280,89 @@ async function assertKnowledgeBase(tx: Transaction, workspaceId: string, knowled
   if (!base) throw new AiMemberError('INVALID_CONFIGURATION', 'Knowledge base is not in workspace')
 }
 
-async function assertManager(tx: Transaction, workspaceId: string, userId: string) {
+export async function assertAiManager(tx: QueryHandle, workspaceId: string, userId: string) {
   const [access] = await tx
     .select({ role: workspaceUserAccess.role })
     .from(workspaceUserAccess)
+    .innerJoin(member, eq(member.workspaceUserAccessId, workspaceUserAccess.id))
     .where(
-      and(eq(workspaceUserAccess.workspaceId, workspaceId), eq(workspaceUserAccess.userId, userId)),
+      and(
+        eq(workspaceUserAccess.workspaceId, workspaceId),
+        eq(workspaceUserAccess.userId, userId),
+        eq(member.status, 'ACTIVE'),
+      ),
     )
     .limit(1)
   if (!access || access.role === 'AGENT') {
     throw new AiMemberError('FORBIDDEN', 'Manager access required')
   }
+}
+
+const assertManager = assertAiManager
+
+export async function listAiConfigVersions(
+  db: Database,
+  input: {
+    workspaceId: string
+    memberId: string
+    actingUserId: string
+  },
+) {
+  await getAiMemberConfig(db, input)
+  const versions = await db
+    .select()
+    .from(aiConfigVersion)
+    .where(eq(aiConfigVersion.memberId, input.memberId))
+    .orderBy(desc(aiConfigVersion.publishedAt), desc(aiConfigVersion.id))
+  const bases = await db
+    .select({ id: knowledgeBase.id })
+    .from(knowledgeBase)
+    .where(eq(knowledgeBase.workspaceId, input.workspaceId))
+  return versions.map((version) => ({
+    ...version,
+    invalidReferences: bases.some(({ id }) => id === version.snapshot.knowledgeBaseId)
+      ? []
+      : ['knowledgeBaseId'],
+  }))
+}
+
+export async function restoreAiConfigVersion(
+  db: Database,
+  input: {
+    workspaceId: string
+    memberId: string
+    actingUserId: string
+    versionId: string
+  },
+) {
+  return db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.actingUserId)
+    await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
+    await lockAiMember(tx, input.workspaceId, input.memberId)
+    const [version] = await tx
+      .select()
+      .from(aiConfigVersion)
+      .where(
+        and(eq(aiConfigVersion.id, input.versionId), eq(aiConfigVersion.memberId, input.memberId)),
+      )
+      .limit(1)
+    if (!version) throw new AiMemberError('NOT_FOUND')
+    const [base] = await tx
+      .select({ id: knowledgeBase.id })
+      .from(knowledgeBase)
+      .where(
+        and(
+          eq(knowledgeBase.id, version.snapshot.knowledgeBaseId),
+          eq(knowledgeBase.workspaceId, input.workspaceId),
+        ),
+      )
+      .limit(1)
+    await tx
+      .update(aiMemberConfig)
+      .set({ ...version.snapshot, knowledgeBaseId: base?.id ?? null, updatedAt: new Date() })
+      .where(eq(aiMemberConfig.memberId, input.memberId))
+    return selectAiMemberConfig(tx, input.workspaceId, input.memberId)
+  })
 }
 
 function normalizeDraft(input: UpdateAiMemberConfigInput) {

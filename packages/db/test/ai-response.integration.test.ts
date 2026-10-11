@@ -9,6 +9,7 @@ import {
   bootstrapWorkspace,
   claimAiResponseRun,
   commitAiResponse,
+  getAiDiagnostics,
   connectFacebookPages,
   createAiMember,
   createDatabase,
@@ -70,6 +71,18 @@ describe.skipIf(!connectionString)('AI response runs', () => {
       publishedSnapshot: expect.objectContaining({ knowledgeBaseId: fixture.knowledgeBaseId }),
       inputMessages: [{ id: received.messageId, text: 'How much is shipping?' }],
     })
+    if (claimed?.kind !== 'CLAIMED') throw new Error('Run was not claimed')
+    const identity = {
+      workspaceId: fixture.workspaceId,
+      actingUserId: fixture.ownerId,
+      memberId: fixture.aiMemberId,
+    }
+    await updateAiMemberConfig(db, { ...identity, instructions: 'A later policy.' })
+    const later = await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    const diagnostic = await getAiDiagnostics(db, { ...identity, id: claimed.id })
+    expect(diagnostic.run?.configVersionId).toBe(claimed.configVersionId)
+    expect(diagnostic.run?.configVersionId).not.toBe(later.publishedVersionId)
+    expect(diagnostic.run?.configSnapshot).toEqual(claimed.publishedSnapshot)
 
     const committed = await commitAiResponse(db, {
       runId: routed.aiResponseRunId as string,

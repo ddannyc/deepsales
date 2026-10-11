@@ -23,6 +23,8 @@ import {
   transferConversation,
   updateAiMemberConfig,
   user,
+  saveAiBudget,
+  getAiBudget,
 } from '@deepsales/db'
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
@@ -923,7 +925,10 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
       now: receivedAt,
     })
     if (!routed.aiResponseRunId) throw new Error('AI response run was not created')
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('temporary network failure')))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(null, { status: 503 })),
+    )
 
     const queued = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
     await handleAiResponseBatch(batch('deepsales-ai', queued), environment())
@@ -943,6 +948,46 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
         .where(eq(aiMemberConfig.memberId, fixture.aiMemberId)),
     ).toEqual([{ runtimeStatus: 'USABLE' }])
   })
+
+  it.each(['QUOTA_EXHAUSTED', 'OPERATION_PAUSED'])(
+    'stops paid calls and preserves input when %s',
+    async (code) => {
+      const fixture = await createFixture(db)
+      const identity = { workspaceId: fixture.workspaceId, actingUserId: fixture.ownerId }
+      if (code === 'QUOTA_EXHAUSTED') await saveAiBudget(db, { ...identity, monthlyLimit: 0 })
+      const received = await receiveContextInput(db, fixture, 'Hello, please help.')
+      const routed = await autoAssignConversation(db, {
+        workspaceId: fixture.workspaceId,
+        conversationId: received.conversationId,
+        now: new Date(Date.now() - 10_000),
+      })
+      if (!routed.aiResponseRunId) throw new Error('Missing run')
+      const fetcher = vi.fn().mockRejectedValue(new Error('unknown network result'))
+      vi.stubGlobal('fetch', fetcher)
+      const queued = queueMessage({ v: 1, type: 'ai.response', runId: routed.aiResponseRunId })
+      await handleAiResponseBatch(batch('deepsales-ai', queued), environment())
+      await handleAiResponseBatch(batch('deepsales-ai', queued), environment())
+      expect(fetcher).toHaveBeenCalledTimes(code === 'QUOTA_EXHAUSTED' ? 0 : 1)
+      const [current] = await db
+        .select()
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId))
+      expect(current).toMatchObject({
+        routingConstraint: 'HUMAN_ONLY',
+        assigneeMemberId: null,
+        queueReason: 'AI_HANDOFF',
+      })
+      const [run] = await db
+        .select()
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, routed.aiResponseRunId))
+      expect(run.failureCode).toBe(code)
+      expect((await getAiBudget(db, identity)).used).toBe(code === 'QUOTA_EXHAUSTED' ? 0 : 1)
+      expect(
+        await db.select().from(message).where(eq(message.id, received.messageId)),
+      ).toHaveLength(1)
+    },
+  )
 
   it('hands off stale generations during scheduled recovery', async () => {
     const fixture = await createFixture(db)

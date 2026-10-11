@@ -42,6 +42,7 @@ export type AiResponseRunClaim = {
   inputFirstMessageId: string
   inputLastMessageId: string
   publishedSnapshot: AiMemberRuntimeSnapshot | null
+  configVersionId: string | null
   inputMessages: AiResponseInputMessage[]
   history: AiConversationContextMessage[]
 }
@@ -136,6 +137,9 @@ export async function claimAiResponseRun(
         inputFirstMessageId: aiResponseRun.inputFirstMessageId,
         inputLastMessageId: aiResponseRun.inputLastMessageId,
         scheduledFor: aiResponseRun.scheduledFor,
+        configVersionId: aiResponseRun.configVersionId,
+        configSnapshot: aiResponseRun.configSnapshot,
+        contextMessageIds: aiResponseRun.contextMessageIds,
         workspaceId: conversation.workspaceId,
         conversationStatus: conversation.status,
         assigneeMemberId: conversation.assigneeMemberId,
@@ -169,10 +173,22 @@ export async function claimAiResponseRun(
       .where(and(eq(aiResponseRun.id, current.id), eq(aiResponseRun.state, 'QUEUED')))
 
     const [config] = await tx
-      .select({ publishedSnapshot: aiMemberConfig.publishedSnapshot })
+      .select({
+        publishedSnapshot: aiMemberConfig.publishedSnapshot,
+        publishedVersionId: aiMemberConfig.publishedVersionId,
+      })
       .from(aiMemberConfig)
       .where(eq(aiMemberConfig.memberId, current.memberId))
       .limit(1)
+
+    const snapshot = current.configSnapshot ?? config?.publishedSnapshot ?? null
+    const configVersionId = current.configSnapshot
+      ? current.configVersionId
+      : (config?.publishedVersionId ?? null)
+    await tx
+      .update(aiResponseRun)
+      .set({ configSnapshot: snapshot, configVersionId })
+      .where(eq(aiResponseRun.id, current.id))
 
     const boundaries = await tx
       // Keep PostgreSQL microseconds for cutoff comparisons; JavaScript Dates lose them.
@@ -294,6 +310,48 @@ export async function claimAiResponseRun(
       }
     }
 
+    if (current.contextMessageIds === null) {
+      await tx
+        .update(aiResponseRun)
+        .set({ contextMessageIds: history.map(({ id }) => id) })
+        .where(eq(aiResponseRun.id, current.id))
+    } else {
+      const stored = current.contextMessageIds.length
+        ? await tx
+            .select({
+              id: message.id,
+              direction: message.direction,
+              senderType: message.senderType,
+              senderMemberId: message.senderMemberId,
+              createdAt: message.createdAt,
+              text: message.text,
+              memberType: member.type,
+            })
+            .from(message)
+            .leftJoin(member, eq(member.id, message.senderMemberId))
+            .where(
+              and(
+                eq(message.conversationId, current.conversationId),
+                inArray(message.id, current.contextMessageIds),
+              ),
+            )
+        : []
+      history.splice(0, history.length)
+      for (const id of current.contextMessageIds) {
+        const item = stored.find((m) => m.id === id)
+        const origin = item?.senderType === 'CUSTOMER' ? 'CUSTOMER' : item?.memberType
+        if (item?.text && origin)
+          history.push({
+            id: item.id,
+            direction: item.direction,
+            origin,
+            senderMemberId: item.senderMemberId,
+            createdAt: item.createdAt,
+            text: item.text,
+          })
+      }
+    }
+
     return {
       kind: 'CLAIMED' as const,
       state: 'GENERATING' as const,
@@ -303,7 +361,8 @@ export async function claimAiResponseRun(
       memberId: current.memberId,
       inputFirstMessageId: current.inputFirstMessageId,
       inputLastMessageId: current.inputLastMessageId,
-      publishedSnapshot: config?.publishedSnapshot ?? null,
+      publishedSnapshot: snapshot,
+      configVersionId,
       inputMessages,
       history,
     }
@@ -531,7 +590,7 @@ export async function commitAiResponse(
       .where(eq(conversation.id, current.id))
     await tx
       .update(aiResponseRun)
-      .set({ state: 'COMPLETED', completedAt: now, updatedAt: now })
+      .set({ state: 'COMPLETED', outputMessageId: created.id, completedAt: now, updatedAt: now })
       .where(and(eq(aiResponseRun.id, run.id), eq(aiResponseRun.state, 'GENERATING')))
 
     return {

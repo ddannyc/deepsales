@@ -176,6 +176,13 @@
       "when": 1791653163017,
       "tag": "0024_easy_betty_brant",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791694886000,
+      "tag": "0025_ai_operations",
+      "breakpoints": true
     }
   ]
 }

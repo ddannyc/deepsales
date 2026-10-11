@@ -38,6 +38,7 @@ import {
 import { createRoot } from 'react-dom/client'
 import { InternalNotes } from './internal-notes'
 import { ReplyContent } from './reply-content'
+import { AiOperations } from './ai-operations'
 import { InboxFilterControls, inboxQuery, type InboxFilters } from './inbox-filters'
 import { toast } from 'sonner'
 import {
@@ -313,6 +314,7 @@ type AiMemberConfig = {
   handoffKeywords: string[]
   publishedSnapshot: AiMemberRuntimeSnapshot | null
   publishedAt: string | null
+  publishedVersionId: string | null
   runtimeStatus: 'UNPUBLISHED' | 'USABLE' | 'UNHEALTHY'
   runtimeError: string | null
 }
@@ -2016,6 +2018,7 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                         message={message}
                         teamMembers={teamMembers}
                         workspaceId={workspace.id}
+                        canDiagnose={workspace.role !== 'AGENT'}
                         onRetry={
                           message.deliveryState === 'FAILED' &&
                           message.failureCode !== 'AMBIGUOUS_DELIVERY' &&
@@ -2394,11 +2397,13 @@ function MessageBubble({
   teamMembers,
   workspaceId,
   onRetry,
+  canDiagnose,
 }: {
   message: InboxMessage
   teamMembers: TeamMember[]
   workspaceId: string
   onRetry?: () => Promise<void>
+  canDiagnose?: boolean
 }) {
   const inbound = message.direction === 'INBOUND'
   const senderMember = message.senderMemberId
@@ -2440,6 +2445,9 @@ function MessageBubble({
         <Button type="button" variant="ghost" onClick={() => void onRetry()}>
           检查并重试发送
         </Button>
+      )}
+      {isAi && canDiagnose && (
+        <a href={`/ai-member/${senderMember.id}?diagnosticMessage=${message.id}`}>反馈与诊断</a>
       )}
     </article>
   )
@@ -3869,6 +3877,12 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
           </section>
         </aside>
       </div>
+      <AiOperations
+        workspaceId={workspace.id}
+        memberId={memberId}
+        publishedVersionId={config.publishedVersionId}
+        onRestored={load}
+      />
     </main>
   )
 }
