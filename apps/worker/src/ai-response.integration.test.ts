@@ -53,6 +53,77 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
 
+  it('uses published natural tone and disabled waiting once, despite later draft changes and duplicate queue delivery', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...identity,
+      naturalToneEnabled: true,
+      replyWaitEnabled: false,
+    })
+    await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    await updateAiMemberConfig(db, {
+      ...identity,
+      naturalToneEnabled: false,
+      replyWaitEnabled: true,
+    })
+    const current = await receiveContextInput(db, f, 'Hello')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: current.conversationId,
+    })
+    const prompts: string[] = []
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(url).endsWith('/embeddings'))
+          return Response.json({ data: [{ index: 0, embedding: vector() }] })
+        const body = JSON.parse(init?.body as string)
+        prompts.push(body.messages[0].content)
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Hello. How can I help?',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    const job = { v: 1, type: 'ai.response', runId: routed.aiResponseRunId }
+    await handleAiResponseBatch(batch('deepsales-ai', queueMessage(job)), environment())
+    await handleAiResponseBatch(batch('deepsales-ai', queueMessage(job)), environment())
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('Use a natural, conversational tone')
+    expect(prompts[0]).toContain('Keep your AI identity')
+    const [run] = await db
+      .select()
+      .from(aiResponseRun)
+      .where(eq(aiResponseRun.id, routed.aiResponseRunId as string))
+    expect(run).toMatchObject({
+      state: 'COMPLETED',
+      configSnapshot: { naturalToneEnabled: true, replyWaitEnabled: false },
+    })
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, current.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        ),
+    ).toMatchObject([{ text: 'Hello. How can I help?', deliveryState: 'PENDING' }])
+  })
+
   it('pins an identity-scoped source and refuses advertising and reply commits after access revocation', async () => {
     const f = await createFixture(db)
     const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }

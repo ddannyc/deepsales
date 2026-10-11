@@ -787,6 +787,14 @@ function SnapshotPreview({ snapshot }: { snapshot: Record<string, unknown> | nul
         <dd>{snapshot.adLearningEnabled ? '启用' : '停用'}</dd>
       </div>
       <div>
+        <dt>自然语气</dt>
+        <dd>{snapshot.naturalToneEnabled ? '启用' : '停用'}</dd>
+      </div>
+      <div>
+        <dt>等待合并输入</dt>
+        <dd>{snapshot.replyWaitEnabled !== false ? '启用（2 秒，最多 30 秒）' : '停用'}</dd>
+      </div>
+      <div>
         <dt>广告 ID 映射表</dt>
         <dd>
           <pre>{JSON.stringify(snapshot.adMappings ?? [], null, 2)}</pre>

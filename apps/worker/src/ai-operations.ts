@@ -186,6 +186,7 @@ export function aiOperationsRoutes(
               fetcher,
             )
             const decision = await llm.generateResponse({
+              naturalToneEnabled: snapshot.naturalToneEnabled,
               instructions: snapshot.instructions,
               responseLanguage: snapshot.responseLanguage,
               messages: [{ id: input.id, text: input.text }],

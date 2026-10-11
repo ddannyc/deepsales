@@ -145,11 +145,19 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
       ((await latest.json()) as { config: { adMappings: unknown } }).config.adMappings,
     ).toEqual([{ adId: '789', content: 'Torch reference.' }])
     expect((await f.configCall({ adMappings: [] })).status).toBe(200)
+    expect((await f.configCall({ naturalToneEnabled: true, replyWaitEnabled: false })).status).toBe(
+      200,
+    )
+    expect((await f.configCall({ replyWaitEnabled: 'false' })).status).toBe(400)
+    expect((await f.configCall({ naturalToneEnabled: 'true' })).status).toBe(400)
     await db
       .update(workspaceUserAccess)
       .set({ role: 'AGENT' })
       .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
     expect((await f.configCall({ adLearningEnabled: false })).status).toBe(403)
+    expect((await f.configCall({ naturalToneEnabled: false, replyWaitEnabled: true })).status).toBe(
+      403,
+    )
   })
   it('deduplicates operations and separates tests across UTC date boundaries', async () => {
     const f = await fixture()

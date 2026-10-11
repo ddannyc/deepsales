@@ -436,12 +436,17 @@ export async function listQueuedConversationIds(
   })
 }
 
-export async function listQueuedAiResponseRunIds(db: Database, limit = 100) {
+export async function listQueuedAiResponseRunIds(db: Database, limit = 100, memberId?: string) {
   return db.transaction(async (tx) => {
     const rows = await tx
       .select({ runId: aiResponseRun.id })
       .from(aiResponseRun)
-      .where(eq(aiResponseRun.state, 'QUEUED'))
+      .where(
+        and(
+          eq(aiResponseRun.state, 'QUEUED'),
+          memberId ? eq(aiResponseRun.memberId, memberId) : undefined,
+        ),
+      )
       .orderBy(asc(aiResponseRun.scheduledFor), asc(aiResponseRun.id))
       .limit(Math.min(Math.max(limit, 1), 100))
       .for('update', { skipLocked: true })
@@ -780,12 +785,30 @@ export async function ensureAiResponseRun(
   const last = unanswered.at(-1)
   if (!first || !last) return null
 
+  async function schedule(runId: string, startedAt: Date) {
+    // Read after the run lock or insert's member FK lock serializes with publication.
+    const [config] = await tx
+      .select({ snapshot: aiMemberConfig.publishedSnapshot })
+      .from(aiMemberConfig)
+      .where(eq(aiMemberConfig.memberId, input.memberId))
+    const waitMs = config?.snapshot?.replyWaitEnabled === false ? 0 : AI_DEBOUNCE_MS
+    await tx
+      .update(aiResponseRun)
+      .set({
+        scheduledFor: new Date(
+          Math.min(input.now.getTime() + waitMs, startedAt.getTime() + 30_000),
+        ),
+      })
+      .where(eq(aiResponseRun.id, runId))
+  }
   const [active] = await tx
     .select({
       id: aiResponseRun.id,
       state: aiResponseRun.state,
       memberId: aiResponseRun.memberId,
       inputLastMessageId: aiResponseRun.inputLastMessageId,
+      createdAt: aiResponseRun.createdAt,
+      configSnapshot: aiResponseRun.configSnapshot,
     })
     .from(aiResponseRun)
     .where(
@@ -797,17 +820,18 @@ export async function ensureAiResponseRun(
     .for('update')
     .limit(1)
   if (active) {
-    if (active.memberId === input.memberId && active.state === 'QUEUED') {
+    if (active.memberId === input.memberId && active.state === 'QUEUED' && !active.configSnapshot) {
+      if (active.inputLastMessageId === last.id) return active.id
       await tx
         .update(aiResponseRun)
         .set({
           memberId: input.memberId,
           inputFirstMessageId: first.id,
           inputLastMessageId: last.id,
-          scheduledFor: new Date(input.now.getTime() + AI_DEBOUNCE_MS),
           updatedAt: input.now,
         })
         .where(eq(aiResponseRun.id, active.id))
+      await schedule(active.id, active.createdAt)
       return active.id
     }
     if (active.memberId === input.memberId && active.inputLastMessageId === last.id) {
@@ -828,12 +852,13 @@ export async function ensureAiResponseRun(
       state: 'QUEUED',
       inputFirstMessageId: first.id,
       inputLastMessageId: last.id,
-      scheduledFor: new Date(input.now.getTime() + AI_DEBOUNCE_MS),
+      scheduledFor: input.now,
       createdAt: input.now,
       updatedAt: input.now,
     })
     .returning({ id: aiResponseRun.id })
   if (!created) throw new AssignmentError('INVALID_REQUEST', 'AI response run was not created')
+  await schedule(created.id, input.now)
   return created.id
 }
 

@@ -293,6 +293,8 @@ type KnowledgeDocument = {
 }
 
 type AiMemberRuntimeSnapshot = {
+  naturalToneEnabled?: boolean
+  replyWaitEnabled?: boolean
   adLearningEnabled?: boolean
   adMappings?: { adId: string; content: string }[]
   instructions: string
@@ -306,6 +308,8 @@ type AiMemberRuntimeSnapshot = {
 }
 
 type AiMemberConfig = {
+  naturalToneEnabled: boolean
+  replyWaitEnabled: boolean
   adLearningEnabled: boolean
   adMappings: { adId: string; content: string }[]
   memberId: string
@@ -338,6 +342,8 @@ type AiMemberDraft = Pick<
   | 'handoffKeywords'
   | 'adLearningEnabled'
   | 'adMappings'
+  | 'naturalToneEnabled'
+  | 'replyWaitEnabled'
 >
 
 class ApiError extends Error {
@@ -4049,6 +4055,50 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
           </section>
 
           <Separator />
+          <section aria-labelledby="ai-style-title" className="ai-config-section">
+            <div className="section-heading">
+              <div>
+                <h2 id="ai-style-title">回复语气与等待</h2>
+                <p>保存为草稿，发布后生效。AI 身份和转人工策略保持明确。</p>
+              </div>
+            </div>
+            <div className="switch-field">
+              <span id="ai-natural-label">自然语气</span>
+              <Switch
+                aria-labelledby="ai-natural-label"
+                aria-describedby="ai-natural-description"
+                checked={draft.naturalToneEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) =>
+                  setDraft((current) =>
+                    current ? { ...current, naturalToneEnabled: checked } : current,
+                  )
+                }
+              />
+            </div>
+            <p id="ai-natural-description" className="field-description">
+              使用清晰、简洁的对话语气，不冒充真人客服；回答仍须依据知识库。
+            </p>
+            <div className="switch-field">
+              <span id="ai-wait-label">等待合并输入</span>
+              <Switch
+                aria-labelledby="ai-wait-label"
+                aria-describedby="ai-wait-description"
+                checked={draft.replyWaitEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) =>
+                  setDraft((current) =>
+                    current ? { ...current, replyWaitEnabled: checked } : current,
+                  )
+                }
+              />
+            </div>
+            <p id="ai-wait-description" className="field-description">
+              启用时等待 2 秒收齐连续输入，最多等待 30
+              秒后尝试处理。关闭后立即进入处理队列；新输入和人工接管仍会阻止旧回复。
+            </p>
+          </section>
+          <Separator />
           <section aria-labelledby="ai-ad-title" className="ai-config-section">
             <div className="section-heading">
               <div>
@@ -4234,6 +4284,18 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                     {config.publishedSnapshot.adMappings?.length ?? 0} 条映射
                   </dd>
                 </div>
+                <div>
+                  <dt>自然语气</dt>
+                  <dd>{config.publishedSnapshot.naturalToneEnabled ? '启用' : '停用'}</dd>
+                </div>
+                <div>
+                  <dt>等待合并输入</dt>
+                  <dd>
+                    {config.publishedSnapshot.replyWaitEnabled !== false
+                      ? '启用（2 秒，最多 30 秒）'
+                      : '停用'}
+                  </dd>
+                </div>
               </dl>
             ) : (
               <p className="table-muted">
@@ -4283,6 +4345,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.handoffKeywords,
       left.adLearningEnabled ?? false,
       left.adMappings ?? [],
+      left.naturalToneEnabled ?? false,
+      left.replyWaitEnabled ?? true,
     ]) ===
     JSON.stringify([
       right.instructions,
@@ -4295,6 +4359,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       right.handoffKeywords,
       right.adLearningEnabled ?? false,
       right.adMappings ?? [],
+      right.naturalToneEnabled ?? false,
+      right.replyWaitEnabled ?? true,
     ])
   )
 }
@@ -4302,6 +4368,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
 function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
   return {
     instructions: config.instructions,
+    naturalToneEnabled: config.naturalToneEnabled ?? false,
+    replyWaitEnabled: config.replyWaitEnabled ?? true,
     adLearningEnabled: config.adLearningEnabled ?? false,
     adMappings: config.adMappings ?? [],
     responseLanguage: config.responseLanguage,

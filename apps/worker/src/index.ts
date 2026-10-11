@@ -365,6 +365,8 @@ const aiMemberConfigInput = z
     handoffOnUnableToAnswer: z.boolean().optional(),
     handoffKeywords: z.array(z.string().max(100)).max(100).optional(),
     adLearningEnabled: z.boolean().optional(),
+    naturalToneEnabled: z.boolean().optional(),
+    replyWaitEnabled: z.boolean().optional(),
     adMappings: z
       .array(z.object({ adId: z.string().max(200), content: z.string().max(4000) }).strict())
       .max(100)
@@ -798,6 +800,8 @@ app.post('/api/workspaces/:workspaceId/ai-members/:memberId/publish', async (c) 
         }),
       })
       await enqueueQueuedConversations(c.env, db, c.req.param('workspaceId'))
+      for (const runId of await listQueuedAiResponseRunIds(db, 100, config.memberId))
+        await enqueueAiResponseJob(c.env, runId)
       await publishMemberChange(c.env, c.req.param('workspaceId'), c.req.param('memberId'))
       return c.json({ config })
     } catch (error) {
@@ -3250,6 +3254,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         meteredFetch,
       )
       const decision = await llmProvider.generateResponse({
+        naturalToneEnabled: currentSnapshot.naturalToneEnabled,
         instructions: currentSnapshot.instructions,
         responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,

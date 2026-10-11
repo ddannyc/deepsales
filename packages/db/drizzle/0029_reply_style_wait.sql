@@ -1,0 +1,2 @@
+ALTER TABLE "ai_member_config" ADD COLUMN "natural_tone_enabled" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+ALTER TABLE "ai_member_config" ADD COLUMN "reply_wait_enabled" boolean DEFAULT true NOT NULL;

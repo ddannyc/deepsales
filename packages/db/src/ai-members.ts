@@ -3,6 +3,7 @@ import type { Database } from './database'
 import {
   aiMemberConfig,
   aiConfigVersion,
+  aiResponseRun,
   channel,
   knowledgeBase,
   member,
@@ -37,6 +38,8 @@ type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 type QueryHandle = Database | Transaction
 
 export type AiMemberConfig = {
+  naturalToneEnabled: boolean
+  replyWaitEnabled: boolean
   memberId: string
   memberDisplayName: string | null
   memberStatus: 'ACTIVE' | 'DISABLED'
@@ -58,6 +61,8 @@ export type AiMemberConfig = {
 }
 
 export type UpdateAiMemberConfigInput = {
+  naturalToneEnabled?: boolean
+  replyWaitEnabled?: boolean
   workspaceId: string
   memberId: string
   actingUserId: string
@@ -117,6 +122,8 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
         handoffKeywords: draft.handoffKeywords ?? [],
         adLearningEnabled: draft.adLearningEnabled ?? false,
         adMappings: draft.adMappings ?? [],
+        naturalToneEnabled: draft.naturalToneEnabled ?? false,
+        replyWaitEnabled: draft.replyWaitEnabled ?? true,
       })
     }
     return selectAiMemberConfig(tx, input.workspaceId, input.memberId)
@@ -181,6 +188,8 @@ export async function publishAiMemberConfig(
       handoffKeywords: config.handoffKeywords,
       adLearningEnabled: config.adLearningEnabled,
       adMappings: config.adMappings,
+      naturalToneEnabled: config.naturalToneEnabled,
+      replyWaitEnabled: config.replyWaitEnabled,
     }
     const [version] = await tx
       .insert(aiConfigVersion)
@@ -214,6 +223,18 @@ export async function publishAiMemberConfig(
         updatedAt: now,
       })
     }
+    await tx
+      .update(aiResponseRun)
+      .set({
+        scheduledFor: sql`least(${aiResponseRun.updatedAt} + ${snapshot.replyWaitEnabled ? 2000 : 0} * interval '1 millisecond', ${aiResponseRun.createdAt} + interval '30 seconds')`,
+      })
+      .where(
+        and(
+          eq(aiResponseRun.memberId, target.id),
+          eq(aiResponseRun.state, 'QUEUED'),
+          sql`${aiResponseRun.configSnapshot} is null`,
+        ),
+      )
     return selectAiMemberConfig(tx, input.workspaceId, input.memberId)
   })
 }
@@ -240,6 +261,8 @@ async function selectAiMemberConfig(
       handoffKeywords: aiMemberConfig.handoffKeywords,
       adLearningEnabled: aiMemberConfig.adLearningEnabled,
       adMappings: aiMemberConfig.adMappings,
+      naturalToneEnabled: aiMemberConfig.naturalToneEnabled,
+      replyWaitEnabled: aiMemberConfig.replyWaitEnabled,
       publishedSnapshot: aiMemberConfig.publishedSnapshot,
       publishedAt: aiMemberConfig.publishedAt,
       publishedVersionId: aiMemberConfig.publishedVersionId,
@@ -265,6 +288,8 @@ async function selectAiMemberConfig(
     handoffKeywords: row.handoffKeywords ?? [],
     adLearningEnabled: row.adLearningEnabled ?? false,
     adMappings: row.adMappings ?? [],
+    naturalToneEnabled: row.naturalToneEnabled ?? false,
+    replyWaitEnabled: row.replyWaitEnabled ?? true,
     publishedSnapshot: row.publishedSnapshot ?? null,
     publishedAt: row.publishedAt ?? null,
     publishedVersionId: row.publishedVersionId ?? null,
@@ -376,6 +401,8 @@ export async function restoreAiConfigVersion(
         ...version.snapshot,
         adLearningEnabled: version.snapshot.adLearningEnabled ?? false,
         adMappings: version.snapshot.adMappings ?? [],
+        naturalToneEnabled: version.snapshot.naturalToneEnabled ?? false,
+        replyWaitEnabled: version.snapshot.replyWaitEnabled ?? true,
         knowledgeBaseId: base?.id ?? null,
         updatedAt: new Date(),
       })
@@ -405,6 +432,8 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
     handoffOnUnableToAnswer: input.handoffOnUnableToAnswer,
     handoffKeywords,
     adLearningEnabled: input.adLearningEnabled,
+    naturalToneEnabled: input.naturalToneEnabled,
+    replyWaitEnabled: input.replyWaitEnabled,
     adMappings: input.adMappings === undefined ? undefined : normalizeAdMappings(input.adMappings),
   }
 }
@@ -449,6 +478,8 @@ function defaultConfig(memberId: string) {
     handoffKeywords: [],
     adLearningEnabled: false,
     adMappings: [],
+    naturalToneEnabled: false,
+    replyWaitEnabled: true,
     publishedSnapshot: null,
     publishedAt: null,
     runtimeStatus: 'UNPUBLISHED' as const,

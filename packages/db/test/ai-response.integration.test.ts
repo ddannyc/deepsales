@@ -18,6 +18,7 @@ import {
   message,
   processFacebookInbound,
   publishAiMemberConfig,
+  retryAiResponseRun,
   recoverStaleAiResponseRuns,
   takeOverConversation,
   updateAiMemberConfig,
@@ -35,6 +36,180 @@ describe.skipIf(!connectionString)('AI response runs', () => {
   })
 
   afterAll(() => pool.end())
+
+  it.each(['existing', 'new'])(
+    'uses the published wait setting during a concurrent %s run update',
+    async (kind) => {
+      const f = await createFixture(db)
+      const start = new Date()
+      const first = await receive(db, f, 'First question.', start)
+      const routed = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: first.conversationId,
+        now: start,
+      })
+      const runId = routed.aiResponseRunId as string
+      if (kind === 'new') {
+        await db
+          .update(aiResponseRun)
+          .set({ state: 'CANCELLED' })
+          .where(eq(aiResponseRun.id, runId))
+      }
+      const identity = {
+        workspaceId: f.workspaceId,
+        memberId: f.aiMemberId,
+        actingUserId: f.ownerId,
+      }
+      await updateAiMemberConfig(db, { ...identity, replyWaitEnabled: false })
+      const blocker = await pool.connect()
+      let publication: ReturnType<typeof publishAiMemberConfig> | undefined
+      let inbound: ReturnType<typeof receive> | undefined
+      const nextAt = new Date(start.getTime() + 1000)
+      try {
+        await blocker.query('begin')
+        await blocker.query(
+          kind === 'existing'
+            ? 'select id from ai_response_run where id = $1 for update'
+            : 'select id from member where id = $1 for update',
+          [kind === 'existing' ? runId : f.aiMemberId],
+        )
+        publication = publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+        await waitForSqlLock(
+          pool,
+          kind === 'existing' ? 'update "ai_response_run"%' : '%from "member"%for update%',
+        )
+        inbound = receive(db, f, 'Next question.', nextAt)
+        await waitForSqlLock(
+          pool,
+          kind === 'existing'
+            ? '%from "ai_response_run"%for update%'
+            : 'insert into "ai_response_run"%',
+        )
+        await blocker.query('rollback')
+        await publication
+        const received = await inbound
+        expect(
+          await claimAiResponseRun(db, { runId: received.aiResponseRunId as string, now: nextAt }),
+        ).toMatchObject({
+          kind: 'CLAIMED',
+          publishedSnapshot: { replyWaitEnabled: false },
+        })
+      } finally {
+        await blocker.query('rollback').catch(() => undefined)
+        blocker.release()
+        await Promise.allSettled([publication, inbound])
+      }
+    },
+  )
+
+  it('keeps retry backoff separate from waiting and starts a fresh run for later input', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    const start = new Date()
+    const first = await receive(db, f, 'First question.', start)
+    const routed = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: first.conversationId,
+      now: start,
+    })
+    const runId = routed.aiResponseRunId as string
+    await claimAiResponseRun(db, { runId, now: new Date(start.getTime() + 2000) })
+    await retryAiResponseRun(db, { runId, now: new Date(start.getTime() + 33_000) })
+    await updateAiMemberConfig(db, { ...identity, replyWaitEnabled: false })
+    await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    expect(
+      await claimAiResponseRun(db, { runId, now: new Date(start.getTime() + 4000) }),
+    ).toMatchObject({ kind: 'DELAYED', retryAfterMs: 29_000 })
+    const second = await receive(db, f, 'A new question.', new Date(start.getTime() + 5000))
+    expect(second.aiResponseRunId).not.toBe(runId)
+    expect(
+      await claimAiResponseRun(db, {
+        runId: second.aiResponseRunId as string,
+        now: new Date(start.getTime() + 5000),
+      }),
+    ).toMatchObject({ kind: 'CLAIMED', publishedSnapshot: { replyWaitEnabled: false } })
+  })
+
+  it('applies wait changes only on publication and reschedules the existing waiting run', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    const start = new Date()
+    const first = await receive(db, f, 'Hello', start)
+    const routed = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: first.conversationId,
+      now: start,
+    })
+    const runId = routed.aiResponseRunId as string
+    await updateAiMemberConfig(db, {
+      ...identity,
+      replyWaitEnabled: false,
+      naturalToneEnabled: true,
+    })
+    expect(await claimAiResponseRun(db, { runId, now: start })).toMatchObject({
+      kind: 'DELAYED',
+      retryAfterMs: 2000,
+    })
+    await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    const claimed = await claimAiResponseRun(db, { runId, now: start })
+    expect(claimed).toMatchObject({
+      kind: 'CLAIMED',
+      publishedSnapshot: { replyWaitEnabled: false, naturalToneEnabled: true },
+    })
+    expect(
+      await claimAiResponseRun(db, { runId, now: new Date(start.getTime() + 3000) }),
+    ).toBeNull()
+    await takeOverConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: first.conversationId,
+      actingUserId: f.ownerId,
+    })
+    expect(await commitAiResponse(db, { runId, text: 'Hello.' })).toBeNull()
+  })
+
+  it('caps continuous input waiting at thirty seconds without duplicate claims or replies', async () => {
+    const f = await createFixture(db)
+    const start = new Date()
+    const first = await receive(db, f, 'First part.', start)
+    const routed = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: first.conversationId,
+      now: start,
+    })
+    const runId = routed.aiResponseRunId as string
+    let latest = first.messageId
+    for (let seconds = 1; seconds <= 29; seconds += 1) {
+      const inbound = await receive(
+        db,
+        f,
+        `Part ${seconds}.`,
+        new Date(start.getTime() + seconds * 1000),
+      )
+      expect(inbound.aiResponseRunId).toBe(runId)
+      latest = inbound.messageId
+    }
+    expect(
+      await claimAiResponseRun(db, { runId, now: new Date(start.getTime() + 29_000) }),
+    ).toMatchObject({ kind: 'DELAYED', retryAfterMs: 1000 })
+    const attempts = await Promise.all(
+      [1, 2].map(() => claimAiResponseRun(db, { runId, now: new Date(start.getTime() + 30_000) })),
+    )
+    expect(attempts.filter((run) => run?.kind === 'CLAIMED')).toHaveLength(1)
+    const claimed = attempts.find((run) => run?.kind === 'CLAIMED')
+    expect(claimed).toMatchObject({ inputLastMessageId: latest })
+    const results = await Promise.all(
+      [1, 2].map(() => commitAiResponse(db, { runId, text: 'Received all parts.' })),
+    )
+    expect(results.filter((result) => result?.kind === 'COMMITTED')).toHaveLength(1)
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(eq(message.conversationId, first.conversationId), eq(message.direction, 'OUTBOUND')),
+        ),
+    ).toHaveLength(1)
+  })
 
   it('claims the published input and commits one pending AI message', async () => {
     const fixture = await createFixture(db)
@@ -549,4 +724,17 @@ async function waitForConversationLockWaiters(pool: Pool, expected: number) {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
   throw new Error(`Expected ${expected} conversation lock waiters`)
+}
+
+async function waitForSqlLock(pool: Pool, queryPattern: string) {
+  const deadline = Date.now() + 5000
+  while (Date.now() < deadline) {
+    const result = await pool.query(
+      "select 1 from pg_stat_activity where wait_event_type = 'Lock' and state = 'active' and query ilike $1",
+      [queryPattern],
+    )
+    if (result.rowCount) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  throw new Error(`Expected a lock waiter for ${queryPattern}`)
 }

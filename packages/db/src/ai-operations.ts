@@ -346,6 +346,8 @@ export async function createAiTest(
       handoffKeywords: config.handoffKeywords,
       adLearningEnabled: config.adLearningEnabled,
       adMappings: config.adMappings,
+      naturalToneEnabled: config.naturalToneEnabled,
+      replyWaitEnabled: config.replyWaitEnabled,
     }
   if (input.source === 'PUBLISHED') {
     snapshot = config.publishedSnapshot

@@ -974,6 +974,8 @@ export const knowledgeBase = pgTable(
 )
 
 export type AiMemberRuntimeSnapshot = {
+  naturalToneEnabled?: boolean
+  replyWaitEnabled?: boolean
   instructions: string
   responseLanguage: string
   knowledgeBaseId: string
@@ -995,6 +997,8 @@ export type AdvertisingContext = {
 }
 
 export const aiMemberConfig = pgTable('ai_member_config', {
+  naturalToneEnabled: boolean('natural_tone_enabled').default(false).notNull(),
+  replyWaitEnabled: boolean('reply_wait_enabled').default(true).notNull(),
   memberId: uuid('member_id')
     .primaryKey()
     .references(() => member.id, { onDelete: 'cascade' }),

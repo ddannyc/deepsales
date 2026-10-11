@@ -43,7 +43,7 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
 
   afterAll(() => pool.end())
 
-  it('restores whole advertising tables and clears them when restoring a legacy version', async () => {
+  it('restores published reply settings and advertising tables, with legacy defaults', async () => {
     const f = await createFixture(db)
     const identity = { workspaceId: f.workspaceId, memberId: f.memberId, actingUserId: f.userId }
     await setMemberChannelAccess(db, { ...identity, channelIds: [f.channelId] })
@@ -55,16 +55,35 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
       knowledgeBaseId: f.knowledgeBaseId,
       adLearningEnabled: true,
       adMappings: original,
+      naturalToneEnabled: true,
+      replyWaitEnabled: false,
     })
     const published = await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
     const versionId = published.publishedVersionId as string
-    await updateAiMemberConfig(db, { ...identity, adLearningEnabled: false, adMappings: [] })
+    await updateAiMemberConfig(db, {
+      ...identity,
+      adLearningEnabled: false,
+      adMappings: [],
+      naturalToneEnabled: false,
+      replyWaitEnabled: true,
+    })
     expect((await getAiMemberConfig(db, identity)).publishedSnapshot?.adMappings).toEqual(original)
     const restored = await restoreAiConfigVersion(db, { ...identity, versionId })
-    expect(restored).toMatchObject({ adLearningEnabled: true, adMappings: original })
+    expect(restored).toMatchObject({
+      adLearningEnabled: true,
+      adMappings: original,
+      naturalToneEnabled: true,
+      replyWaitEnabled: false,
+    })
     const snapshot = published.publishedSnapshot
     if (!snapshot) throw new Error('No published snapshot')
-    const { adLearningEnabled: _enabled, adMappings: _mappings, ...legacy } = snapshot
+    const {
+      adLearningEnabled: _enabled,
+      adMappings: _mappings,
+      naturalToneEnabled: _tone,
+      replyWaitEnabled: _wait,
+      ...legacy
+    } = snapshot
     const [old] = await db
       .insert(aiConfigVersion)
       .values({ memberId: f.memberId, snapshot: legacy })
@@ -72,6 +91,8 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
     expect(await restoreAiConfigVersion(db, { ...identity, versionId: old.id })).toMatchObject({
       adLearningEnabled: false,
       adMappings: [],
+      naturalToneEnabled: false,
+      replyWaitEnabled: true,
       publishedSnapshot: snapshot,
     })
   })
