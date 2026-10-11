@@ -767,6 +767,7 @@ export const aiResponseRun = pgTable(
       onDelete: 'set null',
     }),
     configSnapshot: jsonb('config_snapshot').$type<AiMemberRuntimeSnapshot>(),
+    advertisingContext: jsonb('advertising_context').$type<AdvertisingContext>(),
     contextMessageIds: uuid('context_message_ids').array(),
     outputMessageId: uuid('output_message_id').references(() => message.id, {
       onDelete: 'set null',
@@ -981,6 +982,16 @@ export type AiMemberRuntimeSnapshot = {
   handoffOnNegativeSentiment: boolean
   handoffOnUnableToAnswer: boolean
   handoffKeywords: string[]
+  adLearningEnabled?: boolean
+  adMappings?: AdMapping[]
+}
+
+export type AdMapping = { adId: string; content: string }
+export type AdvertisingContext = {
+  status: 'DISABLED' | 'NO_SOURCE' | 'UNAVAILABLE' | 'UNMAPPED' | 'MAPPED'
+  referralId?: string
+  adId?: string
+  content?: string
 }
 
 export const aiMemberConfig = pgTable('ai_member_config', {
@@ -997,6 +1008,8 @@ export const aiMemberConfig = pgTable('ai_member_config', {
   handoffOnNegativeSentiment: boolean('handoff_on_negative_sentiment').default(true).notNull(),
   handoffOnUnableToAnswer: boolean('handoff_on_unable_to_answer').default(true).notNull(),
   handoffKeywords: text('handoff_keywords').array().default(sql`ARRAY[]::text[]`).notNull(),
+  adLearningEnabled: boolean('ad_learning_enabled').default(false).notNull(),
+  adMappings: jsonb('ad_mappings').$type<AdMapping[]>().default([]).notNull(),
   publishedSnapshot: jsonb('published_snapshot').$type<AiMemberRuntimeSnapshot | null>(),
   publishedAt: timestamp('published_at', { withTimezone: true }),
   publishedVersionId: uuid('published_version_id').references(() => aiConfigVersion.id, {

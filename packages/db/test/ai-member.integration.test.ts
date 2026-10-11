@@ -1,34 +1,35 @@
 import { randomUUID } from 'node:crypto'
+import { eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { Pool } from 'pg'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
+  aiConfigVersion,
+  aiOperation,
+  aiProviderAttempt,
+  beginAiProviderAttempt,
   bootstrapWorkspace,
+  channel,
   createAiMember,
   createDatabase,
   createKnowledgeBase,
-  getAiMemberConfig,
-  listTeam,
-  publishAiMemberConfig,
-  listAiConfigVersions,
-  restoreAiConfigVersion,
-  saveAiBudget,
-  reserveAiOperation,
-  beginAiProviderAttempt,
   finishAiProviderAttempt,
   getAiBudget,
-  recoverAiOperations,
-  aiOperation,
-  aiProviderAttempt,
+  getAiMemberConfig,
   knowledgeBase,
+  listAiConfigVersions,
+  listTeam,
+  publishAiMemberConfig,
+  recoverAiOperations,
+  reserveAiOperation,
+  restoreAiConfigVersion,
+  saveAiBudget,
   setMemberChannelAccess,
-  updateMember,
   updateAiMemberConfig,
+  updateMember,
   user,
-  channel,
   workspaceUserAccess,
 } from '../src'
-import { eq } from 'drizzle-orm'
 
 const connectionString = process.env.DATABASE_URL
 
@@ -41,6 +42,39 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
   })
 
   afterAll(() => pool.end())
+
+  it('restores whole advertising tables and clears them when restoring a legacy version', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.memberId, actingUserId: f.userId }
+    await setMemberChannelAccess(db, { ...identity, channelIds: [f.channelId] })
+    const original = [{ adId: '123', content: 'Original reference.' }]
+    await updateAiMemberConfig(db, {
+      ...identity,
+      instructions: 'Be helpful.',
+      responseLanguage: 'English',
+      knowledgeBaseId: f.knowledgeBaseId,
+      adLearningEnabled: true,
+      adMappings: original,
+    })
+    const published = await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    const versionId = published.publishedVersionId as string
+    await updateAiMemberConfig(db, { ...identity, adLearningEnabled: false, adMappings: [] })
+    expect((await getAiMemberConfig(db, identity)).publishedSnapshot?.adMappings).toEqual(original)
+    const restored = await restoreAiConfigVersion(db, { ...identity, versionId })
+    expect(restored).toMatchObject({ adLearningEnabled: true, adMappings: original })
+    const snapshot = published.publishedSnapshot
+    if (!snapshot) throw new Error('No published snapshot')
+    const { adLearningEnabled: _enabled, adMappings: _mappings, ...legacy } = snapshot
+    const [old] = await db
+      .insert(aiConfigVersion)
+      .values({ memberId: f.memberId, snapshot: legacy })
+      .returning()
+    expect(await restoreAiConfigVersion(db, { ...identity, versionId: old.id })).toMatchObject({
+      adLearningEnabled: false,
+      adMappings: [],
+      publishedSnapshot: snapshot,
+    })
+  })
 
   it('keeps draft edits separate from the published runtime snapshot', async () => {
     const fixture = await createFixture(db)

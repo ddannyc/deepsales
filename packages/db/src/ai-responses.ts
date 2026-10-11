@@ -4,10 +4,13 @@ import {
   type AiMemberRuntimeSnapshot,
   aiMemberConfig,
   aiResponseRun,
+  channel,
   channelIdentity,
   conversation,
   member,
+  memberChannelAccess,
   message,
+  workspace,
 } from './schema'
 
 const MAX_AI_RESPONSE_TEXT_LENGTH = 2_000
@@ -517,12 +520,19 @@ export async function commitAiResponse(
 
   return db.transaction(async (tx) => {
     const [reference] = await tx
-      .select({ conversationId: aiResponseRun.conversationId })
+      .select({
+        conversationId: aiResponseRun.conversationId,
+        workspaceId: conversation.workspaceId,
+      })
       .from(aiResponseRun)
+      .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
       .where(eq(aiResponseRun.id, input.runId))
       .limit(1)
     if (!reference) return null
 
+    await tx.execute(
+      sql`select id from ${workspace} where id = ${reference.workspaceId} for update`,
+    )
     await tx.execute(
       sql`select id from ${conversation} where id = ${reference.conversationId} for update`,
     )
@@ -554,7 +564,29 @@ export async function commitAiResponse(
       .limit(1)
     if (!current || !run || run.state !== 'GENERATING') return null
 
-    if (current.status !== 'OPEN' || current.assigneeMemberId !== run.memberId) {
+    const [authorized] = await tx
+      .select({ id: member.id })
+      .from(member)
+      .innerJoin(
+        memberChannelAccess,
+        and(
+          eq(memberChannelAccess.memberId, member.id),
+          eq(memberChannelAccess.channelId, current.channelId),
+        ),
+      )
+      .innerJoin(channel, eq(channel.id, current.channelId))
+      .where(
+        and(
+          eq(member.id, run.memberId),
+          eq(member.workspaceId, current.workspaceId),
+          eq(member.status, 'ACTIVE'),
+          eq(member.type, 'AI'),
+          eq(channel.workspaceId, current.workspaceId),
+          eq(channel.status, 'ACTIVE'),
+        ),
+      )
+      .for('share', { of: channel })
+    if (!authorized || current.status !== 'OPEN' || current.assigneeMemberId !== run.memberId) {
       await cancelRun(tx, run.id, 'OWNERSHIP_CHANGED', now)
       return { kind: 'CANCELLED' as const, cancellationReason: 'OWNERSHIP_CHANGED' as const }
     }

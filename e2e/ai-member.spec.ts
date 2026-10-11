@@ -1,6 +1,6 @@
-import { channel, createDatabase, createKnowledgeBase, aiConfigVersion } from '@deepsales/db'
-import { eq } from 'drizzle-orm'
+import { aiConfigVersion, channel, createDatabase, createKnowledgeBase } from '@deepsales/db'
 import { expect, test } from '@playwright/test'
+import { eq } from 'drizzle-orm'
 import { Pool } from 'pg'
 import { signInAndCreateWorkspace } from './auth'
 
@@ -54,6 +54,15 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await page.getByRole('combobox', { name: '知识库' }).click()
     await page.getByRole('option', { name: 'Support facts' }).click()
     await page.locator('#ai-handoff-keywords').fill('Human, agent')
+    await page.getByRole('switch', { name: '启用广告学习' }).click()
+    const upload = async (rows: unknown) =>
+      page.locator('#ai-ad-upload').setInputFiles({
+        name: 'advertising.json',
+        mimeType: 'application/json',
+        buffer: Buffer.from(JSON.stringify(rows)),
+      })
+    await upload([{ adId: '123456', content: 'Lamp reference.' }])
+    await expect(page.locator('#ai-ad-preview')).toContainText('Lamp reference.')
     await expect(page.getByRole('button', { name: '发布', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: '保存草稿' }).click()
     await expect(
@@ -65,6 +74,12 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await expect(page.locator('.ai-published-panel')).toContainText(
       'Answer from support facts only.',
     )
+    await expect(page.locator('.ai-published-panel')).toContainText('启用 · 1 条映射')
+    await page
+      .locator('#ai-ad-upload')
+      .setInputFiles({ name: 'bad.json', mimeType: 'application/json', buffer: Buffer.from('{') })
+    await expect(page.getByRole('alert')).toContainText('原表已保留')
+    await expect(page.locator('#ai-ad-preview')).toContainText('Lamp reference.')
 
     const publishedVersions = (await (
       await page.request.get(`/api/workspaces/${workspace.id}/ai-operations/${member.id}/versions`)
@@ -79,6 +94,7 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     ).rejects.toThrow('Failed query')
 
     await page.locator('#ai-instructions').fill('Use the updated support policy.')
+    await upload([{ adId: '789', content: 'Torch reference.' }])
     await expect(page.getByRole('button', { name: '发布', exact: true })).toBeDisabled()
     await page.getByRole('button', { name: '保存草稿' }).click()
     await expect(page.locator('#ai-instructions')).toHaveValue('Use the updated support policy.')
@@ -95,6 +111,8 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await expect(history).toContainText('Answer from support facts only.')
     await history.getByRole('button', { name: '还原到草稿' }).click()
     await expect(page.locator('#ai-instructions')).toHaveValue('Answer from support facts only.')
+    await expect(page.locator('#ai-ad-preview')).toContainText('Lamp reference.')
+    await expect(page.locator('#ai-ad-preview')).not.toContainText('Torch reference.')
     await expect(page.locator('.ai-published-panel')).toContainText(
       'Use the updated support policy.',
     )

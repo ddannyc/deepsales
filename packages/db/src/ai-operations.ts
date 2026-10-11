@@ -344,6 +344,8 @@ export async function createAiTest(
       handoffOnNegativeSentiment: config.handoffOnNegativeSentiment,
       handoffOnUnableToAnswer: config.handoffOnUnableToAnswer,
       handoffKeywords: config.handoffKeywords,
+      adLearningEnabled: config.adLearningEnabled,
+      adMappings: config.adMappings,
     }
   if (input.source === 'PUBLISHED') {
     snapshot = config.publishedSnapshot

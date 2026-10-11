@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Button } from './components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from './components/ui/dialog'
 import { Input } from './components/ui/input'
-import { Textarea } from './components/ui/textarea'
 import {
   Select,
   SelectContent,
@@ -10,13 +16,6 @@ import {
   SelectValue,
 } from './components/ui/select'
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from './components/ui/dialog'
-import {
   Table,
   TableBody,
   TableCell,
@@ -24,6 +23,7 @@ import {
   TableHeader,
   TableRow,
 } from './components/ui/table'
+import { Textarea } from './components/ui/textarea'
 
 type Version = {
   id: string
@@ -41,7 +41,12 @@ type Run = {
   cancellationReason?: string | null
 }
 type Diagnostics = {
-  run: (Run & { configSnapshot: Record<string, unknown> | null }) | null
+  run:
+    | (Run & {
+        configSnapshot: Record<string, unknown> | null
+        advertisingContext?: { status: string; adId?: string; content?: string } | null
+      })
+    | null
   operation: {
     id: string
     state: string
@@ -644,6 +649,28 @@ export function AiOperations({
                 <p key={input.id}>{input.text}</p>
               ))}
               {diagnostics.operation?.input && <p>{diagnostics.operation.input}</p>}
+              {diagnostics.run?.advertisingContext && (
+                <details>
+                  <summary>本次广告参考</summary>
+                  <p>
+                    {(
+                      {
+                        DISABLED: '广告学习已停用',
+                        NO_SOURCE: '没有广告来源',
+                        UNAVAILABLE: '渠道权限不可用',
+                        UNMAPPED: '广告 ID 未命中映射',
+                        MAPPED: '已使用发布映射',
+                      } as Record<string, string>
+                    )[diagnostics.run.advertisingContext.status] ?? '广告资料不可用'}
+                  </p>
+                  {diagnostics.run.advertisingContext.adId && (
+                    <p>广告 ID：{diagnostics.run.advertisingContext.adId}</p>
+                  )}
+                  {diagnostics.run.advertisingContext.content && (
+                    <p>{diagnostics.run.advertisingContext.content}</p>
+                  )}
+                </details>
+              )}
               <h3>结果</h3>
               <pre>
                 {diagnostics.output?.text ??
@@ -753,6 +780,16 @@ function SnapshotPreview({ snapshot }: { snapshot: Record<string, unknown> | nul
           {Array.isArray(snapshot.handoffKeywords)
             ? snapshot.handoffKeywords.join('、') || '未设置'
             : '未设置'}
+        </dd>
+      </div>
+      <div>
+        <dt>广告学习</dt>
+        <dd>{snapshot.adLearningEnabled ? '启用' : '停用'}</dd>
+      </div>
+      <div>
+        <dt>广告 ID 映射表</dt>
+        <dd>
+          <pre>{JSON.stringify(snapshot.adMappings ?? [], null, 2)}</pre>
         </dd>
       </div>
     </dl>

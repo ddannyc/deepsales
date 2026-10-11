@@ -36,10 +36,6 @@ import {
   useState,
 } from 'react'
 import { createRoot } from 'react-dom/client'
-import { InternalNotes } from './internal-notes'
-import { ReplyContent } from './reply-content'
-import { AiOperations } from './ai-operations'
-import { InboxFilterControls, inboxQuery, type InboxFilters } from './inbox-filters'
 import { toast } from 'sonner'
 import {
   AlertDialog,
@@ -87,9 +83,13 @@ import { Switch } from '#components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '#components/ui/table'
 import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
+import { AiOperations } from './ai-operations'
 import { CustomerSidebar } from './customer-sidebar'
 import { DemoPage } from './demo'
+import { InboxFilterControls, type InboxFilters, inboxQuery } from './inbox-filters'
+import { InternalNotes } from './internal-notes'
 import { LandingPage } from './landing'
+import { ReplyContent } from './reply-content'
 
 import './styles.css'
 
@@ -293,6 +293,8 @@ type KnowledgeDocument = {
 }
 
 type AiMemberRuntimeSnapshot = {
+  adLearningEnabled?: boolean
+  adMappings?: { adId: string; content: string }[]
   instructions: string
   responseLanguage: string
   knowledgeBaseId: string
@@ -304,6 +306,8 @@ type AiMemberRuntimeSnapshot = {
 }
 
 type AiMemberConfig = {
+  adLearningEnabled: boolean
+  adMappings: { adId: string; content: string }[]
   memberId: string
   memberDisplayName: string | null
   memberStatus: 'ACTIVE' | 'DISABLED'
@@ -332,6 +336,8 @@ type AiMemberDraft = Pick<
   | 'handoffOnNegativeSentiment'
   | 'handoffOnUnableToAnswer'
   | 'handoffKeywords'
+  | 'adLearningEnabled'
+  | 'adMappings'
 >
 
 class ApiError extends Error {
@@ -4042,6 +4048,97 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
             />
           </section>
 
+          <Separator />
+          <section aria-labelledby="ai-ad-title" className="ai-config-section">
+            <div className="section-heading">
+              <div>
+                <h2 id="ai-ad-title">广告 ID 映射</h2>
+                <p>使用客户的广告来源理解咨询；公司事实仍需知识库支持。</p>
+              </div>
+            </div>
+            <div className="switch-field">
+              <span>启用广告学习</span>
+              <Switch
+                aria-label="启用广告学习"
+                checked={draft.adLearningEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) =>
+                  setDraft((current) =>
+                    current ? { ...current, adLearningEnabled: checked } : current,
+                  )
+                }
+              />
+            </div>
+            <label className="form-field" htmlFor="ai-ad-upload">
+              <span className="form-field-label">上传映射表</span>
+              <Input
+                id="ai-ad-upload"
+                type="file"
+                accept=".json,application/json"
+                disabled={busy}
+                onChange={(event) => {
+                  const file = event.currentTarget.files?.[0]
+                  event.currentTarget.value = ''
+                  if (!file) return
+                  setBusy(true)
+                  setFormError('')
+                  void (async () => {
+                    try {
+                      if (file.size > 1024 * 1024) throw new Error()
+                      const mappings: unknown = JSON.parse(await file.text())
+                      if (
+                        !Array.isArray(mappings) ||
+                        mappings.length > 100 ||
+                        mappings.some(
+                          (row) =>
+                            !row ||
+                            typeof row !== 'object' ||
+                            Array.isArray(row) ||
+                            typeof row.adId !== 'string' ||
+                            typeof row.content !== 'string' ||
+                            Object.keys(row).some((key) => !['adId', 'content'].includes(key)),
+                        )
+                      )
+                        throw new Error()
+                      setDraft((current) =>
+                        current ? { ...current, adMappings: mappings } : current,
+                      )
+                      setFeedback('映射表已载入草稿。保存时校验，发布后生效。')
+                    } catch {
+                      setFormError(
+                        '无法读取映射表。请上传不超过 1 MiB 的 JSON 数组，每行只包含 adId 和 content；原表已保留。',
+                      )
+                    } finally {
+                      setBusy(false)
+                    }
+                  })()
+                }}
+              />
+              <span className="field-description">
+                整表替换，最多 100 行。广告 ID 为唯一数字字符串，每条资料最多 2,000 字。格式示例：
+                {'[{"adId":"123456","content":"产品参考资料"}]'}。空数组可清除。
+              </span>
+            </label>
+            <label className="form-field" htmlFor="ai-ad-preview">
+              <span className="form-field-label">草稿映射表（{draft.adMappings.length} 条）</span>
+              <Textarea
+                id="ai-ad-preview"
+                readOnly
+                value={JSON.stringify(draft.adMappings, null, 2)}
+              />
+            </label>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy || !draft.adMappings.length}
+              onClick={() =>
+                setDraft((current) => (current ? { ...current, adMappings: [] } : current))
+              }
+            >
+              清空草稿映射表
+            </Button>
+          </section>
+
           {formError && (
             <p className="inline-error" role="alert">
               {formError}
@@ -4130,6 +4227,13 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                   <dt>转人工关键词</dt>
                   <dd>{config.publishedSnapshot.handoffKeywords.join('、') || '未设置'}</dd>
                 </div>
+                <div>
+                  <dt>广告学习</dt>
+                  <dd>
+                    {config.publishedSnapshot.adLearningEnabled ? '启用' : '停用'} ·{' '}
+                    {config.publishedSnapshot.adMappings?.length ?? 0} 条映射
+                  </dd>
+                </div>
               </dl>
             ) : (
               <p className="table-muted">
@@ -4177,6 +4281,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.handoffOnNegativeSentiment,
       left.handoffOnUnableToAnswer,
       left.handoffKeywords,
+      left.adLearningEnabled ?? false,
+      left.adMappings ?? [],
     ]) ===
     JSON.stringify([
       right.instructions,
@@ -4187,6 +4293,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       right.handoffOnNegativeSentiment,
       right.handoffOnUnableToAnswer,
       right.handoffKeywords,
+      right.adLearningEnabled ?? false,
+      right.adMappings ?? [],
     ])
   )
 }
@@ -4194,6 +4302,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
 function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
   return {
     instructions: config.instructions,
+    adLearningEnabled: config.adLearningEnabled ?? false,
+    adMappings: config.adMappings ?? [],
     responseLanguage: config.responseLanguage,
     knowledgeBaseId: config.knowledgeBaseId,
     handoffOnCustomerRequest: config.handoffOnCustomerRequest,

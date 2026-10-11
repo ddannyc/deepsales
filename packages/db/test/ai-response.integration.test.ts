@@ -542,7 +542,7 @@ async function waitForConversationLockWaiters(pool: Pool, expected: number) {
          from pg_stat_activity
         where wait_event_type = 'Lock'
           and state = 'active'
-          and query ilike '%conversation%'
+          and (query ilike '%conversation%' or query ilike '%workspace%')
           and query ilike '%for update%'`,
     )
     if (Number(result.rows[0]?.count ?? 0) >= expected) return

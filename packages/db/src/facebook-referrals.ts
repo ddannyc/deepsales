@@ -2,13 +2,104 @@ import { and, desc, eq, getTableColumns, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import { assertInboxConversationAccess, ensureFacebookIdentity, InboxError } from './inbox'
 import {
+  type AdvertisingContext,
+  aiResponseRun,
   channel,
   channelIdentity,
   conversation,
   facebookChannelConfig,
   facebookReferral,
+  member,
+  memberChannelAccess,
   message,
 } from './schema'
+
+export async function getAiFacebookAdvertisingContext(
+  db: Database,
+  input: { workspaceId: string; runId: string },
+): Promise<AdvertisingContext> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ run: aiResponseRun })
+      .from(aiResponseRun)
+      .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
+      .where(
+        and(eq(aiResponseRun.id, input.runId), eq(conversation.workspaceId, input.workspaceId)),
+      )
+      .for('update', { of: aiResponseRun })
+    const run = row?.run
+    if (run?.state !== 'GENERATING') return { status: 'UNAVAILABLE' }
+    const save = async (context: AdvertisingContext) => {
+      await tx
+        .update(aiResponseRun)
+        .set({ advertisingContext: context })
+        .where(eq(aiResponseRun.id, run.id))
+      return context
+    }
+    if (!run.configSnapshot?.adLearningEnabled) return save({ status: 'DISABLED' })
+    const [authorized] = await tx
+      .select({
+        identityId: channelIdentity.id,
+        lastInputAt: sql<string>`${message.createdAt}::text`,
+        externalMessageId: message.externalMessageId,
+      })
+      .from(conversation)
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+      .innerJoin(channel, eq(channel.id, channelIdentity.channelId))
+      .innerJoin(
+        memberChannelAccess,
+        and(
+          eq(memberChannelAccess.channelId, channel.id),
+          eq(memberChannelAccess.memberId, run.memberId),
+        ),
+      )
+      .innerJoin(member, eq(member.id, run.memberId))
+      .innerJoin(
+        message,
+        and(eq(message.id, run.inputLastMessageId), eq(message.conversationId, conversation.id)),
+      )
+      .where(
+        and(
+          eq(conversation.id, run.conversationId),
+          eq(conversation.workspaceId, input.workspaceId),
+          eq(channel.workspaceId, input.workspaceId),
+          eq(member.workspaceId, input.workspaceId),
+          eq(channel.status, 'ACTIVE'),
+          eq(member.status, 'ACTIVE'),
+          eq(member.type, 'AI'),
+        ),
+      )
+    if (!authorized) return save({ status: 'UNAVAILABLE' })
+    if (run.advertisingContext) return run.advertisingContext
+    const [referral] = await tx
+      .select()
+      .from(facebookReferral)
+      .where(
+        and(
+          eq(facebookReferral.channelIdentityId, authorized.identityId),
+          or(
+            sql`${facebookReferral.eventAt} <= ${authorized.lastInputAt}::timestamptz`,
+            authorized.externalMessageId
+              ? and(
+                  sql`${facebookReferral.providerSentAt} is null`,
+                  eq(facebookReferral.externalMessageId, authorized.externalMessageId),
+                )
+              : undefined,
+          ),
+        ),
+      )
+      .orderBy(desc(facebookReferral.eventAt), desc(facebookReferral.id))
+      .limit(1)
+    if (referral?.source !== 'ADS' || !referral.adId) return save({ status: 'NO_SOURCE' })
+    const mapping = run.configSnapshot.adMappings?.find(({ adId }) => adId === referral.adId)
+    return save({
+      status: mapping ? 'MAPPED' : 'UNMAPPED',
+      referralId: referral.id,
+      adId: referral.adId,
+      ...(mapping ? { content: mapping.content } : {}),
+    })
+  })
+}
 
 export type FacebookReferralInput = {
   pageId: string

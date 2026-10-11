@@ -50,6 +50,7 @@ import {
   getFacebookOutboundDelivery,
   getKnowledgeDocumentStorageKey,
   getAiMemberConfig,
+  getAiFacebookAdvertisingContext,
   InboxError,
   AttachmentError,
   MAX_INBOUND_ATTACHMENT_BYTES,
@@ -363,6 +364,11 @@ const aiMemberConfigInput = z
     handoffOnNegativeSentiment: z.boolean().optional(),
     handoffOnUnableToAnswer: z.boolean().optional(),
     handoffKeywords: z.array(z.string().max(100)).max(100).optional(),
+    adLearningEnabled: z.boolean().optional(),
+    adMappings: z
+      .array(z.object({ adId: z.string().max(200), content: z.string().max(4000) }).strict())
+      .max(100)
+      .optional(),
   })
   .strict()
 
@@ -743,7 +749,14 @@ app.patch('/api/workspaces/:workspaceId/ai-members/:memberId/config', async (c) 
   return withDatabase(c.env, async (db) => {
     const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
     if (!session) return unauthorized(c)
-    const input = aiMemberConfigInput.safeParse(await c.req.json().catch(() => null))
+    const body = await readLimitedRequestBody(c.req.raw, 1024 * 1024)
+    if (!body)
+      return c.json({ error: { code: 'TOO_LARGE', message: 'Configuration is too large' } }, 413)
+    let parsed: unknown = null
+    try {
+      parsed = JSON.parse(new TextDecoder().decode(body))
+    } catch {}
+    const input = aiMemberConfigInput.safeParse(parsed)
     if (!input.success) {
       return c.json(
         { error: { code: 'INVALID_REQUEST', message: 'Invalid AI configuration' } },
@@ -3172,6 +3185,12 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
 
+      const advertisingContext = await withDatabase(env, (db) =>
+        getAiFacebookAdvertisingContext(db, {
+          workspaceId: claimed.workspaceId,
+          runId: claimed.id,
+        }),
+      )
       const meteredFetch = meteredAiFetch((work) => withDatabase(env, work), {
         id: claimed.id,
         workspaceId: claimed.workspaceId,
@@ -3198,6 +3217,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
             query: [
               ...claimed.history.map(({ origin, text }) => `${origin}: ${text}`),
               ...inputMessages.map(({ text }) => text),
+              ...(advertisingContext.status === 'MAPPED' ? [advertisingContext.content ?? ''] : []),
             ].join('\n'),
           }),
         )
@@ -3234,6 +3254,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,
         history: claimed.history,
+        advertisingContext,
         knowledgeChunks: retrievedChunks.map(({ id, text }) => ({ id, text })),
       })
       await withDatabase(env, (db) =>

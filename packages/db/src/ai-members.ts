@@ -10,6 +10,7 @@ import {
   workspace,
   workspaceUserAccess,
   type AiMemberRuntimeSnapshot,
+  type AdMapping,
 } from './schema'
 
 const MAX_INSTRUCTIONS_CODE_POINTS = 20_000
@@ -47,6 +48,8 @@ export type AiMemberConfig = {
   handoffOnNegativeSentiment: boolean
   handoffOnUnableToAnswer: boolean
   handoffKeywords: string[]
+  adLearningEnabled: boolean
+  adMappings: AdMapping[]
   publishedSnapshot: AiMemberRuntimeSnapshot | null
   publishedAt: Date | null
   publishedVersionId: string | null
@@ -66,6 +69,8 @@ export type UpdateAiMemberConfigInput = {
   handoffOnNegativeSentiment?: boolean
   handoffOnUnableToAnswer?: boolean
   handoffKeywords?: string[]
+  adLearningEnabled?: boolean
+  adMappings?: AdMapping[]
 }
 
 export async function getAiMemberConfig(
@@ -110,6 +115,8 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
         handoffOnNegativeSentiment: draft.handoffOnNegativeSentiment ?? true,
         handoffOnUnableToAnswer: draft.handoffOnUnableToAnswer ?? true,
         handoffKeywords: draft.handoffKeywords ?? [],
+        adLearningEnabled: draft.adLearningEnabled ?? false,
+        adMappings: draft.adMappings ?? [],
       })
     }
     return selectAiMemberConfig(tx, input.workspaceId, input.memberId)
@@ -172,6 +179,8 @@ export async function publishAiMemberConfig(
       handoffOnNegativeSentiment: config.handoffOnNegativeSentiment,
       handoffOnUnableToAnswer: config.handoffOnUnableToAnswer,
       handoffKeywords: config.handoffKeywords,
+      adLearningEnabled: config.adLearningEnabled,
+      adMappings: config.adMappings,
     }
     const [version] = await tx
       .insert(aiConfigVersion)
@@ -229,6 +238,8 @@ async function selectAiMemberConfig(
       handoffOnNegativeSentiment: aiMemberConfig.handoffOnNegativeSentiment,
       handoffOnUnableToAnswer: aiMemberConfig.handoffOnUnableToAnswer,
       handoffKeywords: aiMemberConfig.handoffKeywords,
+      adLearningEnabled: aiMemberConfig.adLearningEnabled,
+      adMappings: aiMemberConfig.adMappings,
       publishedSnapshot: aiMemberConfig.publishedSnapshot,
       publishedAt: aiMemberConfig.publishedAt,
       publishedVersionId: aiMemberConfig.publishedVersionId,
@@ -252,6 +263,8 @@ async function selectAiMemberConfig(
     handoffOnNegativeSentiment: row.handoffOnNegativeSentiment ?? true,
     handoffOnUnableToAnswer: row.handoffOnUnableToAnswer ?? true,
     handoffKeywords: row.handoffKeywords ?? [],
+    adLearningEnabled: row.adLearningEnabled ?? false,
+    adMappings: row.adMappings ?? [],
     publishedSnapshot: row.publishedSnapshot ?? null,
     publishedAt: row.publishedAt ?? null,
     publishedVersionId: row.publishedVersionId ?? null,
@@ -359,7 +372,13 @@ export async function restoreAiConfigVersion(
       .limit(1)
     await tx
       .update(aiMemberConfig)
-      .set({ ...version.snapshot, knowledgeBaseId: base?.id ?? null, updatedAt: new Date() })
+      .set({
+        ...version.snapshot,
+        adLearningEnabled: version.snapshot.adLearningEnabled ?? false,
+        adMappings: version.snapshot.adMappings ?? [],
+        knowledgeBaseId: base?.id ?? null,
+        updatedAt: new Date(),
+      })
       .where(eq(aiMemberConfig.memberId, input.memberId))
     return selectAiMemberConfig(tx, input.workspaceId, input.memberId)
   })
@@ -385,6 +404,8 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
     handoffOnNegativeSentiment: input.handoffOnNegativeSentiment,
     handoffOnUnableToAnswer: input.handoffOnUnableToAnswer,
     handoffKeywords,
+    adLearningEnabled: input.adLearningEnabled,
+    adMappings: input.adMappings === undefined ? undefined : normalizeAdMappings(input.adMappings),
   }
 }
 
@@ -426,6 +447,8 @@ function defaultConfig(memberId: string) {
     handoffOnNegativeSentiment: true,
     handoffOnUnableToAnswer: true,
     handoffKeywords: [],
+    adLearningEnabled: false,
+    adMappings: [],
     publishedSnapshot: null,
     publishedAt: null,
     runtimeStatus: 'UNPUBLISHED' as const,
@@ -437,4 +460,32 @@ function defaultConfig(memberId: string) {
 
 function invalidConfiguration(message: string) {
   return new AiMemberError('INVALID_CONFIGURATION', message)
+}
+
+export function normalizeAdMappings(items: unknown): AdMapping[] {
+  if (!Array.isArray(items) || items.length > 100) throw new AiMemberError('INVALID_REQUEST')
+  const ids = new Set<string>()
+  return items.map((item: unknown) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item))
+      throw new AiMemberError('INVALID_REQUEST')
+    const entry = item as Record<string, unknown>
+    if (
+      typeof entry.adId !== 'string' ||
+      typeof entry.content !== 'string' ||
+      Object.keys(entry).some((key) => key !== 'adId' && key !== 'content')
+    )
+      throw new AiMemberError('INVALID_REQUEST')
+    const adId = entry.adId.trim()
+    const content = entry.content.trim()
+    if (
+      !/^\d{1,200}$/.test(adId) ||
+      ids.has(adId) ||
+      !content ||
+      Array.from(content).length > 2000
+    ) {
+      throw new AiMemberError('INVALID_REQUEST')
+    }
+    ids.add(adId)
+    return { adId, content }
+  })
 }

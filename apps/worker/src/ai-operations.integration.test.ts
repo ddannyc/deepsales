@@ -1,17 +1,18 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  aiOperation,
   bootstrapWorkspace,
+  conversation,
+  createAiMember,
   createDatabase,
   createKnowledgeBase,
-  createAiMember,
-  updateAiMemberConfig,
-  conversation,
-  aiOperation,
-  workspaceUserAccess,
-  member,
   getAiAnalytics,
+  getAiMemberConfig,
   listAiDiagnostics,
+  member,
+  updateAiMemberConfig,
+  workspaceUserAccess,
 } from '@deepsales/db'
 import { eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
@@ -104,6 +105,51 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
     expect((await other.call(`/${input.id}/diagnostics`)).status).toBe(404)
     await db.update(member).set({ status: 'DISABLED' }).where(eq(member.workspaceId, f.workspaceId))
     expect((await f.call(`/${input.id}/diagnostics`)).status).toBe(403)
+  })
+  it('validates and replaces an advertising draft table atomically', async () => {
+    const f = await fixture()
+    const original = [{ adId: '123456', content: 'Lamp reference.' }]
+    const accepted = await f.configCall({ adLearningEnabled: true, adMappings: original })
+    expect(accepted.status).toBe(200)
+    const saved = (await accepted.json()) as {
+      config: { adMappings: unknown; adLearningEnabled: boolean }
+    }
+    expect(saved.config).toMatchObject({ adLearningEnabled: true, adMappings: original })
+    expect((await f.configCall({ adMappings: [...original, ...original] })).status).toBe(400)
+    expect(
+      (
+        await f.configCall({
+          adMappings: [{ adId: '123', content: 'A', url: 'https://example.test' }],
+        })
+      ).status,
+    ).toBe(400)
+    expect(
+      (
+        await getAiMemberConfig(db, {
+          workspaceId: f.workspaceId,
+          memberId: f.aiId,
+          actingUserId: f.userId,
+        })
+      ).adMappings,
+    ).toEqual(original)
+    const other = await fixture()
+    expect((await other.configCall({ adMappings: [] }, f.aiId)).status).toBe(404)
+    expect(
+      (await f.configCall({ adMappings: [{ adId: '1', content: 'x'.repeat(1024 * 1024) }] }))
+        .status,
+    ).toBe(413)
+    const latest = await f.configCall({
+      adMappings: [{ adId: '789', content: 'Torch reference.' }],
+    })
+    expect(
+      ((await latest.json()) as { config: { adMappings: unknown } }).config.adMappings,
+    ).toEqual([{ adId: '789', content: 'Torch reference.' }])
+    expect((await f.configCall({ adMappings: [] })).status).toBe(200)
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'AGENT' })
+      .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+    expect((await f.configCall({ adLearningEnabled: false })).status).toBe(403)
   })
   it('deduplicates operations and separates tests across UTC date boundaries', async () => {
     const f = await fixture()
@@ -203,6 +249,16 @@ async function fixture() {
     workspaceId: workspace.id,
     userId: created.user.id,
     aiId: ai.id,
+    configCall: (body: unknown, memberId = ai.id) =>
+      app.request(
+        `/api/workspaces/${workspace.id}/ai-members/${memberId}/config`,
+        {
+          method: 'PATCH',
+          headers: { Cookie: cookie, 'Content-Type': 'application/json', Origin: env.APP_URL },
+          body: JSON.stringify(body),
+        },
+        env,
+      ),
     call: (path: string, method = 'GET', body?: unknown) =>
       app.request(
         `/api/workspaces/${workspace.id}/ai-operations${path}`,
