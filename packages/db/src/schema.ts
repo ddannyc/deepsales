@@ -1123,6 +1123,11 @@ export const knowledgeDocument = pgTable(
     name: text().notNull(),
     sourceType: knowledgeDocumentSourceType('source_type').notNull(),
     sourceText: text('source_text'),
+    question: text(),
+    answer: text(),
+    questionKey: text('question_key'),
+    revision: integer().default(1).notNull(),
+    indexOperationId: uuid('index_operation_id').defaultRandom().notNull(),
     storageKey: text('storage_key'),
     status: knowledgeDocumentStatus().default('UPLOADED').notNull(),
     processingStartedAt: timestamp('processing_started_at', { withTimezone: true }),
@@ -1143,6 +1148,12 @@ export const knowledgeDocument = pgTable(
       table.processingStartedAt,
       table.updatedAt,
     ),
+    uniqueIndex('knowledge_question_base_key').on(table.knowledgeBaseId, table.questionKey),
+    check(
+      'knowledge_question_consistency',
+      sql`(${table.question} is null and ${table.answer} is null and ${table.questionKey} is null) or (${table.question} is not null and ${table.answer} is not null and ${table.questionKey} is not null and ${table.sourceType} = 'TEXT')`,
+    ),
+    check('knowledge_revision_positive', sql`${table.revision} > 0`),
   ],
 )
 

@@ -39,6 +39,8 @@ import {
   createKnowledgeBase,
   createFileKnowledgeDocument,
   createInlineKnowledgeDocument,
+  createKnowledgeQuestions,
+  updateKnowledgeQuestion,
   deleteKnowledgeDocument,
   deleteOldFacebookWebhookReceipts,
   disableFacebookChannel,
@@ -902,6 +904,88 @@ app.post(
       }
     })
   },
+)
+
+const knowledgeQuestionInput = z
+  .object({ question: z.string().max(1600), answer: z.string().max(6000) })
+  .strict()
+async function knowledgeQuestionsRequest(c: Context<{ Bindings: Bindings }>) {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  const ids = z
+    .object({
+      workspaceId: z.string().uuid(),
+      knowledgeBaseId: z.string().uuid(),
+      documentId: z.string().uuid().optional(),
+    })
+    .safeParse(c.req.param())
+  if (!ids.success) return knowledgeErrorResponse(c, new KnowledgeError('INVALID_REQUEST'))
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `knowledge-document:${session.user.id}`)
+    if (limited) return limited
+    const body = await readLimitedRequestBody(c.req.raw, 1024 * 1024)
+    if (!body)
+      return c.json({ error: { code: 'TOO_LARGE', message: 'Question import is too large' } }, 413)
+    let json: unknown = null
+    try {
+      json = JSON.parse(new TextDecoder().decode(body))
+    } catch {}
+    if (c.req.method === 'PATCH') {
+      const edit = knowledgeQuestionInput
+        .extend({ expectedRevision: z.number().int().min(1).max(2147483646) })
+        .safeParse(json)
+      if (!edit.success || !ids.data.documentId)
+        return knowledgeErrorResponse(c, new KnowledgeError('INVALID_REQUEST'))
+      try {
+        const document = await updateKnowledgeQuestion(db, {
+          ...ids.data,
+          documentId: ids.data.documentId,
+          actingUserId: session.user.id,
+          ...edit.data,
+        })
+        if (document.status === 'UPLOADED')
+          await enqueueKnowledgeDocumentJob(c.env.DOCUMENTS_QUEUE, document.id)
+        await publishKnowledgeChange(c.env, ids.data.workspaceId, document.id)
+        return c.json({ document })
+      } catch (error) {
+        return knowledgeErrorResponse(c, error)
+      }
+    }
+    const parsed = z
+      .object({
+        items: z
+          .array(knowledgeQuestionInput.extend({ id: z.string().uuid() }))
+          .min(1)
+          .max(100),
+      })
+      .strict()
+      .safeParse(json)
+    if (!parsed.success) return knowledgeErrorResponse(c, new KnowledgeError('INVALID_REQUEST'))
+    try {
+      const documents = await createKnowledgeQuestions(db, {
+        ...ids.data,
+        actingUserId: session.user.id,
+        items: parsed.data.items,
+      })
+      for (const document of documents) {
+        if (document.status === 'UPLOADED')
+          await enqueueKnowledgeDocumentJob(c.env.DOCUMENTS_QUEUE, document.id)
+        await publishKnowledgeChange(c.env, ids.data.workspaceId, document.id)
+      }
+      return c.json({ documents }, 201)
+    } catch (error) {
+      return knowledgeErrorResponse(c, error)
+    }
+  })
+}
+app.post(
+  '/api/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId/documents/questions',
+  knowledgeQuestionsRequest,
+)
+app.patch(
+  '/api/workspaces/:workspaceId/knowledge-bases/:knowledgeBaseId/documents/questions/:documentId',
+  knowledgeQuestionsRequest,
 )
 
 app.post(
@@ -2521,7 +2605,14 @@ function inboxErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) 
 
 function knowledgeErrorResponse(c: Context<{ Bindings: Bindings }>, error: unknown) {
   if (!(error instanceof KnowledgeError)) throw error
-  const status = error.code === 'FORBIDDEN' ? 403 : error.code === 'NOT_FOUND' ? 404 : 400
+  const status =
+    error.code === 'FORBIDDEN'
+      ? 403
+      : error.code === 'NOT_FOUND'
+        ? 404
+        : error.code === 'CONFLICT'
+          ? 409
+          : 400
   return c.json({ error: { code: error.code, message: error.message } }, status)
 }
 
@@ -3389,7 +3480,7 @@ async function handleKnowledgeDocument(
         dimensions: env.EMBEDDING_DIMENSIONS,
       },
       meteredAiFetch((work) => withDatabase(env, work), {
-        id: claimed.id,
+        id: claimed.indexOperationId,
         workspaceId: claimed.workspaceId,
         kind: 'KNOWLEDGE_INDEX',
       }),
@@ -3404,6 +3495,7 @@ async function handleKnowledgeDocument(
         workspaceId: claimed.workspaceId,
         knowledgeBaseId: claimed.knowledgeBaseId,
         processingStartedAt: claimed.processingStartedAt,
+        revision: claimed.revision,
         contentSha256,
         embeddingMetadata: embeddingProvider.metadata,
         chunks: chunks.map((chunk, index) => ({ text: chunk, embedding: embeddings[index] })),
@@ -3411,7 +3503,7 @@ async function handleKnowledgeDocument(
     )
     if (completed) await publishKnowledgeChange(env, claimed.workspaceId, claimed.id)
     await withDatabase(env, (db) =>
-      finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+      finishAiOperation(db, { operationId: claimed.indexOperationId, state: 'COMPLETED' }),
     )
     queueMessage.ack()
   } catch (error) {
@@ -3420,6 +3512,7 @@ async function handleKnowledgeDocument(
         releaseKnowledgeDocument(db, {
           documentId: claimed.id,
           processingStartedAt: claimed.processingStartedAt,
+          revision: claimed.revision,
         }),
       )
       queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(error.retryAfterMs / 1_000)) })
@@ -3439,6 +3532,7 @@ async function handleKnowledgeDocument(
           releaseKnowledgeDocument(db, {
             documentId: claimed.id,
             processingStartedAt: claimed.processingStartedAt,
+            revision: claimed.revision,
           }),
         )
       } catch {}
@@ -3456,12 +3550,13 @@ async function handleKnowledgeDocument(
             : 'AI_PROVIDER_ERROR'
     try {
       await withDatabase(env, (db) =>
-        finishAiOperation(db, { operationId: claimed.id, state: 'FAILED' }),
+        finishAiOperation(db, { operationId: claimed.indexOperationId, state: 'FAILED' }),
       )
       const failed = await withDatabase(env, (db) =>
         failKnowledgeDocument(db, {
           documentId: claimed.id,
           processingStartedAt: claimed.processingStartedAt,
+          revision: claimed.revision,
           failureCode,
           failureMessage:
             error instanceof KnowledgeProcessingError

@@ -36,6 +36,7 @@ const e2eOwnerKeys = [
   'media',
   'media-other',
   'knowledge',
+  'questions',
   'reply',
   'routing',
   'team',

@@ -190,6 +190,13 @@
       "when": 1791696287806,
       "tag": "0026_facebook_referrals",
       "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "7",
+      "when": 1791697394172,
+      "tag": "0027_knowledge_questions",
+      "breakpoints": true
     }
   ]
 }

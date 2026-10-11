@@ -1,6 +1,12 @@
-import { and, asc, cosineDistance, eq, isNull, lte, or } from 'drizzle-orm'
+import { and, asc, cosineDistance, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
-import { knowledgeBase, knowledgeChunk, knowledgeDocument, workspaceUserAccess } from './schema'
+import {
+  knowledgeBase,
+  knowledgeChunk,
+  knowledgeDocument,
+  member,
+  workspaceUserAccess,
+} from './schema'
 
 export const KNOWLEDGE_CHUNK_CODE_POINTS = 2_000
 export const KNOWLEDGE_CHUNK_OVERLAP_CODE_POINTS = 200
@@ -15,7 +21,7 @@ export type KnowledgeEmbeddingMetadata = {
   dimensions: number
 }
 
-export type KnowledgeErrorCode = 'FORBIDDEN' | 'NOT_FOUND' | 'INVALID_REQUEST'
+export type KnowledgeErrorCode = 'FORBIDDEN' | 'NOT_FOUND' | 'INVALID_REQUEST' | 'CONFLICT'
 
 export class KnowledgeError extends Error {
   constructor(
@@ -53,6 +59,9 @@ export type KnowledgeDocumentSummary = {
   knowledgeBaseId: string
   name: string
   sourceType: 'TEXT' | 'PDF' | 'DOCX' | 'TXT' | 'MARKDOWN'
+  question: string | null
+  answer: string | null
+  revision: number
   status: 'UPLOADED' | 'PROCESSING' | 'READY' | 'FAILED'
   contentSha256: string | null
   failureCode: string | null
@@ -130,6 +139,166 @@ export function chunkKnowledgeText(text: string) {
 export async function hashKnowledgeText(text: string) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+export function normalizeQuestionAnswer(input: { question: string; answer: string }) {
+  const question = normalizeKnowledgeText(input.question)
+  const answer = normalizeKnowledgeText(input.answer)
+  if (!question || !answer || Array.from(question).length > 400 || Array.from(answer).length > 1500)
+    throw new KnowledgeError('INVALID_REQUEST', 'Question or answer is empty or too long')
+  return { question, answer, sourceText: `Question: ${question}\nAnswer: ${answer}` }
+}
+
+export async function createKnowledgeQuestions(
+  db: Database,
+  input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    actingUserId: string
+    items: { id: string; question: string; answer: string }[]
+  },
+) {
+  if (!input.items.length || input.items.length > 100) throw new KnowledgeError('INVALID_REQUEST')
+  const items = await Promise.all(
+    input.items.map(async (item) => {
+      const pair = normalizeQuestionAnswer(item)
+      return {
+        id: item.id,
+        ...pair,
+        questionKey: await hashKnowledgeText(pair.question),
+        name: Array.from(pair.question).slice(0, 80).join(''),
+      }
+    }),
+  )
+  return db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.actingUserId)
+    await assertKnowledgeBase(tx, input.workspaceId, input.knowledgeBaseId)
+    await tx.execute(
+      sql`select id from knowledge_base where id = ${input.knowledgeBaseId} for update`,
+    )
+    await tx
+      .insert(knowledgeDocument)
+      .values(
+        items.map((item) => ({
+          ...item,
+          workspaceId: input.workspaceId,
+          knowledgeBaseId: input.knowledgeBaseId,
+          sourceType: 'TEXT' as const,
+        })),
+      )
+      .onConflictDoNothing()
+    const rows = await tx
+      .select({ ...documentSummarySelection, questionKey: knowledgeDocument.questionKey })
+      .from(knowledgeDocument)
+      .where(
+        and(
+          eq(knowledgeDocument.workspaceId, input.workspaceId),
+          eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+          or(
+            inArray(
+              knowledgeDocument.id,
+              items.map((i) => i.id),
+            ),
+            inArray(
+              knowledgeDocument.questionKey,
+              items.map((i) => i.questionKey),
+            ),
+          ),
+        ),
+      )
+    const documents = new Map<string, KnowledgeDocumentSummary>()
+    for (const item of items) {
+      const byId = rows.find((r) => r.id === item.id)
+      const row = byId ?? rows.find((r) => r.questionKey === item.questionKey)
+      if (!row || row.question !== item.question || row.answer !== item.answer)
+        throw new KnowledgeError(
+          'CONFLICT',
+          'Question or retry identifier already exists with different content',
+        )
+      const { questionKey: _key, ...document } = row
+      documents.set(document.id, document)
+    }
+    return [...documents.values()]
+  })
+}
+
+export async function updateKnowledgeQuestion(
+  db: Database,
+  input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    actingUserId: string
+    documentId: string
+    question: string
+    answer: string
+    expectedRevision: number
+  },
+) {
+  const pair = normalizeQuestionAnswer(input)
+  const questionKey = await hashKnowledgeText(pair.question)
+  return db.transaction(async (tx) => {
+    await assertManager(tx, input.workspaceId, input.actingUserId)
+    await assertKnowledgeBase(tx, input.workspaceId, input.knowledgeBaseId)
+    await tx.execute(
+      sql`select id from knowledge_base where id = ${input.knowledgeBaseId} for update`,
+    )
+    const [current] = await tx
+      .select()
+      .from(knowledgeDocument)
+      .where(
+        and(
+          eq(knowledgeDocument.id, input.documentId),
+          eq(knowledgeDocument.workspaceId, input.workspaceId),
+          eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+        ),
+      )
+      .for('update')
+    if (!current?.question) throw new KnowledgeError('NOT_FOUND', 'Question not found')
+    if (current.revision !== input.expectedRevision) {
+      if (
+        current.revision === input.expectedRevision + 1 &&
+        current.question === pair.question &&
+        current.answer === pair.answer
+      )
+        return (
+          await tx
+            .select(documentSummarySelection)
+            .from(knowledgeDocument)
+            .where(eq(knowledgeDocument.id, current.id))
+        )[0]
+      throw new KnowledgeError('CONFLICT', 'Question changed; refresh before editing')
+    }
+    const [duplicate] = await tx
+      .select({ id: knowledgeDocument.id })
+      .from(knowledgeDocument)
+      .where(
+        and(
+          eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+          eq(knowledgeDocument.questionKey, questionKey),
+        ),
+      )
+    if (duplicate && duplicate.id !== current.id)
+      throw new KnowledgeError('CONFLICT', 'Question already exists')
+    await tx.delete(knowledgeChunk).where(eq(knowledgeChunk.knowledgeDocumentId, current.id))
+    const [updated] = await tx
+      .update(knowledgeDocument)
+      .set({
+        ...pair,
+        questionKey,
+        name: Array.from(pair.question).slice(0, 80).join(''),
+        revision: current.revision + 1,
+        indexOperationId: crypto.randomUUID(),
+        status: 'UPLOADED',
+        contentSha256: null,
+        failureCode: null,
+        failureMessage: null,
+        processingStartedAt: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(knowledgeDocument.id, current.id))
+      .returning(documentSummarySelection)
+    return updated
+  })
 }
 
 export async function createKnowledgeBase(
@@ -360,6 +529,8 @@ export async function claimKnowledgeDocument(
         storageKey: knowledgeDocument.storageKey,
         status: knowledgeDocument.status,
         processingStartedAt: knowledgeDocument.processingStartedAt,
+        revision: knowledgeDocument.revision,
+        indexOperationId: knowledgeDocument.indexOperationId,
       })
       .from(knowledgeDocument)
       .where(eq(knowledgeDocument.id, input.documentId))
@@ -402,6 +573,7 @@ export async function completeKnowledgeDocument(
     workspaceId: string
     knowledgeBaseId: string
     contentSha256: string
+    revision?: number
     embeddingMetadata: KnowledgeEmbeddingMetadata
     chunks: Array<{ text: string; embedding: number[] }>
     now?: Date
@@ -434,6 +606,7 @@ export async function completeKnowledgeDocument(
       .select({
         status: knowledgeDocument.status,
         processingStartedAt: knowledgeDocument.processingStartedAt,
+        revision: knowledgeDocument.revision,
       })
       .from(knowledgeDocument)
       .where(
@@ -447,6 +620,7 @@ export async function completeKnowledgeDocument(
       .limit(1)
     if (
       current?.status !== 'PROCESSING' ||
+      current.revision !== (input.revision ?? 1) ||
       current.processingStartedAt?.getTime() !== input.processingStartedAt.getTime()
     ) {
       return null
@@ -525,6 +699,7 @@ export async function failKnowledgeDocument(
     documentId: string
     processingStartedAt: Date
     failureCode: string
+    revision?: number
     failureMessage?: string
     now?: Date
   },
@@ -535,6 +710,7 @@ export async function failKnowledgeDocument(
       .select({
         status: knowledgeDocument.status,
         processingStartedAt: knowledgeDocument.processingStartedAt,
+        revision: knowledgeDocument.revision,
       })
       .from(knowledgeDocument)
       .where(eq(knowledgeDocument.id, input.documentId))
@@ -542,6 +718,7 @@ export async function failKnowledgeDocument(
       .limit(1)
     if (
       current?.status !== 'PROCESSING' ||
+      current.revision !== (input.revision ?? 1) ||
       current.processingStartedAt?.getTime() !== input.processingStartedAt.getTime()
     ) {
       return null
@@ -565,7 +742,7 @@ export async function failKnowledgeDocument(
 
 export async function releaseKnowledgeDocument(
   db: Database,
-  input: { documentId: string; processingStartedAt: Date; now?: Date },
+  input: { documentId: string; processingStartedAt: Date; revision?: number; now?: Date },
 ) {
   const now = input.now ?? new Date()
   return db
@@ -576,6 +753,7 @@ export async function releaseKnowledgeDocument(
         eq(knowledgeDocument.id, input.documentId),
         eq(knowledgeDocument.status, 'PROCESSING'),
         eq(knowledgeDocument.processingStartedAt, input.processingStartedAt),
+        eq(knowledgeDocument.revision, input.revision ?? 1),
       ),
     )
     .returning({ id: knowledgeDocument.id })
@@ -701,6 +879,9 @@ const documentSummarySelection = {
   knowledgeBaseId: knowledgeDocument.knowledgeBaseId,
   name: knowledgeDocument.name,
   sourceType: knowledgeDocument.sourceType,
+  question: knowledgeDocument.question,
+  answer: knowledgeDocument.answer,
+  revision: knowledgeDocument.revision,
   status: knowledgeDocument.status,
   contentSha256: knowledgeDocument.contentSha256,
   failureCode: knowledgeDocument.failureCode,
@@ -722,8 +903,15 @@ async function assertAccess(db: Database | Transaction, workspaceId: string, use
   const [access] = await db
     .select({ id: workspaceUserAccess.id })
     .from(workspaceUserAccess)
+    .innerJoin(member, eq(member.workspaceUserAccessId, workspaceUserAccess.id))
     .where(
-      and(eq(workspaceUserAccess.workspaceId, workspaceId), eq(workspaceUserAccess.userId, userId)),
+      and(
+        eq(workspaceUserAccess.workspaceId, workspaceId),
+        eq(workspaceUserAccess.userId, userId),
+        eq(member.workspaceId, workspaceId),
+        eq(member.type, 'HUMAN'),
+        eq(member.status, 'ACTIVE'),
+      ),
     )
     .limit(1)
   if (!access) throw new KnowledgeError('FORBIDDEN', 'Workspace access required')
@@ -733,8 +921,15 @@ async function assertManager(tx: Transaction, workspaceId: string, userId: strin
   const [access] = await tx
     .select({ role: workspaceUserAccess.role })
     .from(workspaceUserAccess)
+    .innerJoin(member, eq(member.workspaceUserAccessId, workspaceUserAccess.id))
     .where(
-      and(eq(workspaceUserAccess.workspaceId, workspaceId), eq(workspaceUserAccess.userId, userId)),
+      and(
+        eq(workspaceUserAccess.workspaceId, workspaceId),
+        eq(workspaceUserAccess.userId, userId),
+        eq(member.workspaceId, workspaceId),
+        eq(member.type, 'HUMAN'),
+        eq(member.status, 'ACTIVE'),
+      ),
     )
     .limit(1)
   if (!access || access.role === 'AGENT') {

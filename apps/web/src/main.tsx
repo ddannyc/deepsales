@@ -280,6 +280,9 @@ type KnowledgeDocument = {
   knowledgeBaseId: string
   name: string
   sourceType: 'TEXT' | 'PDF' | 'DOCX' | 'TXT' | 'MARKDOWN'
+  question: string | null
+  answer: string | null
+  revision: number
   status: 'UPLOADED' | 'PROCESSING' | 'READY' | 'FAILED'
   contentSha256: string | null
   failureCode: string | null
@@ -2979,6 +2982,8 @@ const knowledgeFailureLabels: Record<string, string> = {
   DOCUMENT_CONTENT_MISSING: '文档内容不可用',
   INVALID_EMBEDDING: '嵌入结果无效',
   AI_PROVIDER_ERROR: 'AI 服务返回了无效结果',
+  QUOTA_EXHAUSTED: 'AI 用量已达上限；请联系管理员调整预算后重新提交内容。',
+  OPERATION_PAUSED: '索引任务已暂停；请联系管理员检查 AI 运行状态。',
 }
 
 function KnowledgePage({ workspace }: { workspace: Workspace }) {
@@ -2992,6 +2997,16 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
   const [addTextOpen, setAddTextOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [deletingDocument, setDeletingDocument] = useState<KnowledgeDocument | null>(null)
+  const [questionDraft, setQuestionDraft] = useState<{
+    id: string
+    question: string
+    answer: string
+    revision?: number
+  } | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
+  const [importItems, setImportItems] = useState<
+    { id: string; question: string; answer: string }[]
+  >([])
   const canManage = workspace.role !== 'AGENT'
   const selectedBase = bases?.find(({ id }) => id === selectedBaseId)
 
@@ -3172,6 +3187,99 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
     else setUploadOpen(true)
   }
 
+  function openQuestion(document?: KnowledgeDocument) {
+    setFormError('')
+    setQuestionDraft({
+      id: document?.id ?? crypto.randomUUID(),
+      question: document?.question ?? '',
+      answer: document?.answer ?? '',
+      revision: document?.revision,
+    })
+  }
+
+  async function saveQuestion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!canManage || !selectedBaseId || !questionDraft) return
+    setBusy('question')
+    setFormError('')
+    const path = `/api/workspaces/${workspace.id}/knowledge-bases/${selectedBaseId}/documents/questions`
+    try {
+      if (questionDraft.revision) {
+        await request(
+          `${path}/${questionDraft.id}`,
+          {
+            question: questionDraft.question,
+            answer: questionDraft.answer,
+            expectedRevision: questionDraft.revision,
+          },
+          'PATCH',
+        )
+      } else {
+        await request(path, { items: [questionDraft] })
+      }
+      await refreshDocuments(selectedBaseId)
+      setQuestionDraft(null)
+      toast.success('问答已保存，正在处理')
+    } catch (cause) {
+      setFormError(knowledgeErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function readQuestions(file?: File) {
+    setImportItems([])
+    setFormError('')
+    if (!file) return
+    setBusy('reading')
+    try {
+      if (file.size > 1024 * 1024) throw new Error('文件不能超过 1 MiB。')
+      const items: unknown = JSON.parse(await file.text())
+      if (!Array.isArray(items) || !items.length || items.length > 100) {
+        throw new Error('文件必须包含 1–100 条问答。')
+      }
+      const parsed = items.map((item: unknown) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) {
+          throw new Error('每条问答必须包含 question 和 answer。')
+        }
+        const entry = item as Record<string, unknown>
+        if (
+          typeof entry.question !== 'string' ||
+          typeof entry.answer !== 'string' ||
+          Object.keys(entry).some((key) => key !== 'question' && key !== 'answer')
+        ) {
+          throw new Error('每条问答只能包含 question 和 answer 两个文本字段。')
+        }
+        return { id: crypto.randomUUID(), question: entry.question, answer: entry.answer }
+      })
+      setImportItems(parsed)
+    } catch (cause) {
+      setFormError(cause instanceof Error ? cause.message : '文件无法读取，请重新选择。')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function importQuestions(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    if (!selectedBaseId || !importItems.length) return
+    setBusy('questions')
+    setFormError('')
+    try {
+      await request(
+        `/api/workspaces/${workspace.id}/knowledge-bases/${selectedBaseId}/documents/questions`,
+        { items: importItems },
+      )
+      await refreshDocuments(selectedBaseId)
+      setImportOpen(false)
+      toast.success('问答已导入；相同内容已合并')
+    } catch (cause) {
+      setFormError(knowledgeErrorMessage(cause))
+    } finally {
+      setBusy('')
+    }
+  }
+
   return (
     <main className="workspace-page knowledge-page">
       <PageHeader
@@ -3179,6 +3287,19 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
           canManage &&
           selectedBase && (
             <>
+              <Button variant="outline" onClick={() => openQuestion()}>
+                添加问答
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setFormError('')
+                  setImportItems([])
+                  setImportOpen(true)
+                }}
+              >
+                导入问答
+              </Button>
               <Button variant="outline" onClick={() => openDocumentDialog('upload')}>
                 上传文档
               </Button>
@@ -3280,7 +3401,21 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
                         key={document.id}
                       >
                         <TableCell data-column="document" data-label="文档">
-                          <strong>{document.name}</strong>
+                          {document.question ? (
+                            <Button
+                              variant="link"
+                              className="h-auto justify-start p-0 text-left whitespace-normal"
+                              aria-label={`查看问答：${document.name}`}
+                              onClick={() => openQuestion(document)}
+                            >
+                              <strong>{document.name}</strong>
+                            </Button>
+                          ) : (
+                            <strong>{document.name}</strong>
+                          )}
+                          {document.answer && (
+                            <span className="table-subtitle">{document.answer.slice(0, 120)}</span>
+                          )}
                           {document.status === 'FAILED' && (
                             <span className="document-failure">
                               {knowledgeFailureLabels[document.failureCode ?? ''] ??
@@ -3289,7 +3424,7 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
                           )}
                         </TableCell>
                         <TableCell data-column="type" data-label="类型">
-                          {knowledgeSourceLabels[document.sourceType]}
+                          {document.question ? '问答' : knowledgeSourceLabels[document.sourceType]}
                         </TableCell>
                         <TableCell data-column="status" data-label="状态">
                           <StateBadge
@@ -3327,6 +3462,11 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
                                 <TooltipContent>更多文档操作</TooltipContent>
                               </Tooltip>
                               <DropdownMenuContent align="end">
+                                {document.question && (
+                                  <DropdownMenuItem onSelect={() => openQuestion(document)}>
+                                    编辑问答
+                                  </DropdownMenuItem>
+                                )}
                                 <DropdownMenuItem
                                   className="text-destructive"
                                   onSelect={() => {
@@ -3354,6 +3494,145 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
           )}
         </>
       )}
+
+      <Dialog
+        open={Boolean(questionDraft)}
+        onOpenChange={(open) => {
+          if (!open && !busy) setQuestionDraft(null)
+        }}
+      >
+        <DialogContent className="ui-dialog-content">
+          <DialogHeader>
+            <DialogTitle>
+              {!canManage ? '查看问答' : questionDraft?.revision ? '编辑问答' : '添加问答'}
+            </DialogTitle>
+            <DialogDescription>
+              问题最多 400 字，答案最多 1,500 字。保存后重新处理；新内容就绪前不会检索旧答案。
+            </DialogDescription>
+          </DialogHeader>
+          <form className="dialog-form" onSubmit={saveQuestion}>
+            <div className="form-field">
+              <label className="form-field-label" htmlFor="knowledge-question">
+                问题
+              </label>
+              <Textarea
+                id="knowledge-question"
+                aria-describedby="knowledge-question-count"
+                required
+                rows={3}
+                maxLength={800}
+                disabled={Boolean(busy)}
+                readOnly={!canManage}
+                value={questionDraft?.question ?? ''}
+                onChange={(event) =>
+                  setQuestionDraft(
+                    (current) =>
+                      current && {
+                        ...current,
+                        question: event.target.value,
+                      },
+                  )
+                }
+              />
+              <span className="table-subtitle" id="knowledge-question-count">
+                {Array.from(questionDraft?.question ?? '').length} / 400 字
+              </span>
+            </div>
+            <div className="form-field">
+              <label className="form-field-label" htmlFor="knowledge-answer">
+                答案
+              </label>
+              <Textarea
+                id="knowledge-answer"
+                aria-describedby="knowledge-answer-count"
+                required
+                rows={8}
+                maxLength={3000}
+                disabled={Boolean(busy)}
+                readOnly={!canManage}
+                value={questionDraft?.answer ?? ''}
+                onChange={(event) =>
+                  setQuestionDraft(
+                    (current) =>
+                      current && {
+                        ...current,
+                        answer: event.target.value,
+                      },
+                  )
+                }
+              />
+              <span className="table-subtitle" id="knowledge-answer-count">
+                {Array.from(questionDraft?.answer ?? '').length} / 1,500 字
+              </span>
+            </div>
+            {formError && (
+              <p className="inline-error" role="alert">
+                {formError}
+              </p>
+            )}
+            {canManage && (
+              <DialogFooter>
+                <Button
+                  type="submit"
+                  disabled={
+                    Boolean(busy) ||
+                    Array.from(questionDraft?.question ?? '').length > 400 ||
+                    Array.from(questionDraft?.answer ?? '').length > 1500
+                  }
+                >
+                  {busy ? '正在保存…' : '保存问答'}
+                </Button>
+              </DialogFooter>
+            )}
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={importOpen}
+        onOpenChange={(open) => {
+          if (!busy) setImportOpen(open)
+        }}
+      >
+        <DialogContent className="ui-dialog-content">
+          <DialogHeader>
+            <DialogTitle>导入问答</DialogTitle>
+            <DialogDescription>
+              选择 JSON 数组文件，最多 100 条、1 MiB。每条只包含 question 和 answer；问题最多 400
+              字，答案最多 1,500 字。 相同内容自动合并；相同问题的不同答案会使整个文件导入失败。
+            </DialogDescription>
+          </DialogHeader>
+          <form className="dialog-form" onSubmit={importQuestions}>
+            <label className="form-field" htmlFor="knowledge-questions-file">
+              <span className="form-field-label">问答文件</span>
+              <Input
+                id="knowledge-questions-file"
+                type="file"
+                accept=".json,application/json"
+                required
+                disabled={Boolean(busy)}
+                onChange={(event) => void readQuestions(event.target.files?.[0])}
+              />
+            </label>
+            <p className="table-subtitle">
+              {
+                '示例：[{"question":"How do I clean the lamp?","answer":"Disconnect power and use a dry cloth."}]'
+              }
+            </p>
+            {importItems.length > 0 && <p>已读取 {importItems.length} 条问答</p>}
+            {formError && (
+              <p className="inline-error" role="alert">
+                {formError}
+              </p>
+            )}
+            <DialogFooter>
+              <Button type="submit" disabled={Boolean(busy) || !importItems.length}>
+                {busy ? '正在读取或导入…' : '导入问答'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={addBaseOpen}
@@ -4718,6 +4997,8 @@ function knowledgeErrorMessage(cause: unknown): string {
       FORBIDDEN: '你没有管理此知识库的权限。',
       NOT_FOUND: '知识库或文档不存在。',
       INVALID_REQUEST: '请检查知识库或文档内容后重试。',
+      CONFLICT:
+        '问答存在冲突：相同问题已有不同答案，或问答已被其他人修改。草稿已保留；请关闭后重新打开最新问答进行编辑。',
       RATE_LIMITED: '操作过于频繁，请稍后重试。',
       UNSUPPORTED_FILE_TYPE: '请上传 PDF、DOCX、TXT 或 Markdown 文件。',
       STORAGE_UNAVAILABLE: '文件存储暂时不可用，请稍后再试。',
