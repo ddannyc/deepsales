@@ -2,16 +2,27 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   bootstrapWorkspace,
+  claimKnowledgeDocument,
+  completeKnowledgeDocument,
   connectFacebookPages,
+  conversation,
+  createAiMember,
   createDatabase,
+  createInlineKnowledgeDocument,
+  createKnowledgeBase,
   getAiBudget,
+  knowledgeChunk,
   member,
   message,
   messageTranslation,
   processFacebookInbound,
+  publishAiMemberConfig,
+  replySuggestion,
   saveAiBudget,
   setMemberChannelAccess,
   takeOverConversation,
+  updateAiMemberConfig,
+  workspaceUserAccess,
 } from '@deepsales/db'
 import { and, eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
@@ -33,6 +44,9 @@ const env = {
   AI_API_KEY: 'test',
   LLM_PROVIDER: 'alibaba',
   LLM_MODEL: 'qwen3.8-flash',
+  EMBEDDING_PROVIDER: 'alibaba',
+  EMBEDDING_MODEL: 'qwen3.7-text-embedding',
+  EMBEDDING_DIMENSIONS: '1536',
 } as unknown as Bindings
 
 function providerResponse(text = 'Hello') {
@@ -138,6 +152,139 @@ describe.skipIf(!connectionString)('message translation routes', () => {
     expect(calls).toHaveBeenCalledTimes(2)
     const [original] = await db.select().from(message).where(eq(message.id, f.messageId))
     expect(original.text).toBe('你好')
+  })
+
+  it('lets an authorized agent preview grounded suggestions, edit and confirm without AI takeover', async () => {
+    const f = await fixture()
+    const ai = await suggestionAi(f)
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'AGENT' })
+      .where(eq(workspaceUserAccess.workspaceId, f.identity.workspaceId))
+    const calls = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith('/embeddings'))
+        return Response.json({ data: [{ index: 0, embedding: ai.vector }] })
+      const body = JSON.parse(String(init?.body))
+      expect(body.messages[1].content).toContain('Shipping is free.')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Shipping is free.',
+                handoffReason: null,
+                containsBusinessFacts: true,
+                usedChunkIds: [ai.chunkId],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', calls)
+    const input = { id: crypto.randomUUID(), aiMemberId: ai.id }
+    const response = await f.call('suggestions', input)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      suggestion: {
+        text: 'Shipping is free.',
+        inputMessageId: f.messageId,
+        chunkIds: [ai.chunkId],
+      },
+    })
+    expect((await f.call('suggestions', input)).status).toBe(200)
+    expect(calls).toHaveBeenCalledTimes(2)
+    const [current] = await db
+      .select()
+      .from(conversation)
+      .where(eq(conversation.id, f.conversationId))
+    expect(current.assigneeMemberId).toBe(f.memberId)
+    expect(await f.outbound()).toEqual([])
+    const reply = {
+      text: 'Shipping is free. May I help?',
+      suggestionId: input.id,
+      clientKey: input.id,
+    }
+    expect((await f.call('replies', reply)).status).toBe(201)
+    expect((await f.call('replies', reply)).status).toBe(201)
+    expect(await f.outbound()).toHaveLength(1)
+  })
+
+  it('rejects invented knowledge and late suggestions after new customer input without external messages', async () => {
+    const f = await fixture()
+    const ai = await suggestionAi(f)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) =>
+        String(url).endsWith('/embeddings')
+          ? Response.json({ data: [{ index: 0, embedding: ai.vector }] })
+          : Response.json({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      decision: 'ANSWER',
+                      response: 'Invented fact',
+                      handoffReason: null,
+                      containsBusinessFacts: true,
+                      usedChunkIds: [crypto.randomUUID()],
+                    }),
+                  },
+                },
+              ],
+            }),
+      ),
+    )
+    expect(
+      (await f.call('suggestions', { id: crypto.randomUUID(), aiMemberId: ai.id })).status,
+    ).toBe(502)
+    const id = crypto.randomUUID()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) => {
+        if (String(url).endsWith('/embeddings'))
+          return Response.json({ data: [{ index: 0, embedding: ai.vector }] })
+        await f.receive('A new customer input')
+        return providerResponse()
+      }),
+    )
+    expect((await f.call('suggestions', { id, aiMemberId: ai.id })).status).toBe(400)
+    const [record] = await db.select().from(replySuggestion).where(eq(replySuggestion.id, id))
+    expect(record.suggestedText).toBeNull()
+    expect(await f.outbound()).toEqual([])
+    const [current] = await db
+      .select()
+      .from(conversation)
+      .where(eq(conversation.id, f.conversationId))
+    expect(current.assigneeMemberId).toBe(f.memberId)
+  })
+
+  it('blocks suggestion calls on quota exhaustion and rejects AI channel permission revocation', async () => {
+    const f = await fixture()
+    const ai = await suggestionAi(f)
+    const calls = vi.fn(async (url: RequestInfo | URL) =>
+      String(url).endsWith('/embeddings')
+        ? Response.json({ data: [{ index: 0, embedding: ai.vector }] })
+        : providerResponse(),
+    )
+    vi.stubGlobal('fetch', calls)
+    await saveAiBudget(db, { ...f.identity, monthlyLimit: 0 })
+    const input = { id: crypto.randomUUID(), aiMemberId: ai.id }
+    expect((await f.call('suggestions', input)).status).toBe(409)
+    expect(calls).not.toHaveBeenCalled()
+    await saveAiBudget(db, { ...f.identity, monthlyLimit: null })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: RequestInfo | URL) => {
+        if (String(url).endsWith('/embeddings'))
+          return Response.json({ data: [{ index: 0, embedding: ai.vector }] })
+        await setMemberChannelAccess(db, { ...f.identity, memberId: ai.id, channelIds: [] })
+        return providerResponse()
+      }),
+    )
+    expect((await f.call('suggestions', input)).status).toBe(403)
+    expect(await f.outbound()).toEqual([])
   })
 
   it('does not call a provider on quota exhaustion or foreign conversation access', async () => {
@@ -274,10 +421,11 @@ async function fixture() {
     memberId: owner.id,
     channelIds: [connected.id],
   })
+  const externalUserId = crypto.randomUUID()
   const received = await processFacebookInbound(db, {
     ingressId: crypto.randomUUID(),
     pageId,
-    externalUserId: crypto.randomUUID(),
+    externalUserId,
     externalMessageId: crypto.randomUUID(),
     text: '你好',
     providerSentAt: new Date(),
@@ -293,6 +441,19 @@ async function fixture() {
   })
   return {
     identity: { workspaceId: workspace.id, actingUserId: created.user.id },
+    channelId: connected.id,
+    receive: (text: string) =>
+      processFacebookInbound(db, {
+        ingressId: crypto.randomUUID(),
+        pageId,
+        externalUserId,
+        externalMessageId: crypto.randomUUID(),
+        text,
+        providerSentAt: new Date(),
+        receivedAt: new Date(),
+        payloadSha256: 'a'.repeat(64),
+        eventFragment: {},
+      }),
     memberId: owner.id,
     conversationId: received.conversationId,
     messageId: received.messageId,
@@ -317,4 +478,50 @@ async function fixture() {
           ),
         ),
   }
+}
+
+async function suggestionAi(f: Awaited<ReturnType<typeof fixture>>) {
+  const base = await createKnowledgeBase(db, {
+    workspaceId: f.identity.workspaceId,
+    createdByUserId: f.identity.actingUserId,
+    name: 'Facts',
+  })
+  const ai = await createAiMember(db, {
+    workspaceId: f.identity.workspaceId,
+    createdByUserId: f.identity.actingUserId,
+    displayName: 'Assistant',
+  })
+  await updateAiMemberConfig(db, {
+    ...f.identity,
+    memberId: ai.id,
+    instructions: 'Use configured facts only.',
+    responseLanguage: 'English',
+    knowledgeBaseId: base.id,
+  })
+  await setMemberChannelAccess(db, { ...f.identity, memberId: ai.id, channelIds: [f.channelId] })
+  await publishAiMemberConfig(db, { ...f.identity, memberId: ai.id, providerConfigured: true })
+  const doc = await createInlineKnowledgeDocument(db, {
+    workspaceId: f.identity.workspaceId,
+    knowledgeBaseId: base.id,
+    createdByUserId: f.identity.actingUserId,
+    name: 'Shipping',
+    text: 'Shipping is free.',
+  })
+  const claim = await claimKnowledgeDocument(db, { documentId: doc.id })
+  if (!claim) throw new Error('Document not claimed')
+  const vector = Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0))
+  await completeKnowledgeDocument(db, {
+    documentId: doc.id,
+    workspaceId: f.identity.workspaceId,
+    knowledgeBaseId: base.id,
+    processingStartedAt: claim.processingStartedAt,
+    contentSha256: 'b'.repeat(64),
+    embeddingMetadata: { provider: 'alibaba', model: 'qwen3.7-text-embedding', dimensions: 1536 },
+    chunks: [{ text: 'Shipping is free.', embedding: vector }],
+  })
+  const [chunk] = await db
+    .select()
+    .from(knowledgeChunk)
+    .where(eq(knowledgeChunk.knowledgeDocumentId, doc.id))
+  return { id: ai.id, vector, chunkId: chunk.id }
 }

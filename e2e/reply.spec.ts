@@ -1,8 +1,15 @@
 ﻿import {
   channel,
+  claimKnowledgeDocument,
+  completeKnowledgeDocument,
+  createAiMember,
   createDatabase,
+  createInlineKnowledgeDocument,
+  createKnowledgeBase,
   facebookChannelConfig,
+  publishAiMemberConfig,
   setMemberChannelAccess,
+  updateAiMemberConfig,
 } from '@deepsales/db'
 import { expect, test } from '@playwright/test'
 import { Pool } from 'pg'
@@ -12,6 +19,7 @@ import { signInAndCreateWorkspace } from './auth'
 test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales deployment')
 
 test('human can take over, send a reply, and see SENT or FAILED', async ({ page }) => {
+  test.setTimeout(90_000)
   const suffix = Date.now()
   await signInAndCreateWorkspace(page, 'reply', 'Reply acceptance')
   await expect(page.getByRole('heading', { name: '全部进行中', exact: true })).toBeVisible()
@@ -47,6 +55,62 @@ test('human can take over, send a reply, and see SENT or FAILED', async ({ page 
       actingUserId: me.user.id,
       channelIds: [createdChannel.id],
     })
+    const base = await createKnowledgeBase(db, {
+      workspaceId: workspace.id,
+      createdByUserId: me.user.id,
+      name: 'Facts',
+    })
+    const ai = await createAiMember(db, {
+      workspaceId: workspace.id,
+      createdByUserId: me.user.id,
+      displayName: 'Reply assistant',
+    })
+    await updateAiMemberConfig(db, {
+      workspaceId: workspace.id,
+      memberId: ai.id,
+      actingUserId: me.user.id,
+      instructions: 'Only use configured facts.',
+      responseLanguage: 'English',
+      knowledgeBaseId: base.id,
+    })
+    await setMemberChannelAccess(db, {
+      workspaceId: workspace.id,
+      memberId: ai.id,
+      actingUserId: me.user.id,
+      channelIds: [createdChannel.id],
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: workspace.id,
+      memberId: ai.id,
+      actingUserId: me.user.id,
+      providerConfigured: true,
+    })
+    await page.request.patch(`/api/workspaces/${workspace.id}/members/${ai.id}`, {
+      data: { autoAssignmentEnabled: false },
+    })
+    const doc = await createInlineKnowledgeDocument(db, {
+      workspaceId: workspace.id,
+      knowledgeBaseId: base.id,
+      createdByUserId: me.user.id,
+      name: 'Shipping',
+      text: 'Shipping is free.',
+    })
+    const claim = await claimKnowledgeDocument(db, { documentId: doc.id })
+    if (!claim) throw new Error('Document not claimed')
+    await completeKnowledgeDocument(db, {
+      documentId: doc.id,
+      workspaceId: workspace.id,
+      knowledgeBaseId: base.id,
+      processingStartedAt: claim.processingStartedAt,
+      contentSha256: 'b'.repeat(64),
+      embeddingMetadata: { provider: 'alibaba', model: 'qwen3.7-text-embedding', dimensions: 1536 },
+      chunks: [
+        {
+          text: 'Shipping is free.',
+          embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
+        },
+      ],
+    })
   } finally {
     await pool.end()
   }
@@ -54,6 +118,7 @@ test('human can take over, send a reply, and see SENT or FAILED', async ({ page 
   await page.request.patch(`/api/workspaces/${workspace.id}/members/${workspace.memberId}`, {
     data: { autoAssignmentEnabled: false },
   })
+  await page.reload()
 
   const body = JSON.stringify({
     object: 'page',
@@ -165,6 +230,58 @@ test('human can take over, send a reply, and see SENT or FAILED', async ({ page 
   await expect(page.locator('.inbox-thread').getByText('发送失败', { exact: true })).toBeVisible({
     timeout: 10_000,
   })
+  await composer.getByLabel('回复客户').fill('Manual draft stays')
+  await composer.getByRole('button', { name: 'AI 回复建议', exact: true }).click()
+  const suggestions = composer.getByRole('region', { name: 'AI 回复建议', exact: true })
+  await suggestions.getByRole('button', { name: '生成回复建议', exact: true }).click()
+  await expect(suggestions.getByLabel('编辑回复建议')).toHaveValue('Shipping is free.', {
+    timeout: 10_000,
+  })
+  await expect(
+    page.locator('.message-bubble').getByText('Shipping is free.', { exact: true }),
+  ).toHaveCount(0)
+  await expect(composer.getByLabel('回复客户')).toHaveValue('Manual draft stays')
+  await suggestions.getByRole('button', { name: '取消建议', exact: true }).click()
+  await expect(suggestions.getByLabel('编辑回复建议')).toHaveCount(0)
+  await suggestions.getByRole('button', { name: '生成回复建议', exact: true }).click()
+  await expect(suggestions.getByLabel('编辑回复建议')).toHaveValue('Shipping is free.', {
+    timeout: 10_000,
+  })
+  await suggestions.getByLabel('编辑回复建议').fill('Edited suggestion')
+  await suggestions.getByRole('button', { name: '确认发送建议', exact: true }).click()
+  const sentSuggestion = page
+    .locator('.message-bubble')
+    .filter({ has: page.getByText('Edited suggestion', { exact: true }) })
+  await expect(sentSuggestion.getByText('已发送', { exact: true })).toBeVisible({ timeout: 10_000 })
+  await expect(composer.getByLabel('回复客户')).toHaveValue('Manual draft stays')
+  await suggestions.getByRole('button', { name: '生成回复建议', exact: true }).click()
+  await expect(suggestions.getByLabel('编辑回复建议')).toHaveValue('Shipping is free.', {
+    timeout: 10_000,
+  })
+  const nextBody = JSON.parse(body)
+  nextBody.entry[0].messaging[0].message = {
+    mid: `e2e-next-${suffix}`,
+    text: 'New customer question',
+  }
+  nextBody.entry[0].messaging[0].timestamp = Date.now()
+  const nextPayload = JSON.stringify(nextBody)
+  await page.request.post('/webhooks/facebook', {
+    headers: { 'x-hub-signature-256': `sha256=${await sign(nextPayload, 'e2e-meta-app-secret')}` },
+    data: nextPayload,
+  })
+  await expect(
+    page.locator('.message-bubble').getByText('New customer question', { exact: true }),
+  ).toBeVisible({ timeout: 10_000 })
+  await expect(suggestions.getByRole('button', { name: '确认发送建议', exact: true })).toHaveCount(
+    0,
+  )
+  await expect(suggestions.getByRole('status')).toContainText('旧建议已失效')
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.getByRole('region', { name: '对话列表', exact: true }).getByRole('button').click()
+  await expect(composer.getByRole('button', { name: '关闭建议', exact: true })).toBeVisible()
+  expect(await composer.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
 })
 
 async function sign(body: string, secret: string) {

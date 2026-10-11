@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+﻿import { randomUUID } from 'node:crypto'
 import { and, eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
@@ -9,21 +9,26 @@ import {
   claimOutboundMessage,
   completeMessageTranslation,
   completeOutboundMessage,
+  completeReplySuggestion,
   connectFacebookPages,
   conversation,
   conversationAssignment,
   createAiMember,
   createDatabase,
   createFacebookHumanReply as createHumanReply,
+  createKnowledgeBase,
   createMessageTranslation,
+  createReplySuggestion,
   deliveryAttempt,
   facebookMessagingWindow,
   member,
   message,
   processFacebookInbound,
+  publishAiMemberConfig,
   recoverStaleOutboundMessages,
   setMemberChannelAccess,
   takeOverConversation,
+  updateAiMemberConfig,
   user,
 } from '../src'
 
@@ -93,6 +98,79 @@ describe.skipIf(!connectionString)('human reply delivery', () => {
     ])
     expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
     expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1)
+  })
+
+  it('keeps AI suggestions internal and rejects confirmation after a newer customer input', async () => {
+    const f = await createFixture(db)
+    await takeOverConversation(db, { ...f, actingUserId: f.ownerId })
+    const base = await createKnowledgeBase(db, {
+      workspaceId: f.workspaceId,
+      createdByUserId: f.ownerId,
+      name: 'Facts',
+    })
+    const ai = await createAiMember(db, {
+      workspaceId: f.workspaceId,
+      createdByUserId: f.ownerId,
+      displayName: 'Assistant',
+    })
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: ai.id,
+      actingUserId: f.ownerId,
+      instructions: 'Answer from facts.',
+      responseLanguage: 'English',
+      knowledgeBaseId: base.id,
+    })
+    const [identity] = await db
+      .select()
+      .from(channelIdentity)
+      .where(eq(channelIdentity.id, f.channelIdentityId))
+    await setMemberChannelAccess(db, {
+      workspaceId: f.workspaceId,
+      actingUserId: f.ownerId,
+      memberId: ai.id,
+      channelIds: [identity.channelId],
+    })
+    await publishAiMemberConfig(db, {
+      providerConfigured: true,
+      workspaceId: f.workspaceId,
+      memberId: ai.id,
+      actingUserId: f.ownerId,
+    })
+    const input = { ...f, userId: f.ownerId, id: randomUUID(), aiMemberId: ai.id }
+    const suggestion = await createReplySuggestion(db, input)
+    await completeReplySuggestion(db, { ...input, text: 'Hello, how can I help?', chunkIds: [] })
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(eq(message.conversationId, f.conversationId), eq(message.direction, 'OUTBOUND')),
+        ),
+    ).toEqual([])
+    const reply = {
+      ...f,
+      actingUserId: f.ownerId,
+      text: 'Hello, how may I help?',
+      clientKey: suggestion.id,
+      suggestionId: suggestion.id,
+    }
+    expect((await createHumanReply(db, reply)).message.text).toBe(reply.text)
+    expect((await createHumanReply(db, reply)).message.id).toBe(
+      (await createHumanReply(db, reply)).message.id,
+    )
+    const second = await createReplySuggestion(db, { ...input, id: randomUUID() })
+    await completeReplySuggestion(db, { ...input, id: second.id, text: 'Hello', chunkIds: [] })
+    await db.insert(message).values({
+      conversationId: f.conversationId,
+      channelId: identity.channelId,
+      direction: 'INBOUND',
+      senderType: 'CUSTOMER',
+      text: 'A new question',
+    })
+    await expect(
+      createHumanReply(db, { ...reply, suggestionId: second.id, clientKey: second.id }),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
   })
 
   it('lets the current active human take over an unassigned conversation once', async () => {

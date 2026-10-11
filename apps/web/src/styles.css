@@ -1209,6 +1209,9 @@ form {
   font-size: var(--type-dense-size);
   font-weight: 700;
 }
+.reply-composer-footer {
+  flex-wrap: wrap;
+}
 .reply-composer-heading span,
 .reply-composer-footer > span {
   color: var(--muted-foreground);

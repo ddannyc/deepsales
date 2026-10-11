@@ -4,12 +4,13 @@ import {
   channelIdentity,
   conversation,
   deliveryAttempt,
+  mediaAsset,
   member,
   memberChannelAccess,
-  mediaAsset,
-  messageAttachment,
   message,
+  messageAttachment,
   messageTranslation,
+  replySuggestion,
   workspaceUserAccess,
 } from './schema'
 
@@ -45,6 +46,7 @@ export type HumanReplyInput = {
   assetId?: string
   clientKey?: string
   translation?: { id: string; sourceText: string; sourceVersion: string; targetLanguage: string }
+  suggestionId?: string
   now?: Date
 }
 type ReplyWindowCheck = (tx: Transaction, channelIdentityId: string, now: Date) => Promise<boolean>
@@ -158,6 +160,36 @@ export async function createHumanReply(
     if (current.status !== 'OPEN') {
       throw new ReplyError('CONVERSATION_CLOSED', 'Conversation is closed')
     }
+    if (input.suggestionId) {
+      const [suggestion] = await tx
+        .select()
+        .from(replySuggestion)
+        .where(eq(replySuggestion.id, input.suggestionId))
+      const [latest] = await tx
+        .select({ id: message.id })
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, input.conversationId),
+            eq(message.direction, 'INBOUND'),
+            eq(message.senderType, 'CUSTOMER'),
+          ),
+        )
+        .orderBy(desc(message.createdAt), desc(message.id))
+        .limit(1)
+      if (
+        !suggestion ||
+        suggestion.workspaceId !== input.workspaceId ||
+        suggestion.conversationId !== input.conversationId ||
+        suggestion.requesterMemberId !== viewer.memberId ||
+        !suggestion.suggestedText ||
+        suggestion.inputMessageId !== latest?.id ||
+        input.clientKey !== suggestion.id ||
+        input.assetId ||
+        input.translation
+      )
+        throw new ReplyError('INVALID_REQUEST', 'Suggestion is stale or invalid')
+    }
     if (current.assigneeMemberId !== viewer.memberId) {
       throw new ReplyError('FORBIDDEN', 'Only the current human assignee may reply')
     }
@@ -202,6 +234,11 @@ export async function createHumanReply(
         .update(messageTranslation)
         .set({ sentMessageId: created.id })
         .where(eq(messageTranslation.id, input.translation.id))
+    if (input.suggestionId)
+      await tx
+        .update(replySuggestion)
+        .set({ sentMessageId: created.id })
+        .where(eq(replySuggestion.id, input.suggestionId))
     if (asset)
       await tx.insert(messageAttachment).values({
         messageId: created.id,

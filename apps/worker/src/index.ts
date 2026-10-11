@@ -1,158 +1,181 @@
 import {
-  acceptAnyInvitation,
-  AiUsageError,
-  finishAiOperation,
-  recoverAiOperations,
-  CustomerError,
-  getCustomerProfile,
-  updateCustomerProfile,
-  savePropertyDefinition,
-  propertyDependencies,
-  setCustomerProperty,
-  saveCustomerTagDefinition,
-  removeCustomerTagDefinition,
-  setCustomerTag,
-  listCustomerLinkTargets,
-  changeCustomerIdentity,
-  listCustomerPropertyHistory,
-  claimAiResponseRun,
-  autoAssignConversation,
-  AssignmentError,
-  AiResponseError,
   AiMemberError,
-  claimOutboundMessage,
+  AiResponseError,
+  AiUsageError,
+  AssignmentError,
+  AttachmentError,
+  acceptAnyInvitation,
+  acknowledgeConversationRead,
+  assertInboxViewer,
+  assertKnowledgeBaseManager,
+  autoAssignConversation,
+  CustomerError,
+  changeCustomerIdentity,
+  chunkKnowledgeText,
+  claimAiResponseRun,
   claimFacebookInboundAttachment,
   claimKnowledgeDocument,
-  chunkKnowledgeText,
-  hashKnowledgeText,
-  assertKnowledgeBaseManager,
+  claimOutboundMessage,
   closeConversation,
+  commitAiResponse,
   completeFacebookInboundAttachment,
   completeKnowledgeDocument,
-  completeOutboundMessage,
-  commitAiResponse,
-  createDatabase,
-  createWorkspaceFromRegistrationInvite,
-  createAiMember,
-  createInvitation,
-  createFacebookHumanReply,
-  createMessageTranslation,
   completeMessageTranslation,
-  TRANSLATION_LANGUAGES,
-  createKnowledgeBase,
+  completeOutboundMessage,
+  completeReplySuggestion,
+  createAiMember,
+  createDatabase,
+  createFacebookHumanReply,
   createFileKnowledgeDocument,
   createInlineKnowledgeDocument,
+  createInternalNote,
+  createInvitation,
+  createKnowledgeBase,
   createKnowledgeQuestions,
-  updateKnowledgeQuestion,
+  createMediaAsset,
+  createMessageTranslation,
+  createReplySuggestion,
+  createWorkspaceFromRegistrationInvite,
+  type Database,
+  deleteInboxView,
   deleteKnowledgeDocument,
+  deleteMember,
   deleteOldFacebookWebhookReceipts,
+  deleteReplyTemplate,
   disableFacebookChannel,
   expireFacebookInboundAttachments,
+  type FacebookChannelCursor,
   FacebookError,
-  getFacebookAttachmentForDownload,
-  getFacebookOutboundDelivery,
-  getKnowledgeDocumentStorageKey,
-  getAiMemberConfig,
-  getAiFacebookAdvertisingContext,
-  InboxError,
-  AttachmentError,
-  MAX_INBOUND_ATTACHMENT_BYTES,
-  ReplyError,
-  failOutboundMessage,
   failFacebookInboundAttachment,
   failKnowledgeDocument,
+  failOutboundMessage,
+  finishAiOperation,
+  getAiFacebookAdvertisingContext,
+  getAiMemberConfig,
+  getCustomerProfile,
+  getFacebookAttachmentForDownload,
+  getFacebookOutboundDelivery,
+  getFacebookOutboundMedia,
+  getKnowledgeDocumentStorageKey,
+  getMediaAsset,
   handoffAiConversation,
+  hashKnowledgeText,
+  InboxError,
+  inboxFilterOptions,
+  KnowledgeError,
+  KnowledgeProcessingError,
+  listCustomerLinkTargets,
+  listCustomerPropertyHistory,
   listFacebookChannels,
   listFacebookChannelsPage,
   listFacebookConversations,
   listFacebookMessages,
+  listFacebookReferrals,
+  listInboxViews,
+  listInternalNotes,
+  listKnowledgeBases,
+  listKnowledgeDocuments,
+  listMediaAssets,
   listPendingFacebookInboundAttachmentIds,
   listPendingKnowledgeDocumentIds,
   listQueuedAiResponseRunIds,
   listQueuedConversationIds,
+  listReplyTemplates,
   listStaleAiResponseRuns,
-  listKnowledgeBases,
-  listKnowledgeDocuments,
-  KnowledgeError,
-  KnowledgeProcessingError,
-  MAX_INLINE_KNOWLEDGE_CODE_POINTS,
-  normalizeKnowledgeText,
-  listUnclaimedOutboundMessageIds,
-  deleteMember,
   listTeam,
+  listUnclaimedOutboundMessageIds,
+  MAX_INBOUND_ATTACHMENT_BYTES,
+  MAX_INLINE_KNOWLEDGE_CODE_POINTS,
+  MAX_OUTBOUND_TEXT_LENGTH,
   MemberError,
+  member,
+  normalizeKnowledgeText,
   processFacebookInbound,
   processFacebookReceipt,
   processFacebookReferral,
-  listFacebookReferrals,
-  acknowledgeConversationRead,
-  createInternalNote,
-  listInternalNotes,
-  setConversationMute,
-  assertInboxViewer,
-  createMediaAsset,
-  getMediaAsset,
-  getFacebookOutboundMedia,
-  storeFacebookMediaUpload,
-  retryFacebookHumanReply,
-  listMediaAssets,
-  updateMediaAsset,
-  listReplyTemplates,
-  saveReplyTemplate,
-  deleteReplyTemplate,
-  inboxFilterOptions,
-  listInboxViews,
-  saveInboxView,
-  deleteInboxView,
+  propertyDependencies,
+  publishAiMemberConfig,
+  ReplyError,
+  readReplySuggestionContext,
   recordAiResponseRetrievedChunks,
-  retryAiResponseRun,
-  releaseOutboundMessage,
+  recoverAiOperations,
+  recoverStaleOutboundMessages,
   releaseFacebookInboundAttachment,
   releaseKnowledgeDocument,
-  recoverStaleOutboundMessages,
-  member,
-  publishAiMemberConfig,
+  releaseOutboundMessage,
+  removeCustomerTagDefinition,
+  retryAiResponseRun,
+  retryFacebookHumanReply,
+  saveCustomerTagDefinition,
+  saveInboxView,
+  savePropertyDefinition,
+  saveReplyTemplate,
+  setConversationMute,
+  setCustomerProperty,
+  setCustomerTag,
   setMemberChannelAccess,
+  storeFacebookMediaUpload,
+  TRANSLATION_LANGUAGES,
   takeOverConversation,
   transferConversation,
   unassignConversation,
-  updateMember,
   updateAiMemberConfig,
+  updateCustomerProfile,
+  updateKnowledgeQuestion,
+  updateMediaAsset,
+  updateMember,
   validateAnyInvitation,
   workspace,
   workspaceUserAccess,
-  type Database,
-  MAX_OUTBOUND_TEXT_LENGTH,
-  type FacebookChannelCursor,
 } from '@deepsales/db'
 import { and, eq, sql } from 'drizzle-orm'
-import { Hono, type Context } from 'hono'
+import { type Context, Hono } from 'hono'
 import { Pool } from 'pg'
 import { z } from 'zod'
-import { createAuth } from './auth'
-import { meteredAiFetch } from './ai-usage'
-import { normalizeFacebookReferrals, facebookReferralJobSchema } from './facebook-referrals'
+import {
+  AIEmbeddingError,
+  AIOutputError,
+  AIProviderError,
+  ALIBABA_EMBEDDING_PROVIDER,
+  ALIBABA_LLM_PROVIDER,
+  aiMemberRuntimeSnapshotSchema,
+  aiStopRulesSchema,
+  aiTimeZoneSchema,
+  applyHandoffPolicy,
+  createAlibabaEmbeddingProvider,
+  createAlibabaLlmProvider,
+  DEFAULT_EMBEDDING_MODEL,
+  detectConfiguredHandoff,
+  EMBEDDING_DIMENSIONS,
+  enforceGrounding,
+  isLlmProviderConfigurationUsable,
+  MAX_AI_CURRENT_INPUT_CODE_POINTS,
+  matchedHandoffRuleId,
+} from './ai'
 import { aiOperationsRoutes } from './ai-operations'
+import { meteredAiFetch } from './ai-usage'
+import { createAuth } from './auth'
 import type { Bindings } from './bindings'
 import {
+  createFacebookAdapter,
+  decryptFacebookToken,
+  encryptFacebookAttachmentSources,
   FacebookProviderError,
   FacebookWebhookPayloadError,
-  facebookOutboundJobSchema,
   facebookAttachmentJobSchema,
+  facebookOutboundJobSchema,
+  facebookReceiptJobSchema,
   facebookWebhookJobSchema,
   isFacebookReplyWindowOpen,
-  isRetryableFacebookFailure,
-  normalizeFacebookWebhook,
-  normalizeFacebookReceipts,
-  facebookReceiptJobSchema,
-  MAX_FACEBOOK_WEBHOOK_EVENTS,
-  decryptFacebookToken,
-  createFacebookAdapter,
-  redactedFacebookFailure,
-  encryptFacebookAttachmentSources,
   isHttpUrl,
+  isRetryableFacebookFailure,
   isValidTokenEncryptionKey,
+  MAX_FACEBOOK_WEBHOOK_EVENTS,
+  normalizeFacebookReceipts,
+  normalizeFacebookWebhook,
+  redactedFacebookFailure,
 } from './facebook'
+import { facebookReferralJobSchema, normalizeFacebookReferrals } from './facebook-referrals'
 import {
   beginFacebookOAuth,
   completeFacebookOAuth,
@@ -161,34 +184,7 @@ import {
   recheckFacebookPage,
   selectFacebookPages,
 } from './facebook-service'
-
-import { publishRealtime, WorkspaceRealtime } from './realtime'
-import { createObjectStorage } from './object-storage'
-import { MAX_MEDIA_BYTES, validateMediaFile } from './media-files'
-import { createJobQueue, type JobQueue } from './queue'
-import {
-  ALIBABA_LLM_PROVIDER,
-  ALIBABA_EMBEDDING_PROVIDER,
-  AIEmbeddingError,
-  AIOutputError,
-  AIProviderError,
-  applyHandoffPolicy,
-  aiMemberRuntimeSnapshotSchema,
-  aiTimeZoneSchema,
-  aiStopRulesSchema,
-  matchedHandoffRuleId,
-  createAlibabaLlmProvider,
-  createAlibabaEmbeddingProvider,
-  DEFAULT_EMBEDDING_MODEL,
-  detectConfiguredHandoff,
-  enforceGrounding,
-  EMBEDDING_DIMENSIONS,
-  MAX_AI_CURRENT_INPUT_CODE_POINTS,
-  isLlmProviderConfigurationUsable,
-} from './ai'
 import { knowledgeDocumentJobSchema, retrieveKnowledgeChunks } from './knowledge'
-import { MAX_FACEBOOK_WEBHOOK_BODY_BYTES } from './limits'
-import { aiResponseJobSchema, maintenanceRoutingJobSchema } from './routing'
 import {
   extractKnowledgeText,
   KnowledgeFileError,
@@ -197,6 +193,12 @@ import {
   readKnowledgeFileBody,
   validateKnowledgeFile,
 } from './knowledge-files'
+import { MAX_FACEBOOK_WEBHOOK_BODY_BYTES } from './limits'
+import { MAX_MEDIA_BYTES, validateMediaFile } from './media-files'
+import { createObjectStorage } from './object-storage'
+import { createJobQueue, type JobQueue } from './queue'
+import { publishRealtime, WorkspaceRealtime } from './realtime'
+import { aiResponseJobSchema, maintenanceRoutingJobSchema } from './routing'
 
 const app = new Hono<{ Bindings: Bindings }>()
 const MAX_KNOWLEDGE_UPLOAD_BODY_BYTES = MAX_KNOWLEDGE_FILE_BYTES + 64 * 1024
@@ -341,6 +343,7 @@ const replyInput = z
     text: z.string().trim().min(1).max(MAX_OUTBOUND_TEXT_LENGTH).optional(),
     assetId: z.string().uuid().optional(),
     clientKey: z.string().uuid().optional(),
+    suggestionId: z.string().uuid().optional(),
     translation: z
       .object({
         id: z.string().uuid(),
@@ -1879,6 +1882,113 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/replies', a
       )
       return c.json({ message: created.message }, 201)
     } catch (error) {
+      return replyErrorResponse(c, error)
+    }
+  })
+})
+
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/suggestions', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    const limited = await rateLimit(c, `suggestion:${session.user.id}`)
+    if (limited) return limited
+    const input = z
+      .object({ id: z.string().uuid(), aiMemberId: z.string().uuid() })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null))
+    if (!input.success) return c.json({ error: { code: 'INVALID_REQUEST' } }, 400)
+    const identity = {
+      workspaceId: c.req.param('workspaceId'),
+      conversationId: c.req.param('conversationId'),
+      userId: session.user.id,
+    }
+    let operationId: string | undefined
+    try {
+      const record = await createReplySuggestion(db, { ...identity, ...input.data })
+      const publicSuggestion = (value: typeof record) => ({
+        id: value.id,
+        inputMessageId: value.inputMessageId,
+        aiMemberId: value.aiMemberId,
+        text: value.suggestedText,
+        chunkIds: value.chunkIds,
+      })
+      if (record.suggestedText) return c.json({ suggestion: publicSuggestion(record) })
+      const context = await readReplySuggestionContext(db, { ...identity, id: record.id })
+      operationId = record.id
+      const fetcher = meteredAiFetch((work) => withDatabase(c.env, work), {
+        id: record.id,
+        workspaceId: identity.workspaceId,
+        memberId: record.aiMemberId,
+        kind: 'SUGGESTION',
+        configVersionId: record.configVersionId,
+        snapshot: record.snapshot,
+        text: context.messages[0].text,
+      })
+      const embedding = createAlibabaEmbeddingProvider(
+        {
+          provider: c.env.EMBEDDING_PROVIDER,
+          apiKey: c.env.AI_API_KEY,
+          baseUrl: c.env.AI_BASE_URL,
+          model: c.env.EMBEDDING_MODEL,
+          dimensions: Number(c.env.EMBEDDING_DIMENSIONS),
+        },
+        fetcher,
+      )
+      const chunks = await retrieveKnowledgeChunks(db, embedding, c.env, {
+        workspaceId: identity.workspaceId,
+        knowledgeBaseId: record.snapshot.knowledgeBaseId,
+        query: context.messages[0].text ?? '',
+      })
+      const llm = createAlibabaLlmProvider(
+        {
+          provider: c.env.LLM_PROVIDER,
+          apiKey: c.env.AI_API_KEY,
+          baseUrl: c.env.AI_BASE_URL,
+          model: c.env.LLM_MODEL,
+        },
+        fetcher,
+      )
+      const decision = await llm.generateResponse({
+        instructions: record.snapshot.instructions,
+        responseLanguage: record.snapshot.responseLanguage,
+        timeZone: record.snapshot.timeZone,
+        naturalToneEnabled: record.snapshot.naturalToneEnabled,
+        messages: context.messages,
+        history: context.history,
+        knowledgeChunks: chunks,
+      })
+      const grounded = enforceGrounding(
+        decision,
+        chunks.map(({ id }) => id),
+        record.snapshot,
+      ).decision
+      if (grounded.decision !== 'ANSWER' || decision.mediaAssetId || decision.handoffRuleId)
+        throw new AIOutputError()
+      const suggestion = await completeReplySuggestion(db, {
+        ...identity,
+        id: record.id,
+        text: grounded.response,
+        chunkIds: grounded.usedChunkIds,
+      })
+      await finishAiOperation(db, { operationId: record.id, state: 'COMPLETED' })
+      return c.json({ suggestion: publicSuggestion(suggestion) })
+    } catch (error) {
+      if (error instanceof AiUsageError)
+        return c.json({ error: { code: error.code, retryAfterMs: error.retryAfterMs } }, 409)
+      if (operationId && !(error instanceof AIProviderError && error.retryable))
+        await finishAiOperation(db, {
+          operationId,
+          state: 'FAILED',
+          failureCode: 'SUGGESTION_FAILED',
+        })
+      if (
+        error instanceof AIProviderError ||
+        error instanceof AIOutputError ||
+        error instanceof AIEmbeddingError
+      )
+        return c.json({ error: { code: 'SUGGESTION_UNAVAILABLE' } }, 502)
       return replyErrorResponse(c, error)
     }
   })

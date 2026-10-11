@@ -1140,7 +1140,7 @@ export const aiOperation = pgTable(
     index('ai_operation_workspace_period_idx').on(table.workspaceId, table.period),
     check(
       'ai_operation_kind_valid',
-      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION')`,
+      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION', 'SUGGESTION')`,
     ),
     check(
       'ai_operation_state_valid',
@@ -1180,6 +1180,38 @@ export const messageTranslation = pgTable(
     ),
     index('message_translation_conversation_idx').on(table.conversationId),
   ],
+)
+
+export const replySuggestion = pgTable(
+  'reply_suggestion',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    requesterMemberId: uuid('requester_member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    aiMemberId: uuid('ai_member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    inputMessageId: uuid('input_message_id')
+      .notNull()
+      .references(() => message.id, { onDelete: 'cascade' }),
+    contextMessageIds: uuid('context_message_ids').array().notNull(),
+    snapshot: jsonb().$type<AiMemberRuntimeSnapshot>().notNull(),
+    configVersionId: uuid('config_version_id').references(() => aiConfigVersion.id, {
+      onDelete: 'set null',
+    }),
+    suggestedText: text('suggested_text'),
+    chunkIds: uuid('chunk_ids').array().default(sql`ARRAY[]::uuid[]`).notNull(),
+    sentMessageId: uuid('sent_message_id').references(() => message.id),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [index('reply_suggestion_conversation_idx').on(table.conversationId)],
 )
 
 export const aiProviderAttempt = pgTable(

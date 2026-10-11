@@ -93,6 +93,7 @@ import { InternalNotes } from './internal-notes'
 import { LandingPage } from './landing'
 import { MessageTranslation, type Translation } from './message-translation'
 import { ReplyContent } from './reply-content'
+import { type ReplySuggestion, ReplySuggestions } from './reply-suggestions'
 
 import './styles.css'
 
@@ -1632,6 +1633,25 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
     }
   }
 
+  async function sendSuggestedReply(suggestion: ReplySuggestion, text: string) {
+    if (!selectedId) return
+    const conversationId = selectedId
+    setActionLoading(true)
+    try {
+      const result = (await request(
+        `/api/workspaces/${workspace.id}/conversations/${conversationId}/replies`,
+        { text, clientKey: suggestion.id, suggestionId: suggestion.id },
+      )) as { message: InboxMessage }
+      if (selectedIdRef.current === conversationId) {
+        updateMessages([result.message])
+        await refreshThread(conversationId)
+      }
+      await refresh()
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   async function toggleMute() {
     if (!selectedConversation) return
     setActionLoading(true)
@@ -2144,6 +2164,22 @@ function InboxPage({ workspace }: { workspace: Workspace }) {
                 workspaceId={workspace.id}
                 conversationId={selectedId}
                 onSendTranslation={sendTranslatedReply}
+                onSendSuggestion={sendSuggestedReply}
+                inputMessageId={
+                  messages
+                    .filter(
+                      (item) => item.direction === 'INBOUND' && item.senderType === 'CUSTOMER',
+                    )
+                    .at(-1)?.id
+                }
+                aiMembers={teamMembers
+                  .filter(
+                    (item) =>
+                      item.type === 'AI' &&
+                      item.status === 'ACTIVE' &&
+                      item.configurationStatus === 'USABLE',
+                  )
+                  .map((item) => ({ id: item.id, displayName: item.displayName ?? 'AI' }))}
                 closed={selectedConversation.status === 'CLOSED'}
                 actionLoading={actionLoading}
                 canReply={
@@ -2568,6 +2604,9 @@ function ConversationComposer({
   workspaceId,
   conversationId,
   onSendTranslation,
+  onSendSuggestion,
+  aiMembers,
+  inputMessageId,
   closed = false,
   actionLoading,
   canReply,
@@ -2579,6 +2618,9 @@ function ConversationComposer({
   workspaceId: string
   conversationId: string
   onSendTranslation: (translation: Translation) => Promise<void>
+  onSendSuggestion: (suggestion: ReplySuggestion, text: string) => Promise<void>
+  aiMembers: { id: string; displayName: string }[]
+  inputMessageId?: string
   closed?: boolean
   actionLoading: boolean
   canReply: boolean
@@ -2588,6 +2630,7 @@ function ConversationComposer({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void
 }) {
   const [translationEnabled, setTranslationEnabled] = useState(false)
+  const [suggestionsEnabled, setSuggestionsEnabled] = useState(false)
   const disabled = closed || actionLoading || !canReply || !replyWindowOpen
   const hint = actionLoading
     ? '正在处理，请稍候。'
@@ -2636,6 +2679,15 @@ function ConversationComposer({
           }}
         />
         <div className="reply-composer-footer">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={disabled}
+            onClick={() => setSuggestionsEnabled((value) => !value)}
+          >
+            {suggestionsEnabled ? '关闭建议' : 'AI 回复建议'}
+          </Button>
           <label className="switch-field" htmlFor={`translation-${conversationId}`}>
             发送前翻译
             <Switch
@@ -2660,6 +2712,16 @@ function ConversationComposer({
             text={reply}
             disabled={disabled}
             onSend={onSendTranslation}
+          />
+        )}
+        {suggestionsEnabled && (
+          <ReplySuggestions
+            workspaceId={workspaceId}
+            conversationId={conversationId}
+            inputMessageId={inputMessageId}
+            members={aiMembers}
+            disabled={disabled}
+            onSend={onSendSuggestion}
           />
         )}
       </form>
