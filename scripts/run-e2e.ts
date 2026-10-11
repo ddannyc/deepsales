@@ -384,15 +384,20 @@ async function startFakeAI() {
             content,
           )?.[1]
         : /<knowledge_chunk id="([^"]+)">/.exec(content)?.[1]
+    const mediaMatch = current.includes('Send setup guide')
+      ? /<knowledge_chunk id="([^"]+)" media_asset_id="([^"]+)"/.exec(content)
+      : null
     const answer = current.includes('Explain split delivery')
       ? `${'Split first.'.padEnd(500, '.')}${'Split reject.'.padEnd(500, '.')}Split tail.`
-      : options
-        ? 'Option one is Torch One. Option two is Torch Two.'
-        : secondOption || humanContinuation
-          ? hasReferent && chunkId
-            ? 'Torch Two comes in blue.'
-            : 'Please clarify which option.'
-          : 'Shipping is free.'
+      : mediaMatch
+        ? 'Here is the setup guide.'
+        : options
+          ? 'Option one is Torch One. Option two is Torch Two.'
+          : secondOption || humanContinuation
+            ? hasReferent && chunkId
+              ? 'Torch Two comes in blue.'
+              : 'Please clarify which option.'
+            : 'Shipping is free.'
     response.end(
       JSON.stringify({
         choices: [
@@ -403,9 +408,13 @@ async function startFakeAI() {
                 response: answer,
                 handoffReason: null,
                 containsBusinessFacts:
-                  !current.includes('Explain split delivery') && Boolean(chunkId),
-                usedChunkIds:
-                  !current.includes('Explain split delivery') && chunkId ? [chunkId] : [],
+                  !mediaMatch && !current.includes('Explain split delivery') && Boolean(chunkId),
+                usedChunkIds: mediaMatch
+                  ? [mediaMatch[1]]
+                  : !current.includes('Explain split delivery') && chunkId
+                    ? [chunkId]
+                    : [],
+                mediaAssetId: mediaMatch?.[2] ?? null,
                 ...(body.messages?.[0]?.content.includes('Automatic language mode.')
                   ? { languageSelection: null }
                   : {}),

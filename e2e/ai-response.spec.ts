@@ -14,7 +14,7 @@ test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales de
 test.setTimeout(60_000)
 
 test('new inbound input receives a grounded AI reply and reaches SENT', async ({ page }) => {
-  test.setTimeout(180_000)
+  test.setTimeout(240_000)
   const suffix = Date.now()
   await signInAndCreateWorkspace(page, 'ai-response', 'AI response acceptance')
   await expect(page.locator('.shell')).toBeVisible()
@@ -146,6 +146,51 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
   )
   if (!conversation) throw new Error('AI conversation was not found')
   await page.locator('.conversation-items button').first().click()
+  const upload = await page.request.post(`/api/workspaces/${me.workspace.id}/media-assets`, {
+    headers: {
+      'Content-Type': 'image/png',
+      'X-Filename': 'setup-guide.png',
+      'X-Upload-Id': crypto.randomUUID(),
+      'X-Library': 'true',
+    },
+    data: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZuoAAAAASUVORK5CYII=',
+      'base64',
+    ),
+  })
+  expect(upload.ok()).toBeTruthy()
+  const asset = (await upload.json()) as { asset: { id: string; title: string } }
+  await page.goto('/knowledge')
+  await page.getByRole('button', { name: '引用素材', exact: true }).click()
+  const assetDialog = page.getByRole('dialog', { name: '添加文本' })
+  await assetDialog.getByLabel('文档名称').fill('Setup illustration')
+  await assetDialog
+    .getByLabel('文本内容')
+    .fill('Setup guide illustration with connection instructions.')
+  await expect(assetDialog.getByRole('combobox', { name: '引用私有素材（可选）' })).toBeEnabled()
+  await assetDialog.getByRole('combobox', { name: '引用私有素材（可选）' }).click()
+  await page.getByRole('option', { name: asset.asset.title, exact: true }).click()
+  await assetDialog.getByRole('button', { name: '添加文本', exact: true }).click()
+  const assetRow = page.getByRole('row').filter({ hasText: 'Setup illustration' })
+  await expect(assetRow.getByText('素材描述', { exact: true })).toBeVisible()
+  await expect(assetRow.getByText('已就绪', { exact: true })).toBeVisible({ timeout: 20_000 })
+  await page.goto('/inbox')
+  await page.locator('.conversation-items button').first().click()
+  await sendInbound(page, pageId, `customer-${suffix}`, `mid-asset-${suffix}`, 'Send setup guide')
+  const assetMessage = page
+    .locator('.message-bubble')
+    .filter({ has: page.getByAltText('setup-guide.png') })
+  await expect(assetMessage.getByText('已发送', { exact: true })).toBeVisible({ timeout: 30_000 })
+  const removal = await page.request.delete(
+    `/api/workspaces/${me.workspace.id}/media-assets/${asset.asset.id}`,
+  )
+  expect(removal.ok()).toBeTruthy()
+  await page.goto('/knowledge')
+  await expect(assetRow.getByText('已就绪', { exact: true })).toBeVisible()
+  await expect(assetRow.getByText('引用素材已失效', { exact: true })).toBeVisible()
+  await page.goto('/inbox')
+  await page.locator('.conversation-items button').first().click()
+  await expect(assetMessage.getByAltText('setup-guide.png')).toBeVisible()
   const waitSent = async (text: string, count = 1) => {
     await expect
       .poll(
@@ -159,7 +204,7 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
           return data.messages.filter((item) => item.text === text && item.deliveryState === 'SENT')
             .length
         },
-        { timeout: 20_000 },
+        { timeout: 30_000 },
       )
       .toBe(count)
   }

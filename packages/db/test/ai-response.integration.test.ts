@@ -21,6 +21,11 @@ import {
   createKnowledgeBase,
   listConversations,
   message,
+  mediaAsset,
+  messageAttachment,
+  knowledgeDocument,
+  knowledgeChunk,
+  recordAiResponseRetrievedChunks,
   processFacebookInbound,
   publishAiMemberConfig,
   retryAiResponseRun,
@@ -41,6 +46,98 @@ describe.skipIf(!connectionString)('AI response runs', () => {
   })
 
   afterAll(() => pool.end())
+
+  it('commits retrieved private media with its reply and preserves committed bytes after deletion', async () => {
+    const f = await createFixture(db)
+    const run = await createGeneratingRun(db, f, 'Please send the guide.')
+    const [claim] = await db
+      .select({ snapshot: aiResponseRun.configSnapshot })
+      .from(aiResponseRun)
+      .where(eq(aiResponseRun.id, run.runId))
+    const assetId = randomUUID()
+    await db.insert(mediaAsset).values({
+      id: assetId,
+      workspaceId: f.workspaceId,
+      title: 'Guide',
+      filename: 'guide.pdf',
+      kind: 'FILE',
+      mimeType: 'application/pdf',
+      byteSize: 12,
+      sha256: 'a'.repeat(64),
+      storageKey: 'test/private-guide',
+      inLibrary: true,
+    })
+    const [doc] = await db
+      .insert(knowledgeDocument)
+      .values({
+        workspaceId: f.workspaceId,
+        knowledgeBaseId: claim.snapshot?.knowledgeBaseId as string,
+        name: 'Guide',
+        sourceType: 'TEXT',
+        sourceText: 'Setup guide',
+        mediaAssetId: assetId,
+        status: 'READY',
+      })
+      .returning()
+    const [chunk] = await db
+      .insert(knowledgeChunk)
+      .values({
+        workspaceId: f.workspaceId,
+        knowledgeBaseId: doc.knowledgeBaseId,
+        knowledgeDocumentId: doc.id,
+        ordinal: 0,
+        text: 'Setup guide',
+        embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
+      })
+      .returning()
+    await expect(
+      commitAiResponse(db, { runId: run.runId, text: 'Here is the guide.', mediaAssetId: assetId }),
+    ).rejects.toMatchObject({ code: 'MEDIA_UNAVAILABLE' })
+    await recordAiResponseRetrievedChunks(db, { runId: run.runId, chunkIds: [chunk.id] })
+    const reply = await commitAiResponse(db, {
+      runId: run.runId,
+      text: 'Here is the guide.',
+      mediaAssetId: assetId,
+    })
+    if (reply?.kind !== 'COMMITTED') throw new Error('Media not committed')
+    expect(reply.messages.map((part) => part.messageType)).toEqual(['TEXT', 'ATTACHMENT'])
+    expect(reply.messages[1].replyAfterMessageId).toBe(reply.messages[0].id)
+    await db.delete(knowledgeDocument).where(eq(knowledgeDocument.id, doc.id))
+    await db.update(mediaAsset).set({ deletedAt: new Date() }).where(eq(mediaAsset.id, assetId))
+    await takeOverConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: run.conversationId,
+      actingUserId: f.ownerId,
+    })
+    const sentAt = new Date()
+    const text = await claimOutboundMessage(db, { messageId: reply.messages[0].id, now: sentAt })
+    if (!text) throw new Error('Text not claimed')
+    await completeOutboundMessage(db, {
+      messageId: text.id,
+      attemptId: text.attemptId,
+      externalMessageId: randomUUID(),
+      now: sentAt,
+    })
+    expect(
+      await claimOutboundMessage(db, {
+        messageId: reply.messages[1].id,
+        now: new Date(sentAt.getTime() + 1000),
+      }),
+    ).toMatchObject({ messageType: 'ATTACHMENT' })
+    expect(
+      await db
+        .select({ storageKey: messageAttachment.storageKey })
+        .from(messageAttachment)
+        .where(eq(messageAttachment.messageId, reply.messages[1].id)),
+    ).toEqual([{ storageKey: 'test/private-guide' }])
+    expect(
+      await commitAiResponse(db, {
+        runId: run.runId,
+        text: 'Here is the guide.',
+        mediaAssetId: assetId,
+      }),
+    ).toBeNull()
+  })
 
   it('commits an ordered split reply once without losing its tail', async () => {
     const f = await createFixture(db)

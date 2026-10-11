@@ -5,6 +5,7 @@ import {
   knowledgeChunk,
   knowledgeDocument,
   member,
+  mediaAsset,
   workspaceUserAccess,
 } from './schema'
 
@@ -54,6 +55,8 @@ export class KnowledgeProcessingError extends Error {
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 
 export type KnowledgeDocumentSummary = {
+  mediaAvailable: boolean
+  mediaAssetId: string | null
   id: string
   workspaceId: string
   knowledgeBaseId: string
@@ -366,6 +369,7 @@ export async function createInlineKnowledgeDocument(
     createdByUserId: string
     name: string
     text: string
+    mediaAssetId?: string
   },
 ) {
   const name = cleanName(input.name, 'Document name')
@@ -382,6 +386,26 @@ export async function createInlineKnowledgeDocument(
   return db.transaction(async (tx) => {
     await assertManager(tx, input.workspaceId, input.createdByUserId)
     await assertKnowledgeBase(tx, input.workspaceId, input.knowledgeBaseId)
+    if (input.mediaAssetId) {
+      const [asset] = await tx
+        .select({ id: mediaAsset.id })
+        .from(mediaAsset)
+        .where(
+          and(
+            eq(mediaAsset.id, input.mediaAssetId),
+            eq(mediaAsset.workspaceId, input.workspaceId),
+            eq(mediaAsset.inLibrary, true),
+            isNull(mediaAsset.deletedAt),
+          ),
+        )
+        .for('share')
+      if (!asset) throw new KnowledgeError('NOT_FOUND', 'Media asset is unavailable')
+      if (!normalized || codePointLength > 2000)
+        throw new KnowledgeError(
+          'INVALID_REQUEST',
+          'Asset description must contain 1–2000 code points',
+        )
+    }
     const [created] = await tx
       .insert(knowledgeDocument)
       .values({
@@ -390,6 +414,7 @@ export async function createInlineKnowledgeDocument(
         name,
         sourceType: 'TEXT',
         sourceText: input.text,
+        mediaAssetId: input.mediaAssetId,
         status: failureCode ? 'FAILED' : 'UPLOADED',
         contentSha256,
         failureCode,
@@ -813,6 +838,7 @@ export async function searchKnowledgeChunks(
   return db
     .select({
       id: knowledgeChunk.id,
+      mediaAssetId: knowledgeDocument.mediaAssetId,
       knowledgeDocumentId: knowledgeChunk.knowledgeDocumentId,
       text: knowledgeChunk.text,
       ordinal: knowledgeChunk.ordinal,
@@ -820,12 +846,21 @@ export async function searchKnowledgeChunks(
     })
     .from(knowledgeChunk)
     .innerJoin(knowledgeDocument, eq(knowledgeDocument.id, knowledgeChunk.knowledgeDocumentId))
+    .leftJoin(mediaAsset, eq(mediaAsset.id, knowledgeDocument.mediaAssetId))
     .where(
       and(
         eq(knowledgeChunk.workspaceId, input.workspaceId),
         eq(knowledgeChunk.knowledgeBaseId, input.knowledgeBaseId),
         eq(knowledgeDocument.workspaceId, input.workspaceId),
         eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+        or(
+          isNull(knowledgeDocument.mediaAssetId),
+          and(
+            eq(mediaAsset.workspaceId, input.workspaceId),
+            eq(mediaAsset.inLibrary, true),
+            isNull(mediaAsset.deletedAt),
+          ),
+        ),
         eq(knowledgeDocument.status, 'READY'),
         lte(distance, maxDistance),
       ),
@@ -874,6 +909,8 @@ export async function assertKnowledgeBaseEmbeddingCompatibility(
 }
 
 const documentSummarySelection = {
+  mediaAvailable: sql<boolean>`(${knowledgeDocument.mediaAssetId} is null or exists (select 1 from ${mediaAsset} where ${mediaAsset.id} = ${knowledgeDocument.mediaAssetId} and ${mediaAsset.workspaceId} = ${knowledgeDocument.workspaceId} and ${mediaAsset.inLibrary} and ${mediaAsset.deletedAt} is null))`,
+  mediaAssetId: knowledgeDocument.mediaAssetId,
   id: knowledgeDocument.id,
   workspaceId: knowledgeDocument.workspaceId,
   knowledgeBaseId: knowledgeDocument.knowledgeBaseId,

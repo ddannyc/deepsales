@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm'
 import {
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -661,6 +662,7 @@ export const message = pgTable(
     replyGroupId: uuid('reply_group_id'),
     replySegmentIndex: integer('reply_segment_index'),
     replySegmentCount: integer('reply_segment_count'),
+    replyAfterMessageId: uuid('reply_after_message_id'),
     clientKey: uuid('client_key'),
     text: text(),
     externalMessageId: text('external_message_id'),
@@ -676,9 +678,13 @@ export const message = pgTable(
   (table) => [
     check(
       'message_reply_segments',
-      sql`(${table.replyGroupId} is null and ${table.replySegmentIndex} is null and ${table.replySegmentCount} is null) or (${table.replyGroupId} is not null and ${table.replySegmentIndex} is not null and ${table.replySegmentCount} is not null and ${table.replySegmentIndex} between 1 and ${table.replySegmentCount} and ${table.replySegmentCount} between 2 and 3 and ${table.direction} = 'OUTBOUND' and ${table.messageType} = 'TEXT')`,
+      sql`(${table.replyGroupId} is null and ${table.replySegmentIndex} is null and ${table.replySegmentCount} is null and ${table.replyAfterMessageId} is null) or (${table.replyGroupId} is not null and ${table.direction} = 'OUTBOUND' and ((${table.replySegmentIndex} between 1 and ${table.replySegmentCount} and ${table.replySegmentIndex} is not null and ${table.replySegmentCount} is not null and ${table.replySegmentCount} between 1 and 3 and ${table.messageType} = 'TEXT' and ${table.replyAfterMessageId} is null) or (${table.replySegmentIndex} is null and ${table.replySegmentCount} is null and ${table.replyAfterMessageId} is not null and ${table.messageType} = 'ATTACHMENT')))`,
     ),
     uniqueIndex('message_reply_segment_idx').on(table.replyGroupId, table.replySegmentIndex),
+    foreignKey({ columns: [table.replyAfterMessageId], foreignColumns: [table.id] }),
+    uniqueIndex('message_reply_asset_idx')
+      .on(table.replyGroupId)
+      .where(sql`${table.messageType} = 'ATTACHMENT' and ${table.replyGroupId} is not null`),
     index('message_conversation_created_idx').on(table.conversationId, table.createdAt, table.id),
     uniqueIndex('message_human_retry_idx').on(
       table.conversationId,
@@ -1155,6 +1161,7 @@ export const knowledgeDocument = pgTable(
     name: text().notNull(),
     sourceType: knowledgeDocumentSourceType('source_type').notNull(),
     sourceText: text('source_text'),
+    mediaAssetId: uuid('media_asset_id').references(() => mediaAsset.id),
     question: text(),
     answer: text(),
     questionKey: text('question_key'),

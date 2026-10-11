@@ -10,6 +10,11 @@ import {
   getAiAnalytics,
   getAiMemberConfig,
   listAiDiagnostics,
+  mediaAsset,
+  createInlineKnowledgeDocument,
+  claimKnowledgeDocument,
+  completeKnowledgeDocument,
+  knowledgeChunk,
   member,
   updateAiMemberConfig,
   workspaceUserAccess,
@@ -35,6 +40,8 @@ const env = {
   LLM_PROVIDER: 'alibaba',
   LLM_MODEL: 'qwen3.8-flash',
   EMBEDDING_PROVIDER: 'alibaba',
+  EMBEDDING_MODEL: 'qwen3.7-text-embedding',
+  EMBEDDING_DIMENSIONS: '1536',
 } as unknown as Bindings
 
 describe.skipIf(!connectionString)('AI operations routes', () => {
@@ -48,6 +55,80 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('previews a grounded private asset in the sandbox without creating a conversation or sending', async () => {
+    const f = await fixture()
+    const assetId = crypto.randomUUID()
+    await db.insert(mediaAsset).values({
+      id: assetId,
+      workspaceId: f.workspaceId,
+      title: 'Guide',
+      filename: 'guide.pdf',
+      kind: 'FILE',
+      mimeType: 'application/pdf',
+      byteSize: 12,
+      sha256: 'a'.repeat(64),
+      storageKey: 'test/guide',
+      inLibrary: true,
+    })
+    const doc = await createInlineKnowledgeDocument(db, {
+      workspaceId: f.workspaceId,
+      knowledgeBaseId: f.baseId,
+      createdByUserId: f.userId,
+      name: 'Guide',
+      text: 'Setup instructions.',
+      mediaAssetId: assetId,
+    })
+    const claim = await claimKnowledgeDocument(db, { documentId: doc.id })
+    if (!claim) throw new Error('Description not claimed')
+    const vector = Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0))
+    await completeKnowledgeDocument(db, {
+      documentId: doc.id,
+      processingStartedAt: claim.processingStartedAt,
+      workspaceId: f.workspaceId,
+      knowledgeBaseId: f.baseId,
+      contentSha256: 'b'.repeat(64),
+      embeddingMetadata: { provider: 'alibaba', model: 'qwen3.7-text-embedding', dimensions: 1536 },
+      chunks: [{ text: 'Setup instructions.', embedding: vector }],
+    })
+    const [chunk] = await db
+      .select()
+      .from(knowledgeChunk)
+      .where(eq(knowledgeChunk.knowledgeDocumentId, doc.id))
+    const calls = vi.fn(async (url: RequestInfo | URL) =>
+      String(url).endsWith('/embeddings')
+        ? Response.json({ data: [{ index: 0, embedding: vector }] })
+        : Response.json({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    decision: 'ANSWER',
+                    response: 'Here is the guide.',
+                    handoffReason: null,
+                    containsBusinessFacts: false,
+                    usedChunkIds: [chunk.id],
+                    mediaAssetId: assetId,
+                  }),
+                },
+              },
+            ],
+          }),
+    )
+    vi.stubGlobal('fetch', calls)
+    const result = await f.call(`/${f.aiId}/test`, 'POST', {
+      id: crypto.randomUUID(),
+      source: 'DRAFT',
+      text: 'Send the guide.',
+    })
+    expect(result.status).toBe(200)
+    expect(await result.json()).toMatchObject({
+      operation: { state: 'COMPLETED', output: { decision: { mediaAssetId: assetId } } },
+    })
+    expect(
+      await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+    ).toEqual([])
+    expect(calls).toHaveBeenCalledTimes(2)
+  })
   it('isolates idempotent tests, retains diagnostics and feedback, and rejects unauthorized reads', async () => {
     const f = await fixture()
     const calls = vi.fn(async () =>
@@ -266,6 +347,7 @@ async function fixture() {
     workspaceId: workspace.id,
     userId: created.user.id,
     aiId: ai.id,
+    baseId: base.id,
     configCall: (body: unknown, memberId = ai.id) =>
       app.request(
         `/api/workspaces/${workspace.id}/ai-members/${memberId}/config`,

@@ -18,6 +18,7 @@ import {
   knowledgeDocument,
   type KnowledgeError,
   listPendingKnowledgeDocumentIds,
+  mediaAsset,
   searchKnowledgeChunks,
   user,
 } from '../src'
@@ -38,6 +39,74 @@ describe.skipIf(!connectionString)('knowledge indexing', () => {
   })
 
   afterAll(() => pool.end())
+
+  it('retrieves private asset descriptions only while their library reference is valid', async () => {
+    const ownerId = randomUUID()
+    await db.insert(user).values({ id: ownerId, name: 'Owner', email: `${ownerId}@example.com` })
+    const workspace = await bootstrapWorkspace(db, {
+      userId: ownerId,
+      userName: 'Owner',
+      name: 'Asset knowledge',
+    })
+    const base = await createKnowledgeBase(db, {
+      workspaceId: workspace.id,
+      createdByUserId: ownerId,
+      name: 'Guides',
+    })
+    const assetId = randomUUID()
+    await db.insert(mediaAsset).values({
+      id: assetId,
+      workspaceId: workspace.id,
+      title: 'Setup guide',
+      filename: 'guide.pdf',
+      kind: 'FILE',
+      mimeType: 'application/pdf',
+      byteSize: 12,
+      sha256: 'a'.repeat(64),
+      storageKey: 'test/guide',
+      inLibrary: true,
+    })
+    const doc = await createInlineKnowledgeDocument(db, {
+      workspaceId: workspace.id,
+      knowledgeBaseId: base.id,
+      createdByUserId: ownerId,
+      name: 'Setup guide',
+      text: 'A setup guide with connection instructions.',
+      mediaAssetId: assetId,
+    })
+    expect(doc.mediaAssetId).toBe(assetId)
+    const claimed = await claimKnowledgeDocument(db, { documentId: doc.id })
+    if (!claimed) throw new Error('Description not claimed')
+    await completeKnowledgeDocument(db, {
+      documentId: doc.id,
+      workspaceId: workspace.id,
+      knowledgeBaseId: base.id,
+      contentSha256: 'b'.repeat(64),
+      processingStartedAt: claimed.processingStartedAt,
+      chunks: [{ text: 'A setup guide with connection instructions.', embedding: vector(0) }],
+      embeddingMetadata,
+    })
+    const search = () =>
+      searchKnowledgeChunks(db, {
+        workspaceId: workspace.id,
+        knowledgeBaseId: base.id,
+        embedding: vector(0),
+        embeddingMetadata,
+      })
+    expect(await search()).toEqual([expect.objectContaining({ mediaAssetId: assetId })])
+    await db.update(mediaAsset).set({ deletedAt: new Date() }).where(eq(mediaAsset.id, assetId))
+    expect(await search()).toEqual([])
+    await expect(
+      createInlineKnowledgeDocument(db, {
+        workspaceId: workspace.id,
+        knowledgeBaseId: base.id,
+        createdByUserId: ownerId,
+        name: 'Unavailable',
+        text: 'Description',
+        mediaAssetId: assetId,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
 
   it('atomically indexes, scopes, retrieves, and deletes vector chunks', async () => {
     const firstUserId = randomUUID()

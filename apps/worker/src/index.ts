@@ -349,6 +349,7 @@ const transferInput = z
 const knowledgeBaseInput = z.object({ name: z.string().trim().min(1).max(100) }).strict()
 const knowledgeTextInput = z
   .object({
+    mediaAssetId: z.string().uuid().optional(),
     name: z.string().trim().min(1).max(100),
     text: z
       .string()
@@ -914,6 +915,7 @@ app.post(
           createdByUserId: session.user.id,
           name: input.data.name,
           text: input.data.text,
+          mediaAssetId: input.data.mediaAssetId,
         })
         if (document.status === 'UPLOADED') {
           await enqueueKnowledgeDocumentJob(c.env.DOCUMENTS_QUEUE, document.id)
@@ -3275,7 +3277,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         messages: inputMessages,
         history: claimed.history,
         advertisingContext,
-        knowledgeChunks: retrievedChunks.map(({ id, text }) => ({ id, text })),
+        knowledgeChunks: retrievedChunks,
       })
       await withDatabase(env, (db) =>
         finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
@@ -3286,7 +3288,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           ? (decision.languageSelection?.language ?? currentSnapshot.responseLanguage)
           : currentSnapshot.responseLanguage,
       }
-      const grounded = enforceGrounding(decision, retrievedChunkIds, replyConfig)
+      const grounded = enforceGrounding(decision, retrievedChunkIds, replyConfig, retrievedChunks)
       const policy = applyHandoffPolicy(grounded.decision, replyConfig)
       if (policy.kind === 'HANDOFF') {
         await completeAiHandoff(env, claimed, {
@@ -3311,6 +3313,8 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         commitAiResponse(db, {
           runId: claimed.id,
           text: policy.decision.response,
+          mediaAssetId:
+            'mediaAssetId' in policy.decision ? policy.decision.mediaAssetId : undefined,
           languageSelection: currentSnapshot.automaticLanguageEnabled
             ? decision.languageSelection
             : undefined,
@@ -3457,6 +3461,8 @@ function isRetryableAiFailure(error: unknown) {
 }
 
 function aiFailureCode(error: unknown) {
+  if (error instanceof AiResponseError && error.code === 'MEDIA_UNAVAILABLE')
+    return 'MEDIA_UNAVAILABLE'
   if (error instanceof AIOutputError) return 'INVALID_OUTPUT'
   if (error instanceof AIEmbeddingError) return 'INVALID_EMBEDDING'
   if (error instanceof KnowledgeError) return 'KNOWLEDGE_UNAVAILABLE'

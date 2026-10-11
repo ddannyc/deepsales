@@ -1,0 +1,2 @@
+ALTER TABLE "knowledge_document" ADD COLUMN "media_asset_id" uuid;--> statement-breakpoint
+ALTER TABLE "knowledge_document" ADD CONSTRAINT "knowledge_document_media_asset_id_media_asset_id_fk" FOREIGN KEY ("media_asset_id") REFERENCES "public"."media_asset"("id") ON DELETE no action ON UPDATE no action;

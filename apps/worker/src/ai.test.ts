@@ -132,6 +132,28 @@ describe('Alibaba LLM responses', () => {
 })
 
 describe('AI grounding', () => {
+  it('requires a retrieved asset and its knowledge citation even without business facts', () => {
+    const assetId = crypto.randomUUID()
+    const chunkId = crypto.randomUUID()
+    const reply = {
+      decision: 'ANSWER' as const,
+      response: 'Here is the guide.',
+      handoffReason: null,
+      containsBusinessFacts: false,
+      usedChunkIds: [chunkId],
+      mediaAssetId: assetId,
+    }
+    const config = { handoffOnNoKnowledge: true, responseLanguage: 'English' }
+    expect(
+      enforceGrounding(reply, [chunkId], config, [{ id: chunkId, mediaAssetId: assetId }]).kind,
+    ).toBe('ANSWER')
+    expect(enforceGrounding(reply, [chunkId], config, []).kind).toBe('HANDOFF')
+    expect(
+      enforceGrounding({ ...reply, usedChunkIds: [] }, [chunkId], config, [
+        { id: chunkId, mediaAssetId: assetId },
+      ]).kind,
+    ).toBe('HANDOFF')
+  })
   const answer = {
     decision: 'ANSWER' as const,
     response: 'Shipping is free.',

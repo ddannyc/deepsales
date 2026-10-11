@@ -193,7 +193,7 @@ export function aiOperationsRoutes(
               responseLanguage: snapshot.responseLanguage,
               messages: [{ id: input.id, text: input.text }],
               history: [],
-              knowledgeChunks: chunks.map(({ id, text }) => ({ id, text })),
+              knowledgeChunks: chunks,
             })
             const replyConfig = {
               ...snapshot,
@@ -206,6 +206,7 @@ export function aiOperationsRoutes(
                 decision,
                 chunks.map(({ id }) => id),
                 replyConfig,
+                chunks,
               ).decision,
               replyConfig,
             )

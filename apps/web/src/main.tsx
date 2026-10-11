@@ -281,6 +281,8 @@ type KnowledgeBase = {
 }
 
 type KnowledgeDocument = {
+  mediaAvailable?: boolean
+  mediaAssetId?: string | null
   id: string
   workspaceId: string
   knowledgeBaseId: string
@@ -2453,7 +2455,7 @@ function MessageBubble({
           {isAi ? <Bot aria-hidden="true" /> : <UserRound aria-hidden="true" />}
           <strong>{senderName}</strong>
           {isAi && <StatusBadge tone="info">AI</StatusBadge>}
-          {message.replySegmentIndex && (
+          {message.replySegmentIndex && (message.replySegmentCount ?? 0) > 1 && (
             <StatusBadge tone="neutral">
               回复分段 {message.replySegmentIndex}/{message.replySegmentCount}
             </StatusBadge>
@@ -3021,6 +3023,7 @@ const knowledgeFailureLabels: Record<string, string> = {
 }
 
 function KnowledgePage({ workspace }: { workspace: Workspace }) {
+  const [knowledgeAssets, setKnowledgeAssets] = useState<{ id: string; title: string }[]>()
   const [bases, setBases] = useState<KnowledgeBase[]>()
   const [selectedBaseId, setSelectedBaseId] = useState<string | null>(null)
   const [documents, setDocuments] = useState<KnowledgeDocument[]>()
@@ -3043,6 +3046,26 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
   >([])
   const canManage = workspace.role !== 'AGENT'
   const selectedBase = bases?.find(({ id }) => id === selectedBaseId)
+  useEffect(() => {
+    if (!addTextOpen) return
+    let cancelled = false
+    setKnowledgeAssets(undefined)
+    void fetch(`/api/workspaces/${workspace.id}/media-assets`)
+      .then(async (response) => {
+        if (!response.ok) throw await responseError(response)
+        const result = (await response.json()) as { assets: { id: string; title: string }[] }
+        if (!cancelled) setKnowledgeAssets(result.assets)
+      })
+      .catch((cause) => {
+        if (!cancelled) {
+          setKnowledgeAssets([])
+          setFormError(knowledgeErrorMessage(cause))
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [addTextOpen, workspace.id])
 
   const refreshBases = useCallback(async () => {
     const response = await fetch(`/api/workspaces/${workspace.id}/knowledge-bases`)
@@ -3147,7 +3170,13 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
           '/knowledge-bases/' +
           selectedBaseId +
           '/documents/text',
-        { name: data.get('name'), text: data.get('text') },
+        {
+          name: data.get('name'),
+          text: data.get('text'),
+          ...(data.get('mediaAssetId') && data.get('mediaAssetId') !== 'NONE'
+            ? { mediaAssetId: data.get('mediaAssetId') }
+            : {}),
+        },
       )) as { document: KnowledgeDocument }
       form.reset()
       setDocuments((current) => (current ? [...current, result.document] : [result.document]))
@@ -3338,6 +3367,9 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
                 上传文档
               </Button>
               <Button onClick={() => openDocumentDialog('text')}>添加文本</Button>
+              <Button variant="outline" onClick={() => openDocumentDialog('text')}>
+                引用素材
+              </Button>
             </>
           )
         }
@@ -3458,13 +3490,20 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
                           )}
                         </TableCell>
                         <TableCell data-column="type" data-label="类型">
-                          {document.question ? '问答' : knowledgeSourceLabels[document.sourceType]}
+                          {document.mediaAssetId
+                            ? '素材描述'
+                            : document.question
+                              ? '问答'
+                              : knowledgeSourceLabels[document.sourceType]}
                         </TableCell>
                         <TableCell data-column="status" data-label="状态">
                           <StateBadge
                             status={document.status}
                             label={knowledgeStatusLabels[document.status]}
                           />
+                          {document.mediaAvailable === false && (
+                            <StatusBadge tone="warning">引用素材已失效</StatusBadge>
+                          )}
                           {document.status === 'PROCESSING' && (
                             <span className="table-subtitle">后台处理中</span>
                           )}
@@ -3706,10 +3745,35 @@ function KnowledgePage({ workspace }: { workspace: Workspace }) {
         <DialogContent className="ui-dialog-content">
           <DialogHeader>
             <DialogTitle>添加文本</DialogTitle>
-            <DialogDescription>文本提交后会在后台处理，再用于 AI 回复。</DialogDescription>
+            <DialogDescription>
+              文本提交后会在后台处理。选择私有素材时，文本用作可检索描述，AI
+              可按授权引用发送；不会读取文件全文。
+            </DialogDescription>
           </DialogHeader>
           <form className="dialog-form" onSubmit={addText}>
             <Field label="文档名称" name="name" maxLength={100} />
+            <div className="form-field">
+              <span id="knowledge-asset-label" className="form-field-label">
+                引用私有素材（可选）
+              </span>
+              <Select name="mediaAssetId" defaultValue="NONE" disabled={!knowledgeAssets}>
+                <SelectTrigger aria-labelledby="knowledge-asset-label">
+                  <SelectValue placeholder="正在读取素材…" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="NONE">无（普通文本）</SelectItem>
+                  {knowledgeAssets?.map((asset) => (
+                    <SelectItem key={asset.id} value={asset.id}>
+                      {asset.title}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="field-description">
+                素材需先在收件箱素材库保存。描述最多 2,000
+                字；删除知识条目或停用素材后，新回复不能再引用。
+              </p>
+            </div>
             <label className="form-field" htmlFor="knowledge-document-text">
               <span className="form-field-label">文本内容</span>
               <Textarea id="knowledge-document-text" name="text" required rows={8} />

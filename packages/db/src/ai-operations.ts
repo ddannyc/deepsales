@@ -12,6 +12,8 @@ import {
   message,
   knowledgeChunk,
   knowledgeBase,
+  knowledgeDocument,
+  mediaAsset,
   aiFeedback,
   aiConfigVersion,
   type AiMemberRuntimeSnapshot,
@@ -438,8 +440,19 @@ export async function getAiDiagnostics(db: Database, input: Identity & { id: str
           id: knowledgeChunk.id,
           text: knowledgeChunk.text,
           documentId: knowledgeChunk.knowledgeDocumentId,
+          mediaAssetId: knowledgeDocument.mediaAssetId,
+          mediaTitle: mediaAsset.title,
+          mediaDeletedAt: mediaAsset.deletedAt,
         })
         .from(knowledgeChunk)
+        .innerJoin(knowledgeDocument, eq(knowledgeDocument.id, knowledgeChunk.knowledgeDocumentId))
+        .leftJoin(
+          mediaAsset,
+          and(
+            eq(mediaAsset.id, knowledgeDocument.mediaAssetId),
+            eq(mediaAsset.workspaceId, input.workspaceId),
+          ),
+        )
         .where(
           and(
             eq(knowledgeChunk.workspaceId, input.workspaceId),

@@ -212,6 +212,7 @@ export async function claimOutboundMessage(
         deliveryStartedAt: message.deliveryStartedAt,
         replyGroupId: message.replyGroupId,
         replySegmentIndex: message.replySegmentIndex,
+        replyAfterMessageId: message.replyAfterMessageId,
       })
       .from(message)
       .where(and(eq(message.id, input.messageId), eq(message.direction, 'OUTBOUND')))
@@ -236,15 +237,20 @@ export async function claimOutboundMessage(
       return null
     }
 
-    if (current.replyGroupId && current.replySegmentIndex && current.replySegmentIndex > 1) {
+    if (
+      current.replyAfterMessageId ||
+      (current.replyGroupId && current.replySegmentIndex && current.replySegmentIndex > 1)
+    ) {
       const [previous] = await tx
         .select({ state: message.deliveryState, completedAt: message.deliveryCompletedAt })
         .from(message)
         .where(
-          and(
-            eq(message.replyGroupId, current.replyGroupId),
-            eq(message.replySegmentIndex, current.replySegmentIndex - 1),
-          ),
+          current.replyAfterMessageId
+            ? eq(message.id, current.replyAfterMessageId)
+            : and(
+                eq(message.replyGroupId, current.replyGroupId as string),
+                eq(message.replySegmentIndex, (current.replySegmentIndex as number) - 1),
+              ),
         )
       if (previous?.state === 'FAILED' || !previous) {
         await tx

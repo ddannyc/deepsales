@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, lte, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
   type AiMemberRuntimeSnapshot,
@@ -10,6 +10,10 @@ import {
   member,
   memberChannelAccess,
   message,
+  messageAttachment,
+  mediaAsset,
+  knowledgeDocument,
+  knowledgeChunk,
   workspace,
 } from './schema'
 
@@ -64,7 +68,7 @@ export type AiResponseRunClaimResult =
 
 export class AiResponseError extends Error {
   constructor(
-    readonly code: 'NOT_FOUND' | 'INVALID_REQUEST',
+    readonly code: 'NOT_FOUND' | 'INVALID_REQUEST' | 'MEDIA_UNAVAILABLE',
     message: string = code,
   ) {
     super(message)
@@ -532,6 +536,7 @@ export async function commitAiResponse(
     runId: string
     text: string
     now?: Date
+    mediaAssetId?: string | null
     languageSelection?: { language: string; explicitSwitch: boolean } | null
   },
 ): Promise<CommitAiResponseResult> {
@@ -585,6 +590,7 @@ export async function commitAiResponse(
         state: aiResponseRun.state,
         inputLastMessageId: aiResponseRun.inputLastMessageId,
         configSnapshot: aiResponseRun.configSnapshot,
+        retrievedChunkIds: aiResponseRun.retrievedChunkIds,
       })
       .from(aiResponseRun)
       .where(eq(aiResponseRun.id, input.runId))
@@ -634,6 +640,31 @@ export async function commitAiResponse(
     )
       throw new AiResponseError('INVALID_REQUEST', 'Language change needs an explicit request')
 
+    if (input.mediaAssetId && !run.configSnapshot?.knowledgeBaseId)
+      throw new AiResponseError('MEDIA_UNAVAILABLE', 'Knowledge media is unavailable')
+    const [asset] = input.mediaAssetId
+      ? await tx
+          .select({ asset: mediaAsset })
+          .from(mediaAsset)
+          .innerJoin(knowledgeDocument, eq(knowledgeDocument.mediaAssetId, mediaAsset.id))
+          .innerJoin(knowledgeChunk, eq(knowledgeChunk.knowledgeDocumentId, knowledgeDocument.id))
+          .where(
+            and(
+              eq(mediaAsset.id, input.mediaAssetId),
+              eq(mediaAsset.workspaceId, current.workspaceId),
+              eq(mediaAsset.inLibrary, true),
+              isNull(mediaAsset.deletedAt),
+              eq(knowledgeDocument.workspaceId, current.workspaceId),
+              eq(knowledgeDocument.knowledgeBaseId, run.configSnapshot?.knowledgeBaseId ?? ''),
+              eq(knowledgeDocument.status, 'READY'),
+              inArray(knowledgeChunk.id, run.retrievedChunkIds ?? []),
+            ),
+          )
+          .for('share', { of: [mediaAsset, knowledgeDocument] })
+          .limit(1)
+      : []
+    if (input.mediaAssetId && !asset)
+      throw new AiResponseError('MEDIA_UNAVAILABLE', 'Knowledge media is unavailable')
     const points = Array.from(text)
     const texts =
       run.configSnapshot?.splitRepliesEnabled && points.length > 500
@@ -656,9 +687,9 @@ export async function commitAiResponse(
           channelId: current.channelId,
           senderMemberId: run.memberId,
           text: part,
-          replyGroupId: texts.length > 1 ? run.id : null,
-          replySegmentIndex: texts.length > 1 ? index + 1 : null,
-          replySegmentCount: texts.length > 1 ? texts.length : null,
+          replyGroupId: texts.length > 1 || asset ? run.id : null,
+          replySegmentIndex: texts.length > 1 || asset ? index + 1 : null,
+          replySegmentCount: texts.length > 1 || asset ? texts.length : null,
           deliveryState: 'PENDING' as const,
           direction: 'OUTBOUND' as const,
           senderType: 'MEMBER' as const,
@@ -670,6 +701,37 @@ export async function commitAiResponse(
       .returning()
     const created = createdMessages[0]
     if (!created) throw new AiResponseError('INVALID_REQUEST', 'AI message was not created')
+    if (asset) {
+      const [mediaMessage] = await tx
+        .insert(message)
+        .values({
+          conversationId: current.id,
+          channelId: current.channelId,
+          senderMemberId: run.memberId,
+          direction: 'OUTBOUND',
+          senderType: 'MEMBER',
+          messageType: 'ATTACHMENT',
+          deliveryState: 'PENDING',
+          replyGroupId: run.id,
+          replyAfterMessageId: createdMessages.at(-1)?.id,
+          createdAt: sql`${stamp.at}::timestamptz + ${texts.length} * interval '1 microsecond'`,
+          updatedAt: now,
+        })
+        .returning()
+      if (!mediaMessage)
+        throw new AiResponseError('INVALID_REQUEST', 'AI media message was not created')
+      await tx.insert(messageAttachment).values({
+        messageId: mediaMessage.id,
+        assetId: asset.asset.id,
+        kind: asset.asset.kind,
+        filename: asset.asset.filename,
+        mimeType: asset.asset.mimeType,
+        byteSize: asset.asset.byteSize,
+        storageKey: asset.asset.storageKey,
+        storageState: 'READY',
+      })
+      createdMessages.push(mediaMessage)
+    }
 
     await tx
       .update(conversation)

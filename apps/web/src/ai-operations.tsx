@@ -52,7 +52,10 @@ type Diagnostics = {
     id: string
     state: string
     input: string
-    output: { kind?: string; decision?: { response?: string; handoffReason?: string } } | null
+    output: {
+      kind?: string
+      decision?: { response?: string; handoffReason?: string; mediaAssetId?: string | null }
+    } | null
     snapshot: Record<string, unknown> | null
     failureCode: string | null
     configVersionId: string | null
@@ -61,7 +64,13 @@ type Diagnostics = {
   history: { id: string; text: string; direction: string }[]
   output: { text: string } | null
   segments?: { id: string; deliveryState: string | null }[]
-  chunks: { id: string; text: string }[]
+  chunks: {
+    id: string
+    text: string
+    mediaAssetId?: string | null
+    mediaTitle?: string | null
+    mediaDeletedAt?: string | null
+  }[]
   missingChunkIds: string[]
   attempts: { id: string; stage: string; state: string; httpStatus: number | null }[]
   feedback: { id: string; category: string; note: string }[]
@@ -105,6 +114,7 @@ const labels: Record<string, string> = {
   QUOTA_EXHAUSTED: '额度已耗尽',
   OPERATION_PAUSED: '调用已暂停',
   NO_KNOWLEDGE: '无可靠知识',
+  MEDIA_UNAVAILABLE: '知识素材已失效，已转人工',
   GROUNDING_FAILED: '回答缺少知识依据',
   INVALID_OUTPUT: '模型输出无效',
   INVALID_EMBEDDING: '检索输出无效',
@@ -711,7 +721,26 @@ export function AiOperations({
               </details>
               <h3>知识依据</h3>
               {diagnostics.chunks.map((chunk) => (
-                <p key={chunk.id}>{chunk.text}</p>
+                <div key={chunk.id}>
+                  <p>{chunk.text}</p>
+                  {chunk.mediaAssetId &&
+                    (chunk.mediaDeletedAt ? (
+                      <p>引用素材已删除。</p>
+                    ) : (
+                      <a
+                        href={`/api/workspaces/${workspaceId}/media-assets/${chunk.mediaAssetId}/file`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        预览私有素材：{chunk.mediaTitle ?? '素材'}
+                      </a>
+                    ))}
+                  {chunk.mediaAssetId &&
+                    chunk.mediaAssetId ===
+                      diagnostics.operation?.output?.decision?.mediaAssetId && (
+                      <p>测试已选择此素材；隔离测试不会外发。</p>
+                    )}
+                </div>
               ))}
               {diagnostics.missingChunkIds.length > 0 && <p>部分知识已删除，无法读取原文。</p>}
               <h3>服务尝试</h3>
