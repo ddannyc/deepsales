@@ -11,10 +11,11 @@ import {
 export function meteredAiFetch(
   withDb: <T>(work: (db: Database) => Promise<T>) => Promise<T>,
   operation: Parameters<typeof reserveAiOperation>[1],
+  llmStage: 'LLM' | 'STOP_HANDOFF' = 'LLM',
 ) {
   let embeddingBatch = 0
   return async (url: RequestInfo | URL, init?: RequestInit) => {
-    const stage = String(url).endsWith('/embeddings') ? `EMBEDDING:${embeddingBatch++}` : 'LLM'
+    const stage = String(url).endsWith('/embeddings') ? `EMBEDDING:${embeddingBatch++}` : llmStage
     await withDb((db) => reserveAiOperation(db, operation))
     const cached = await withDb((db) => getAiProviderResponse(db, operation.id, stage))
     if (cached) return Response.json(cached.response)

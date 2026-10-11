@@ -1,4 +1,4 @@
-import { dirname, resolve } from 'node:path'
+﻿import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   aiMemberConfig,
@@ -10,6 +10,10 @@ import {
   connectFacebookPages,
   conversation,
   conversationAssignment,
+  channelIdentity,
+  customerPropertyDefinition,
+  customerPropertyValue,
+  aiProviderAttempt,
   createAiMember,
   createDatabase,
   createInlineKnowledgeDocument,
@@ -52,6 +56,271 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+
+  it('stops without paid generation when semantic handoff is disabled, and honors explicit requests after enabling it', async () => {
+    const f = await createFixture(db)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      replyWaitEnabled: false,
+      handoffOnCustomerRequest: false,
+      stopRules: {
+        groups: [[{ kind: 'REPLIES', minimum: 0 }]],
+        periods: [],
+        endingText: 'We are offline.',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const received = await receiveContextInput(db, f, 'Hello')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const provider = vi.fn()
+    vi.stubGlobal('fetch', provider)
+    const send = vi.fn()
+    const env = environment({ send } as unknown as Queue)
+    const first = queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })
+    await handleAiResponseBatch(batch('ai', first), env)
+    await handleAiResponseBatch(batch('ai', first), env)
+    expect(provider).not.toHaveBeenCalled()
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(
+      await db
+        .select({ text: message.text })
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        ),
+    ).toEqual([{ text: 'We are offline.' }])
+    const next = await receiveContextInput(db, f, 'Another question')
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: next.aiResponseRunId })),
+      env,
+    )
+    expect(send).toHaveBeenCalledTimes(1)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      handoffOnCustomerRequest: true,
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const human = await receiveContextInput(db, f, 'Please connect me to a human agent')
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: human.aiResponseRunId })),
+      env,
+    )
+    const [current] = await db
+      .select({ routing: conversation.routingConstraint })
+      .from(conversation)
+      .where(eq(conversation.id, received.conversationId))
+    expect(current.routing).toBe('HUMAN_ONLY')
+    expect(provider).not.toHaveBeenCalled()
+  })
+
+  it('checks semantic human requests while stopped without retrieving knowledge or sending normal replies', async () => {
+    const f = await createFixture(db)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      replyWaitEnabled: false,
+      handoffOnCustomerRequest: true,
+      stopRules: {
+        groups: [[{ kind: 'REPLIES', minimum: 0 }]],
+        periods: [],
+        endingText: 'We are offline.',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const provider = vi.fn(async (url: string, init?: RequestInit) => {
+      expect(url).toContain('/chat/completions')
+      const asksHuman = String(init?.body).includes('speak with a real employee')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: asksHuman ? 'HANDOFF' : 'ANSWER',
+                response: asksHuman ? '' : 'Discard this answer.',
+                handoffReason: asksHuman ? 'CUSTOMER_REQUEST' : null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                mediaAssetId: null,
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    const send = vi.fn()
+    const env = environment({ send } as unknown as Queue)
+    const received = await receiveContextInput(db, f, 'Hello')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const first = queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })
+    await handleAiResponseBatch(batch('ai', first), env)
+    await handleAiResponseBatch(batch('ai', first), env)
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledTimes(1)
+    const next = await receiveContextInput(db, f, 'Another question')
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: next.aiResponseRunId })),
+      env,
+    )
+    expect(send).toHaveBeenCalledTimes(1)
+    const human = await receiveContextInput(db, f, 'I would like to speak with a real employee')
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: human.aiResponseRunId })),
+      env,
+    )
+    expect(provider).toHaveBeenCalledTimes(3)
+    expect(
+      await db
+        .select({ routing: conversation.routingConstraint })
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId)),
+    ).toEqual([{ routing: 'HUMAN_ONLY' }])
+    const outputs = await db
+      .select({ text: message.text })
+      .from(message)
+      .where(
+        and(eq(message.conversationId, received.conversationId), eq(message.direction, 'OUTBOUND')),
+      )
+    expect(outputs).toHaveLength(2)
+    expect(outputs).toContainEqual({ text: 'We are offline.' })
+    expect(outputs).not.toContainEqual({ text: 'Discard this answer.' })
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(3)
+  })
+
+  it('keeps handoff classification separate from generation if a stop condition changes during the check', async () => {
+    const f = await createFixture(db)
+    const [property] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Stage',
+        level: 'CONVERSATION',
+        type: 'TEXT',
+      })
+      .returning()
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      replyWaitEnabled: false,
+      handoffOnCustomerRequest: true,
+      stopRules: {
+        groups: [[{ kind: 'PROPERTY', definitionId: property.id, value: 'done' }]],
+        periods: [],
+        endingText: 'Offline.',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const received = await receiveContextInput(db, f, 'Hello')
+    const [identity] = await db
+      .select({ channelId: channelIdentity.channelId })
+      .from(conversation)
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+      .where(eq(conversation.id, received.conversationId))
+    await db.insert(customerPropertyValue).values({
+      definitionId: property.id,
+      conversationId: received.conversationId,
+      value: 'done',
+      sourceChannelId: identity.channelId,
+    })
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    let llmCalls = 0
+    const provider = vi.fn(async (url: string) => {
+      if (url.endsWith('/embeddings'))
+        return Response.json({ data: [{ index: 0, embedding: Array(1536).fill(0.01) }] })
+      llmCalls++
+      if (llmCalls === 1)
+        await db
+          .update(customerPropertyValue)
+          .set({ value: 'open' })
+          .where(eq(customerPropertyValue.definitionId, property.id))
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: llmCalls === 1 ? 'Discard classification.' : 'Hello again.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                mediaAssetId: null,
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    const send = vi.fn()
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+      environment({ send } as unknown as Queue),
+    )
+    expect(llmCalls).toBe(2)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(
+      await db
+        .select({ text: message.text })
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        ),
+    ).toEqual([{ text: 'Hello again.' }])
+    const attempts = await db
+      .select({ stage: aiProviderAttempt.stage })
+      .from(aiProviderAttempt)
+      .where(eq(aiProviderAttempt.operationId, assigned.aiResponseRunId as string))
+    expect(attempts.map((a) => a.stage)).toEqual(expect.arrayContaining(['STOP_HANDOFF', 'LLM']))
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(1)
+  })
 
   it('queues every published reply segment with one generation and one budget charge', async () => {
     const f = await createFixture(db)

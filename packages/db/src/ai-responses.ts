@@ -1,6 +1,12 @@
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
+  assertAiStopReferences,
+  EMPTY_AI_STOP_RULES,
+  isAiStopPeriod,
+  matchesAiStopCondition,
+} from './ai-stop'
+import {
   type AiMemberRuntimeSnapshot,
   aiMemberConfig,
   aiResponseRun,
@@ -68,7 +74,11 @@ export type AiResponseRunClaimResult =
 
 export class AiResponseError extends Error {
   constructor(
-    readonly code: 'NOT_FOUND' | 'INVALID_REQUEST' | 'MEDIA_UNAVAILABLE',
+    readonly code:
+      | 'NOT_FOUND'
+      | 'INVALID_REQUEST'
+      | 'MEDIA_UNAVAILABLE'
+      | 'STOP_REFERENCE_UNAVAILABLE',
     message: string = code,
   ) {
     super(message)
@@ -520,6 +530,14 @@ export async function recoverStaleAiResponseRuns(
 }
 
 export type CommitAiResponseResult =
+  | { kind: 'CONTINUE' }
+  | { kind: 'HANDOFF_CHECK_REQUIRED' }
+  | {
+      kind: 'STOPPED'
+      reason: 'CONDITION' | 'SCHEDULE'
+      workspaceId: string
+      conversationId: string
+    }
   | {
       kind: 'COMMITTED'
       workspaceId: string
@@ -535,13 +553,15 @@ export async function commitAiResponse(
   input: {
     runId: string
     text: string
+    stopCheckOnly?: boolean
+    checkHandoffBeforeStop?: boolean
     now?: Date
     mediaAssetId?: string | null
     languageSelection?: { language: string; explicitSwitch: boolean } | null
   },
 ): Promise<CommitAiResponseResult> {
-  const text = input.text.trim()
-  if (!text || text.length > MAX_AI_RESPONSE_TEXT_LENGTH) {
+  let text = input.text.trim()
+  if (!input.stopCheckOnly && (!text || text.length > MAX_AI_RESPONSE_TEXT_LENGTH)) {
     throw new AiResponseError('INVALID_REQUEST', 'AI response text is invalid')
   }
   const now = input.now ?? new Date()
@@ -577,6 +597,8 @@ export async function commitAiResponse(
         latestMessageAt: conversation.latestMessageAt,
         lastCustomerMessageId: conversation.lastCustomerMessageId,
         replyLanguage: conversation.aiReplyLanguage,
+        stopState: conversation.aiStopState,
+        customerId: channelIdentity.customerId,
       })
       .from(conversation)
       .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
@@ -629,9 +651,91 @@ export async function commitAiResponse(
       return { kind: 'CANCELLED' as const, cancellationReason: 'NEW_CUSTOMER_MESSAGE' as const }
     }
 
-    const replyLanguage = run.configSnapshot?.automaticLanguageEnabled
-      ? selectedLanguage
-      : undefined
+    const stopRules = run.configSnapshot?.stopRules ?? EMPTY_AI_STOP_RULES
+    const timeZone = run.configSnapshot?.timeZone ?? 'UTC'
+    if (current.stopState?.reason !== 'CONDITION') {
+      try {
+        await assertAiStopReferences(tx, current.workspaceId, {
+          ...stopRules,
+          endingMediaAssetId: null,
+        })
+      } catch {
+        throw new AiResponseError('STOP_REFERENCE_UNAVAILABLE')
+      }
+    }
+    const inPeriod = isAiStopPeriod(stopRules, timeZone, now)
+    const condition =
+      current.stopState?.reason === 'CONDITION' ||
+      (await matchesAiStopCondition(
+        tx,
+        {
+          workspaceId: current.workspaceId,
+          conversationId: current.id,
+          memberId: run.memberId,
+          customerId: current.customerId,
+        },
+        stopRules,
+      ))
+    let scheduleStopped = inPeriod
+    if (current.stopState?.reason === 'SCHEDULE' && !inPeriod) {
+      const [lastInput] = await tx
+        .select({ at: message.createdAt })
+        .from(message)
+        .where(eq(message.id, run.inputLastMessageId))
+      scheduleStopped =
+        !lastInput ||
+        lastInput.at.getTime() <= new Date(current.stopState.stoppedAt).getTime() ||
+        isAiStopPeriod(stopRules, timeZone, lastInput.at)
+    }
+    const stopReason = condition
+      ? ('CONDITION' as const)
+      : scheduleStopped
+        ? ('SCHEDULE' as const)
+        : null
+    const stopTransition = Boolean(stopReason && !current.stopState)
+    if (stopReason && input.stopCheckOnly && input.checkHandoffBeforeStop)
+      return { kind: 'HANDOFF_CHECK_REQUIRED' as const }
+    if (stopReason) {
+      await tx
+        .update(conversation)
+        .set({
+          aiStopState: {
+            reason: stopReason,
+            stoppedAt: current.stopState?.stoppedAt ?? now.toISOString(),
+          },
+          updatedAt: now,
+        })
+        .where(eq(conversation.id, current.id))
+      text = stopTransition ? stopRules.endingText : ''
+      if (!text && !(stopTransition && stopRules.endingMediaAssetId)) {
+        await tx
+          .update(aiResponseRun)
+          .set({
+            state: 'CANCELLED',
+            failureCode: `AI_STOP_${stopReason}`,
+            completedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(aiResponseRun.id, run.id))
+        return {
+          kind: 'STOPPED' as const,
+          reason: stopReason,
+          workspaceId: current.workspaceId,
+          conversationId: current.id,
+        }
+      }
+    } else {
+      if (current.stopState)
+        await tx
+          .update(conversation)
+          .set({ aiStopState: null, updatedAt: now })
+          .where(eq(conversation.id, current.id))
+      if (input.stopCheckOnly) return { kind: 'CONTINUE' as const }
+    }
+    const mediaAssetId = stopReason ? stopRules.endingMediaAssetId : input.mediaAssetId
+
+    const replyLanguage =
+      !stopReason && run.configSnapshot?.automaticLanguageEnabled ? selectedLanguage : undefined
     if (
       replyLanguage &&
       current.replyLanguage &&
@@ -640,31 +744,64 @@ export async function commitAiResponse(
     )
       throw new AiResponseError('INVALID_REQUEST', 'Language change needs an explicit request')
 
-    if (input.mediaAssetId && !run.configSnapshot?.knowledgeBaseId)
+    if (mediaAssetId && !stopReason && !run.configSnapshot?.knowledgeBaseId)
       throw new AiResponseError('MEDIA_UNAVAILABLE', 'Knowledge media is unavailable')
-    const [asset] = input.mediaAssetId
-      ? await tx
-          .select({ asset: mediaAsset })
-          .from(mediaAsset)
-          .innerJoin(knowledgeDocument, eq(knowledgeDocument.mediaAssetId, mediaAsset.id))
-          .innerJoin(knowledgeChunk, eq(knowledgeChunk.knowledgeDocumentId, knowledgeDocument.id))
-          .where(
-            and(
-              eq(mediaAsset.id, input.mediaAssetId),
-              eq(mediaAsset.workspaceId, current.workspaceId),
-              eq(mediaAsset.inLibrary, true),
-              isNull(mediaAsset.deletedAt),
-              eq(knowledgeDocument.workspaceId, current.workspaceId),
-              eq(knowledgeDocument.knowledgeBaseId, run.configSnapshot?.knowledgeBaseId ?? ''),
-              eq(knowledgeDocument.status, 'READY'),
-              inArray(knowledgeChunk.id, run.retrievedChunkIds ?? []),
-            ),
-          )
-          .for('share', { of: [mediaAsset, knowledgeDocument] })
-          .limit(1)
+    const [asset] = mediaAssetId
+      ? stopReason
+        ? await tx
+            .select({ asset: mediaAsset })
+            .from(mediaAsset)
+            .where(
+              and(
+                eq(mediaAsset.id, mediaAssetId),
+                eq(mediaAsset.workspaceId, current.workspaceId),
+                eq(mediaAsset.kind, 'IMAGE'),
+                eq(mediaAsset.inLibrary, true),
+                isNull(mediaAsset.deletedAt),
+              ),
+            )
+            .for('share')
+            .limit(1)
+        : await tx
+            .select({ asset: mediaAsset })
+            .from(mediaAsset)
+            .innerJoin(knowledgeDocument, eq(knowledgeDocument.mediaAssetId, mediaAsset.id))
+            .innerJoin(knowledgeChunk, eq(knowledgeChunk.knowledgeDocumentId, knowledgeDocument.id))
+            .where(
+              and(
+                eq(mediaAsset.id, mediaAssetId),
+                eq(mediaAsset.workspaceId, current.workspaceId),
+                eq(mediaAsset.inLibrary, true),
+                isNull(mediaAsset.deletedAt),
+                eq(knowledgeDocument.workspaceId, current.workspaceId),
+                eq(knowledgeDocument.knowledgeBaseId, run.configSnapshot?.knowledgeBaseId ?? ''),
+                eq(knowledgeDocument.status, 'READY'),
+                inArray(knowledgeChunk.id, run.retrievedChunkIds ?? []),
+              ),
+            )
+            .for('share', { of: [mediaAsset, knowledgeDocument] })
+            .limit(1)
       : []
-    if (input.mediaAssetId && !asset)
+    if (mediaAssetId && !asset && !stopReason)
       throw new AiResponseError('MEDIA_UNAVAILABLE', 'Knowledge media is unavailable')
+    const endingUnavailable = Boolean(stopReason && mediaAssetId && !asset)
+    if (endingUnavailable && !text) {
+      await tx
+        .update(aiResponseRun)
+        .set({
+          state: 'CANCELLED',
+          failureCode: 'AI_STOP_ENDING_UNAVAILABLE',
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(aiResponseRun.id, run.id))
+      return {
+        kind: 'STOPPED' as const,
+        reason: stopReason as 'CONDITION' | 'SCHEDULE',
+        workspaceId: current.workspaceId,
+        conversationId: current.id,
+      }
+    }
     const points = Array.from(text)
     const texts =
       run.configSnapshot?.splitRepliesEnabled && points.length > 500
@@ -673,34 +810,36 @@ export async function commitAiResponse(
             points.slice(500, 1000).join(''),
             points.slice(1000).join(''),
           ].filter(Boolean)
-        : [text]
+        : text
+          ? [text]
+          : []
     const [stamp] = await tx
       .select({ at: sql<string>`clock_timestamp()::text` })
       .from(conversation)
       .where(eq(conversation.id, current.id))
       .limit(1)
-    const createdMessages = await tx
-      .insert(message)
-      .values(
-        texts.map((part, index) => ({
-          conversationId: current.id,
-          channelId: current.channelId,
-          senderMemberId: run.memberId,
-          text: part,
-          replyGroupId: texts.length > 1 || asset ? run.id : null,
-          replySegmentIndex: texts.length > 1 || asset ? index + 1 : null,
-          replySegmentCount: texts.length > 1 || asset ? texts.length : null,
-          deliveryState: 'PENDING' as const,
-          direction: 'OUTBOUND' as const,
-          senderType: 'MEMBER' as const,
-          messageType: 'TEXT' as const,
-          createdAt: sql`${stamp.at}::timestamptz + ${index} * interval '1 microsecond'`,
-          updatedAt: now,
-        })),
-      )
-      .returning()
-    const created = createdMessages[0]
-    if (!created) throw new AiResponseError('INVALID_REQUEST', 'AI message was not created')
+    const createdMessages = texts.length
+      ? await tx
+          .insert(message)
+          .values(
+            texts.map((part, index) => ({
+              conversationId: current.id,
+              channelId: current.channelId,
+              senderMemberId: run.memberId,
+              text: part,
+              replyGroupId: texts.length > 1 || asset ? run.id : null,
+              replySegmentIndex: texts.length > 1 || asset ? index + 1 : null,
+              replySegmentCount: texts.length > 1 || asset ? texts.length : null,
+              deliveryState: 'PENDING' as const,
+              direction: 'OUTBOUND' as const,
+              senderType: 'MEMBER' as const,
+              messageType: 'TEXT' as const,
+              createdAt: sql`${stamp.at}::timestamptz + ${index} * interval '1 microsecond'`,
+              updatedAt: now,
+            })),
+          )
+          .returning()
+      : []
     if (asset) {
       const [mediaMessage] = await tx
         .insert(message)
@@ -712,8 +851,8 @@ export async function commitAiResponse(
           senderType: 'MEMBER',
           messageType: 'ATTACHMENT',
           deliveryState: 'PENDING',
-          replyGroupId: run.id,
-          replyAfterMessageId: createdMessages.at(-1)?.id,
+          replyGroupId: texts.length ? run.id : null,
+          replyAfterMessageId: createdMessages.at(-1)?.id ?? null,
           createdAt: sql`${stamp.at}::timestamptz + ${texts.length} * interval '1 microsecond'`,
           updatedAt: now,
         })
@@ -732,6 +871,8 @@ export async function commitAiResponse(
       })
       createdMessages.push(mediaMessage)
     }
+    const created = createdMessages[0]
+    if (!created) throw new AiResponseError('INVALID_REQUEST', 'AI message was not created')
 
     await tx
       .update(conversation)
@@ -744,7 +885,17 @@ export async function commitAiResponse(
       .where(eq(conversation.id, current.id))
     await tx
       .update(aiResponseRun)
-      .set({ state: 'COMPLETED', outputMessageId: created.id, completedAt: now, updatedAt: now })
+      .set({
+        state: 'COMPLETED',
+        failureCode: endingUnavailable
+          ? 'AI_STOP_ENDING_UNAVAILABLE'
+          : stopReason
+            ? `AI_STOP_${stopReason}`
+            : null,
+        outputMessageId: created.id,
+        completedAt: now,
+        updatedAt: now,
+      })
       .where(and(eq(aiResponseRun.id, run.id), eq(aiResponseRun.state, 'GENERATING')))
 
     return {

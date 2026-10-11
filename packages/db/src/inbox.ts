@@ -546,6 +546,7 @@ export async function listConversations(
     .select({
       id: conversation.id,
       unread,
+      aiStopState: conversation.aiStopState,
       muted,
       unanswered,
       cursorTime: sql<string>`to_char(${conversation.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,

@@ -239,6 +239,13 @@
       "when": 1791715262516,
       "tag": "0033_ai_media_reply_order",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1791723497108,
+      "tag": "0034_ai_stop_rules",
+      "breakpoints": true
     }
   ]
 }

@@ -172,6 +172,7 @@ import {
   applyHandoffPolicy,
   aiMemberRuntimeSnapshotSchema,
   aiTimeZoneSchema,
+  aiStopRulesSchema,
   createAlibabaLlmProvider,
   createAlibabaEmbeddingProvider,
   DEFAULT_EMBEDDING_MODEL,
@@ -358,6 +359,7 @@ const knowledgeTextInput = z
   .strict()
 const aiMemberConfigInput = z
   .object({
+    stopRules: aiStopRulesSchema.optional(),
     splitRepliesEnabled: z.boolean().optional(),
     automaticLanguageEnabled: z.boolean().optional(),
     timeZone: aiTimeZoneSchema.optional(),
@@ -3177,10 +3179,78 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       const inputMessages = claimed.inputMessages
         .filter(({ text }) => Boolean(text?.trim()))
         .map(({ id, text }) => ({ id, text: text as string }))
-      if (
-        inputMessages.reduce((sum, { text }) => sum + Array.from(text).length, 0) >
-        MAX_AI_CURRENT_INPUT_CODE_POINTS
-      ) {
+      const inputSize = inputMessages.reduce((sum, { text }) => sum + Array.from(text).length, 0)
+      let stopped = await withDatabase(env, (db) =>
+        commitAiResponse(db, {
+          runId: claimed.id,
+          text: '',
+          stopCheckOnly: true,
+          checkHandoffBeforeStop:
+            currentSnapshot.handoffOnCustomerRequest &&
+            inputSize > 0 &&
+            inputSize <= MAX_AI_CURRENT_INPUT_CODE_POINTS,
+        }),
+      )
+      if (stopped?.kind === 'HANDOFF_CHECK_REQUIRED') {
+        const handoffFetch = meteredAiFetch(
+          (work) => withDatabase(env, work),
+          {
+            id: claimed.id,
+            workspaceId: claimed.workspaceId,
+            memberId: claimed.memberId,
+            configVersionId: claimed.configVersionId,
+            kind: 'LIVE_REPLY',
+          },
+          'STOP_HANDOFF',
+        )
+        const handoffDecision = await createAlibabaLlmProvider(
+          {
+            provider: env.LLM_PROVIDER,
+            apiKey: env.AI_API_KEY,
+            baseUrl: env.AI_BASE_URL,
+            model: env.LLM_MODEL,
+          },
+          handoffFetch,
+        ).generateResponse({
+          instructions:
+            'The AI is stopped. Only determine whether the CURRENT customer messages explicitly ask to talk to a human member of the team. If so return HANDOFF with CUSTOMER_REQUEST. Otherwise return ANSWER with response "Stopped.". Do not answer questions or hand off for any other reason. Do not include business facts, knowledge citations or media.',
+          responseLanguage: currentSnapshot.responseLanguage,
+          timeZone: currentSnapshot.timeZone,
+          messages: inputMessages,
+          history: claimed.history,
+          knowledgeChunks: [],
+        })
+        if (
+          handoffDecision.decision === 'HANDOFF' &&
+          handoffDecision.handoffReason === 'CUSTOMER_REQUEST'
+        ) {
+          await withDatabase(env, (db) =>
+            finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+          )
+          await completeAiHandoff(env, claimed, {
+            reason: 'CUSTOMER_REQUEST',
+            noticeText: handoffNotice(currentSnapshot.responseLanguage),
+            failureCode: 'CUSTOMER_REQUEST',
+            failureMessage: 'Customer requested human support while AI stopped',
+          })
+          queueMessage.ack()
+          continue
+        }
+        stopped = await withDatabase(env, (db) =>
+          commitAiResponse(db, { runId: claimed.id, text: '', stopCheckOnly: true }),
+        )
+        if (stopped?.kind !== 'CONTINUE')
+          await withDatabase(env, (db) =>
+            finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+          )
+      }
+      if (stopped?.kind !== 'CONTINUE') {
+        await publishAiReplyResult(env, claimed, stopped)
+        queueMessage.ack()
+        continue
+      }
+
+      if (inputSize > MAX_AI_CURRENT_INPUT_CODE_POINTS) {
         await completeAiHandoff(env, claimed, {
           reason: 'UNABLE_TO_ANSWER',
           noticeText: handoffNotice(currentSnapshot.responseLanguage),
@@ -3320,27 +3390,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
             : undefined,
         }),
       )
-      if (!result) {
-        queueMessage.ack()
-        continue
-      }
-      if (result.kind === 'CANCELLED') {
-        await publishInboxChange(
-          env,
-          claimed.workspaceId,
-          claimed.conversationId,
-          'conversation.changed',
-        )
-      } else {
-        await publishInboxChange(env, result.workspaceId, result.message.id, 'message.changed')
-        await publishInboxChange(
-          env,
-          result.workspaceId,
-          result.conversationId,
-          'conversation.changed',
-        )
-        for (const part of result.messages) await enqueueOutboundMessage(env, part.id)
-      }
+      await publishAiReplyResult(env, claimed, result)
       queueMessage.ack()
     } catch (error) {
       if (error instanceof AiUsageError && error.code === 'RETRY_LATER') {
@@ -3387,6 +3437,24 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         queueMessage.retry()
       }
     }
+  }
+}
+
+async function publishAiReplyResult(
+  env: Bindings,
+  identity: { workspaceId: string; conversationId: string },
+  result: Awaited<ReturnType<typeof commitAiResponse>>,
+) {
+  if (!result || result.kind === 'CONTINUE' || result.kind === 'HANDOFF_CHECK_REQUIRED') return
+  await publishInboxChange(
+    env,
+    identity.workspaceId,
+    identity.conversationId,
+    'conversation.changed',
+  )
+  if (result.kind === 'COMMITTED') {
+    await publishInboxChange(env, result.workspaceId, result.message.id, 'message.changed')
+    for (const part of result.messages) await enqueueOutboundMessage(env, part.id)
   }
 }
 
@@ -3461,6 +3529,8 @@ function isRetryableAiFailure(error: unknown) {
 }
 
 function aiFailureCode(error: unknown) {
+  if (error instanceof AiResponseError && error.code === 'STOP_REFERENCE_UNAVAILABLE')
+    return 'STOP_REFERENCE_UNAVAILABLE'
   if (error instanceof AiResponseError && error.code === 'MEDIA_UNAVAILABLE')
     return 'MEDIA_UNAVAILABLE'
   if (error instanceof AIOutputError) return 'INVALID_OUTPUT'

@@ -1,0 +1,2 @@
+ALTER TABLE "ai_member_config" ADD COLUMN "stop_rules" jsonb DEFAULT '{"groups":[],"periods":[],"endingText":"","endingMediaAssetId":null}'::jsonb NOT NULL;--> statement-breakpoint
+ALTER TABLE "conversation" ADD COLUMN "ai_stop_state" jsonb;

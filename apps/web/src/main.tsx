@@ -84,6 +84,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '#
 import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 import { AiOperations } from './ai-operations'
+import { AiStopSettings, emptyStopRules, type AiStopRules } from './ai-stop-settings'
 import { CustomerSidebar } from './customer-sidebar'
 import { DemoPage } from './demo'
 import { InboxFilterControls, type InboxFilters, inboxQuery } from './inbox-filters'
@@ -151,6 +152,7 @@ type FacebookPageOption = { id: string; name: string; tasks: string[] }
 
 type InboxView = InboxFilters['view']
 type InboxConversation = {
+  aiStopState?: { reason: 'CONDITION' | 'SCHEDULE'; stoppedAt: string } | null
   muted: boolean
   unread: boolean
   unanswered: boolean
@@ -301,6 +303,7 @@ type KnowledgeDocument = {
 }
 
 type AiMemberRuntimeSnapshot = {
+  stopRules?: AiStopRules
   splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
@@ -319,6 +322,7 @@ type AiMemberRuntimeSnapshot = {
 }
 
 type AiMemberConfig = {
+  stopRules: AiStopRules
   splitRepliesEnabled: boolean
   automaticLanguageEnabled: boolean
   timeZone: string
@@ -361,6 +365,7 @@ type AiMemberDraft = Pick<
   | 'automaticLanguageEnabled'
   | 'timeZone'
   | 'splitRepliesEnabled'
+  | 'stopRules'
 >
 
 class ApiError extends Error {
@@ -2356,6 +2361,11 @@ function ConversationHeader({
             </StatusBadge>
             <StatusBadge tone={handling.tone}>{handling.label}</StatusBadge>
             <ReplyWindowStatus open={replyWindowOpen} />
+            {conversation.aiStopState && (
+              <StatusBadge tone="warning">
+                {conversation.aiStopState.reason === 'CONDITION' ? 'AI 条件停止' : 'AI 时段停止'}
+              </StatusBadge>
+            )}
           </div>
         </div>
       </div>
@@ -4181,6 +4191,15 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
           </section>
 
           <Separator />
+          <AiStopSettings
+            workspaceId={workspace.id}
+            busy={busy}
+            rules={draft.stopRules}
+            onChange={(stopRules) =>
+              setDraft((current) => (current ? { ...current, stopRules } : current))
+            }
+          />
+          <Separator />
           <section aria-labelledby="ai-style-title" className="ai-config-section">
             <div className="section-heading">
               <div>
@@ -4402,6 +4421,13 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                   <dd>{config.publishedSnapshot.timeZone ?? 'UTC'}</dd>
                 </div>
                 <div>
+                  <dt>停止回复规则</dt>
+                  <dd>
+                    {config.publishedSnapshot.stopRules?.groups.length ?? 0} 个条件组 ·{' '}
+                    {config.publishedSnapshot.stopRules?.periods.length ?? 0} 个每周时段
+                  </dd>
+                </div>
+                <div>
                   <dt>知识库</dt>
                   <dd>
                     {knowledgeBases.find(
@@ -4506,6 +4532,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.automaticLanguageEnabled ?? false,
       left.timeZone ?? 'UTC',
       left.splitRepliesEnabled ?? false,
+      left.stopRules ?? emptyStopRules,
     ]) ===
     JSON.stringify([
       right.instructions,
@@ -4523,6 +4550,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       right.automaticLanguageEnabled ?? false,
       right.timeZone ?? 'UTC',
       right.splitRepliesEnabled ?? false,
+      right.stopRules ?? emptyStopRules,
     ])
   )
 }
@@ -4530,6 +4558,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
 function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
   return {
     instructions: config.instructions,
+    stopRules: config.stopRules ?? emptyStopRules,
     naturalToneEnabled: config.naturalToneEnabled ?? false,
     replyWaitEnabled: config.replyWaitEnabled ?? true,
     automaticLanguageEnabled: config.automaticLanguageEnabled ?? false,

@@ -399,6 +399,10 @@ export const conversation = pgTable(
       .references(() => channelIdentity.id, { onDelete: 'cascade' }),
     status: conversationStatus().default('OPEN').notNull(),
     aiReplyLanguage: text('ai_reply_language'),
+    aiStopState: jsonb('ai_stop_state').$type<{
+      reason: 'CONDITION' | 'SCHEDULE'
+      stoppedAt: string
+    }>(),
     assigneeMemberId: uuid('assignee_member_id').references(() => member.id, {
       onDelete: 'set null',
     }),
@@ -989,6 +993,7 @@ export const knowledgeBase = pgTable(
 )
 
 export type AiMemberRuntimeSnapshot = {
+  stopRules?: AiStopRules
   splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
@@ -1006,6 +1011,17 @@ export type AiMemberRuntimeSnapshot = {
   adMappings?: AdMapping[]
 }
 
+export type AiStopCondition =
+  | { kind: 'PROPERTY'; definitionId: string; value: string | number }
+  | { kind: 'TAG'; tagId: string }
+  | { kind: 'REPLIES'; minimum: number }
+export type AiStopRules = {
+  groups: AiStopCondition[][]
+  periods: { day: number; start: string; end: string }[]
+  endingText: string
+  endingMediaAssetId: string | null
+}
+
 export type AdMapping = { adId: string; content: string }
 export type AdvertisingContext = {
   status: 'DISABLED' | 'NO_SOURCE' | 'UNAVAILABLE' | 'UNMAPPED' | 'MAPPED'
@@ -1015,6 +1031,10 @@ export type AdvertisingContext = {
 }
 
 export const aiMemberConfig = pgTable('ai_member_config', {
+  stopRules: jsonb('stop_rules')
+    .$type<AiStopRules>()
+    .default({ groups: [], periods: [], endingText: '', endingMediaAssetId: null })
+    .notNull(),
   splitRepliesEnabled: boolean('split_replies_enabled').default(false).notNull(),
   automaticLanguageEnabled: boolean('automatic_language_enabled').default(false).notNull(),
   timeZone: text('time_zone').default('UTC').notNull(),

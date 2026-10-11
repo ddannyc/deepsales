@@ -31,8 +31,17 @@ import {
   retryAiResponseRun,
   recoverStaleAiResponseRuns,
   takeOverConversation,
+  handoffAiConversation,
+  transferConversation,
   updateAiMemberConfig,
   user,
+  channel,
+  conversation,
+  channelIdentity,
+  customerPropertyDefinition,
+  customerPropertyValue,
+  customerTagDefinition,
+  customerTag,
 } from '../src'
 
 const connectionString = process.env.DATABASE_URL
@@ -46,6 +55,488 @@ describe.skipIf(!connectionString)('AI response runs', () => {
   })
 
   afterAll(() => pool.end())
+
+  it('keeps condition-stopped conversations assigned and stores later input without replying', async () => {
+    const f = await createFixture(db)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      stopRules: {
+        groups: [[{ kind: 'REPLIES', minimum: 0 }]],
+        periods: [],
+        endingText: '',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const run = await createGeneratingRun(db, f, 'Hello')
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: 'Normal reply', stopCheckOnly: true }),
+    ).toMatchObject({ kind: 'STOPPED', reason: 'CONDITION' })
+    const conversations = await listConversations(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      view: 'all-open',
+    })
+    expect(conversations.conversations[0]).toMatchObject({
+      assigneeMemberId: f.aiMemberId,
+      routingConstraint: 'ANY_MEMBER',
+    })
+    const later = await receive(db, f, 'Another message', new Date(run.now.getTime() + 5000))
+    expect(later.conversationId).toBe(run.conversationId)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      stopRules: { groups: [], periods: [], endingText: '', endingMediaAssetId: null },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    await claimAiResponseRun(db, {
+      runId: later.aiResponseRunId as string,
+      now: new Date(run.now.getTime() + 7000),
+    })
+    expect(
+      await commitAiResponse(db, { runId: later.aiResponseRunId as string, text: 'Not sent' }),
+    ).toMatchObject({ kind: 'STOPPED', reason: 'CONDITION' })
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(eq(message.conversationId, run.conversationId), eq(message.direction, 'OUTBOUND')),
+        ),
+    ).toEqual([])
+  })
+
+  it('resumes a schedule stop only on a new input outside the period', async () => {
+    const f = await createFixture(db)
+    const at = new Date()
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      timeZone: 'UTC',
+      stopRules: {
+        groups: [],
+        periods: [{ day: at.getUTCDay(), start: '00:00', end: '24:00' }],
+        endingText: '',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const run = await createGeneratingRun(db, f, 'Hello')
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: 'Not sent', now: at }),
+    ).toMatchObject({ kind: 'STOPPED', reason: 'SCHEDULE' })
+    const during = await receive(db, f, 'During the stop', new Date(at.getTime() + 5000))
+    const nextDay = new Date(at.getTime() + 86400000)
+    await claimAiResponseRun(db, { runId: during.aiResponseRunId as string, now: nextDay })
+    expect(
+      await commitAiResponse(db, {
+        runId: during.aiResponseRunId as string,
+        text: 'Not sent',
+        now: nextDay,
+      }),
+    ).toMatchObject({ kind: 'STOPPED' })
+    const after = await receive(db, f, 'After the period', nextDay)
+    await db.update(message).set({ createdAt: nextDay }).where(eq(message.id, after.messageId))
+    await claimAiResponseRun(db, {
+      runId: after.aiResponseRunId as string,
+      now: new Date(nextDay.getTime() + 2000),
+    })
+    expect(
+      await commitAiResponse(db, {
+        runId: after.aiResponseRunId as string,
+        text: 'Welcome back',
+        now: nextDay,
+      }),
+    ).toMatchObject({ kind: 'COMMITTED', message: { text: 'Welcome back' } })
+    const inbox = await listConversations(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      view: 'all-open',
+    })
+    expect(inbox.conversations[0].aiStopState).toBeNull()
+  })
+
+  it('checks deleted condition references when a schedule-stopped conversation resumes', async () => {
+    const f = await createFixture(db)
+    const at = new Date()
+    const [property] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Stage',
+        level: 'CONVERSATION',
+        type: 'TEXT',
+      })
+      .returning()
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      timeZone: 'UTC',
+      stopRules: {
+        groups: [[{ kind: 'PROPERTY', definitionId: property.id, value: 'done' }]],
+        periods: [{ day: at.getUTCDay(), start: '00:00', end: '24:00' }],
+        endingText: '',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const run = await createGeneratingRun(db, f, 'Hello')
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true, now: at }),
+    ).toMatchObject({ kind: 'STOPPED', reason: 'SCHEDULE' })
+    await db
+      .update(customerPropertyDefinition)
+      .set({ deletedAt: new Date() })
+      .where(eq(customerPropertyDefinition.id, property.id))
+    const nextDay = new Date(at.getTime() + 86400000)
+    const after = await receive(db, f, 'After the period', nextDay)
+    await db.update(message).set({ createdAt: nextDay }).where(eq(message.id, after.messageId))
+    await claimAiResponseRun(db, {
+      runId: after.aiResponseRunId as string,
+      now: new Date(nextDay.getTime() + 2000),
+    })
+    await expect(
+      commitAiResponse(db, {
+        runId: after.aiResponseRunId as string,
+        text: 'Not sent',
+        now: nextDay,
+      }),
+    ).rejects.toMatchObject({ code: 'STOP_REFERENCE_UNAVAILABLE' })
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(eq(message.conversationId, run.conversationId), eq(message.direction, 'OUTBOUND')),
+        ),
+    ).toEqual([])
+  })
+
+  it('does not count a handoff notice after transfer back to AI', async () => {
+    const f = await createFixture(db)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      stopRules: {
+        groups: [[{ kind: 'REPLIES', minimum: 1 }]],
+        periods: [],
+        endingText: '',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const run = await createGeneratingRun(db, f, 'Human please')
+    const handoff = await handoffAiConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: run.conversationId,
+      memberId: f.aiMemberId,
+      runId: run.runId,
+      reason: 'CUSTOMER_REQUEST',
+      noticeText: 'Connecting you to our team.',
+    })
+    expect(handoff.messageId).toBeTruthy()
+    await takeOverConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: run.conversationId,
+      actingUserId: f.ownerId,
+    })
+    const transferred = await transferConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: run.conversationId,
+      actingUserId: f.ownerId,
+      targetMemberId: f.aiMemberId,
+      confirmOverride: true,
+    })
+    const next = await receive(db, f, 'Back to AI', new Date(Date.now() + 5000))
+    expect(transferred.changed).toBe(true)
+    await claimAiResponseRun(db, {
+      runId: next.aiResponseRunId as string,
+      now: new Date(Date.now() + 7000),
+    })
+    expect(
+      await commitAiResponse(db, {
+        runId: next.aiResponseRunId as string,
+        text: '',
+        stopCheckOnly: true,
+      }),
+    ).toMatchObject({ kind: 'CONTINUE' })
+    expect(
+      await commitAiResponse(db, { runId: next.aiResponseRunId as string, text: 'Welcome back' }),
+    ).toMatchObject({ kind: 'COMMITTED' })
+  })
+
+  it('commits an image-only ending once under concurrent stop checks', async () => {
+    const f = await createFixture(db)
+    const [asset] = await db
+      .insert(mediaAsset)
+      .values({
+        id: randomUUID(),
+        workspaceId: f.workspaceId,
+        title: 'Closed',
+        filename: 'closed.png',
+        kind: 'IMAGE',
+        mimeType: 'image/png',
+        byteSize: 12,
+        sha256: 'c'.repeat(64),
+        storageKey: 'test/closed',
+        inLibrary: true,
+      })
+      .returning()
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      stopRules: {
+        groups: [[{ kind: 'REPLIES', minimum: 0 }]],
+        periods: [],
+        endingText: '',
+        endingMediaAssetId: asset.id,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const run = await createGeneratingRun(db, f, 'Hello')
+    const results = await Promise.all([
+      commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true }),
+      commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true }),
+    ])
+    const committed = results.find((r) => r?.kind === 'COMMITTED')
+    if (committed?.kind !== 'COMMITTED') throw new Error('Image ending was not committed')
+    expect(results.filter(Boolean)).toHaveLength(1)
+    expect(committed.messages).toHaveLength(1)
+    expect(committed.message.messageType).toBe('ATTACHMENT')
+    await db.update(mediaAsset).set({ deletedAt: new Date() }).where(eq(mediaAsset.id, asset.id))
+    await takeOverConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: run.conversationId,
+      actingUserId: f.ownerId,
+    })
+    expect(await claimOutboundMessage(db, { messageId: committed.message.id })).toMatchObject({
+      messageType: 'ATTACHMENT',
+    })
+    expect(
+      await db
+        .select({ key: messageAttachment.storageKey })
+        .from(messageAttachment)
+        .where(eq(messageAttachment.messageId, committed.message.id)),
+    ).toEqual([{ key: 'test/closed' }])
+  })
+
+  it('matches authorized property and tag groups at commit, without treating each segment as a reply', async () => {
+    const f = await createFixture(db)
+    const [property] = await db
+      .insert(customerPropertyDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Stage', level: 'CONVERSATION', type: 'TEXT' })
+      .returning()
+    const [tag] = await db
+      .insert(customerTagDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Done', level: 'CUSTOMER' })
+      .returning()
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      splitRepliesEnabled: true,
+      stopRules: {
+        groups: [
+          [
+            { kind: 'PROPERTY', definitionId: property.id, value: 'finished' },
+            { kind: 'TAG', tagId: tag.id },
+          ],
+          [{ kind: 'REPLIES', minimum: 2 }],
+        ],
+        periods: [],
+        endingText: '',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const run = await createGeneratingRun(db, f, 'Hello')
+    const [identity] = await db
+      .select({ customerId: channelIdentity.customerId, channelId: channelIdentity.channelId })
+      .from(conversation)
+      .innerJoin(channelIdentity, eq(conversation.channelIdentityId, channelIdentity.id))
+      .where(eq(conversation.id, run.conversationId))
+    await db.insert(customerPropertyValue).values({
+      definitionId: property.id,
+      conversationId: run.conversationId,
+      value: 'finished',
+      sourceChannelId: identity.channelId,
+    })
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true }),
+    ).toMatchObject({ kind: 'CONTINUE' })
+    const first = await commitAiResponse(db, { runId: run.runId, text: 'x'.repeat(1200) })
+    if (first?.kind !== 'COMMITTED') throw new Error('Split answer missing')
+    expect(first.messages).toHaveLength(3)
+    const laterAt = new Date(Date.now() + 5000)
+    const next = await receive(db, f, 'Another question', laterAt)
+    await claimAiResponseRun(db, {
+      runId: next.aiResponseRunId as string,
+      now: new Date(laterAt.getTime() + 2000),
+    })
+    expect(
+      await commitAiResponse(db, {
+        runId: next.aiResponseRunId as string,
+        text: '',
+        stopCheckOnly: true,
+      }),
+    ).toMatchObject({ kind: 'CONTINUE' })
+    const [hidden] = await db
+      .insert(channel)
+      .values({
+        workspaceId: f.workspaceId,
+        provider: 'FACEBOOK_MESSENGER',
+        displayName: 'Hidden',
+        status: 'ACTIVE',
+      })
+      .returning()
+    await db.insert(customerTag).values({
+      tagId: tag.id,
+      customerId: identity.customerId,
+      sourceChannelId: hidden.id,
+    })
+    expect(
+      await commitAiResponse(db, {
+        runId: next.aiResponseRunId as string,
+        text: '',
+        stopCheckOnly: true,
+      }),
+    ).toMatchObject({ kind: 'CONTINUE' })
+    await db
+      .update(customerTag)
+      .set({ sourceChannelId: identity.channelId })
+      .where(eq(customerTag.tagId, tag.id))
+    expect(
+      await commitAiResponse(db, {
+        runId: next.aiResponseRunId as string,
+        text: 'Generation made before tagging',
+      }),
+    ).toMatchObject({ kind: 'STOPPED', reason: 'CONDITION' })
+  })
+
+  it('stays stopped when the published ending image is revoked before commit', async () => {
+    const f = await createFixture(db)
+    const [asset] = await db
+      .insert(mediaAsset)
+      .values({
+        id: randomUUID(),
+        workspaceId: f.workspaceId,
+        title: 'Closed',
+        filename: 'closed.png',
+        kind: 'IMAGE',
+        mimeType: 'image/png',
+        byteSize: 12,
+        sha256: 'd'.repeat(64),
+        storageKey: 'test/revoked-ending',
+        inLibrary: true,
+      })
+      .returning()
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...identity,
+      stopRules: {
+        groups: [[{ kind: 'REPLIES', minimum: 0 }]],
+        periods: [],
+        endingText: '',
+        endingMediaAssetId: asset.id,
+      },
+    })
+    await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    await db.update(mediaAsset).set({ deletedAt: new Date() }).where(eq(mediaAsset.id, asset.id))
+    await expect(
+      publishAiMemberConfig(db, { ...identity, providerConfigured: true }),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' })
+    const run = await createGeneratingRun(db, f, 'Hello')
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true }),
+    ).toMatchObject({ kind: 'STOPPED' })
+    expect((await getAiDiagnostics(db, { ...identity, id: run.runId })).run?.failureCode).toBe(
+      'AI_STOP_ENDING_UNAVAILABLE',
+    )
+    const inbox = await listConversations(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      view: 'all-open',
+    })
+    expect(inbox.conversations[0]).toMatchObject({
+      aiStopState: { reason: 'CONDITION' },
+      assigneeMemberId: f.aiMemberId,
+      routingConstraint: 'ANY_MEMBER',
+    })
+  })
+
+  it('does not latch a stop or send an ending from stale customer input', async () => {
+    const f = await createFixture(db)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      stopRules: {
+        groups: [[{ kind: 'REPLIES', minimum: 0 }]],
+        periods: [],
+        endingText: 'Ending',
+        endingMediaAssetId: null,
+      },
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const run = await createGeneratingRun(db, f, 'First')
+    await receive(db, f, 'New input', new Date(run.now.getTime() + 5000))
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true }),
+    ).toBeNull()
+    const inbox = await listConversations(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      view: 'all-open',
+    })
+    expect(inbox.conversations[0].aiStopState).toBeNull()
+  })
 
   it('commits retrieved private media with its reply and preserves committed bytes after deletion', async () => {
     const f = await createFixture(db)

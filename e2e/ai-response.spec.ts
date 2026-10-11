@@ -14,7 +14,7 @@ test.skip(!process.env.E2E_BASE_URL, 'Set E2E_BASE_URL to a running DeepSales de
 test.setTimeout(60_000)
 
 test('new inbound input receives a grounded AI reply and reaches SENT', async ({ page }) => {
-  test.setTimeout(240_000)
+  test.setTimeout(300_000)
   const suffix = Date.now()
   await signInAndCreateWorkspace(page, 'ai-response', 'AI response acceptance')
   await expect(page.locator('.shell')).toBeVisible()
@@ -304,6 +304,35 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
     )
     expect(transfer.ok()).toBeTruthy()
     await waitSent('Torch Two comes in blue.', 2)
+    await page.goto(`/ai-member/${ai.member.id}`)
+    await page.getByRole('button', { name: '添加停止条件组', exact: true }).click()
+    await page.getByRole('spinbutton', { name: '条件组 1 回复轮次' }).fill('0')
+    await page.getByLabel('停止结束文字（可选）').fill('Conversation complete.')
+    await page.getByRole('button', { name: '保存草稿' }).click()
+    await expect(page.getByRole('button', { name: '发布', exact: true })).toBeEnabled()
+    await page.getByRole('button', { name: '发布', exact: true }).click()
+    await expect(
+      page.locator('.ai-published-panel').getByText('1 个条件组 · 0 个每周时段'),
+    ).toBeVisible()
+    await page.goto('/inbox')
+    await page.locator('.conversation-items button').first().click()
+    await sendInbound(page, pageId, `customer-${suffix}`, `mid-stop-${suffix}`, 'One more question')
+    await expect(page.getByText('AI 条件停止', { exact: true })).toBeVisible({ timeout: 30_000 })
+    await waitSent('Conversation complete.')
+    await sendInbound(
+      page,
+      pageId,
+      `customer-${suffix}`,
+      `mid-stopped-${suffix}`,
+      'Input remains visible',
+    )
+    await expect(page.getByText('Input remains visible', { exact: true }).last()).toBeVisible({
+      timeout: 30_000,
+    })
+    await expect
+      .poll(() => latestAiRunState(statePool, conversation.id), { timeout: 30_000 })
+      .toBe('CANCELLED')
+    await waitSent('Conversation complete.')
   } finally {
     await statePool.end()
   }

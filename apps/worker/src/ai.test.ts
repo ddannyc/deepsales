@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { EMPTY_AI_STOP_RULES, isAiStopPeriod, normalizeAiStopRules } from '@deepsales/db'
 import {
   ALIBABA_LLM_PROVIDER,
   DEFAULT_LLM_MODEL,
@@ -10,6 +11,37 @@ import {
   enforceGrounding,
   isLlmProviderConfigurationUsable,
 } from './ai'
+
+describe('weekly stop periods', () => {
+  it.each([
+    ['2026-11-01T05:30:00Z', true],
+    ['2026-11-01T06:30:00Z', true],
+    ['2026-11-01T07:00:00Z', false],
+    ['2026-03-08T06:59:00Z', true],
+    ['2026-03-08T07:00:00Z', false],
+  ])(
+    'uses New York wall time at %s, including DST repetition and skipped hours',
+    (instant, expected) => {
+      expect(
+        isAiStopPeriod(
+          { ...EMPTY_AI_STOP_RULES, periods: [{ day: 0, start: '01:00', end: '02:00' }] },
+          'America/New_York',
+          new Date(instant),
+        ),
+      ).toBe(expected)
+    },
+  )
+  it('supports midnight end boundaries and rejects reversed or empty periods', () => {
+    const rules = { ...EMPTY_AI_STOP_RULES, periods: [{ day: 0, start: '23:00', end: '24:00' }] }
+    expect(normalizeAiStopRules(rules)).toEqual(rules)
+    expect(isAiStopPeriod(rules, 'Asia/Hong_Kong', new Date('2026-10-11T15:59:00Z'))).toBe(true)
+    expect(isAiStopPeriod(rules, 'Asia/Hong_Kong', new Date('2026-10-11T16:00:00Z'))).toBe(false)
+    expect(() =>
+      normalizeAiStopRules({ ...rules, periods: [{ day: 0, start: '20:00', end: '18:00' }] }),
+    ).toThrow()
+    expect(() => normalizeAiStopRules({ ...rules, groups: [[]] })).toThrow()
+  })
+})
 
 describe('LLM provider configuration', () => {
   it('requires the configured Alibaba provider, model, URL, and key', () => {

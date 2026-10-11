@@ -4,6 +4,7 @@ import {
   AiUsageError,
   normalizeAiTimeZone,
   normalizeAiReplyLanguage,
+  EMPTY_AI_STOP_RULES,
 } from '@deepsales/db'
 import { z } from 'zod'
 
@@ -217,7 +218,52 @@ function isHandoffEnabled(reason: AiHandoffReason | null, config: HandoffPolicyC
   }
 }
 
+export const aiStopRulesSchema = z
+  .object({
+    groups: z
+      .array(
+        z
+          .array(
+            z.discriminatedUnion('kind', [
+              z
+                .object({
+                  kind: z.literal('PROPERTY'),
+                  definitionId: z.string().uuid(),
+                  value: z.union([z.string().max(2000), z.number().finite()]),
+                })
+                .strict(),
+              z.object({ kind: z.literal('TAG'), tagId: z.string().uuid() }).strict(),
+              z
+                .object({ kind: z.literal('REPLIES'), minimum: z.number().int().min(0).max(10000) })
+                .strict(),
+            ]),
+          )
+          .min(1)
+          .max(10),
+      )
+      .max(10),
+    periods: z
+      .array(
+        z
+          .object({
+            day: z.number().int().min(0).max(6),
+            start: z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$/),
+            end: z.string().regex(/^(?:(?:[01]\d|2[0-3]):[0-5]\d|24:00)$/),
+          })
+          .strict()
+          .refine((p) => p.start < p.end),
+      )
+      .max(28),
+    endingText: z
+      .string()
+      .max(4000)
+      .refine((s) => Array.from(s).length <= 2000),
+    endingMediaAssetId: z.string().uuid().nullable(),
+  })
+  .strict()
+
 export const aiMemberRuntimeSnapshotSchema = z.object({
+  stopRules: aiStopRulesSchema.default(EMPTY_AI_STOP_RULES),
   splitRepliesEnabled: z.boolean().default(false),
   automaticLanguageEnabled: z.boolean().default(false),
   timeZone: aiTimeZoneSchema.default('UTC'),

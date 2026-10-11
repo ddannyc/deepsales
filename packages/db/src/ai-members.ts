@@ -1,5 +1,6 @@
 import { and, desc, eq, sql } from 'drizzle-orm'
 import type { Database } from './database'
+import { assertAiStopReferences, EMPTY_AI_STOP_RULES, normalizeAiStopRules } from './ai-stop'
 import {
   aiMemberConfig,
   aiConfigVersion,
@@ -12,6 +13,7 @@ import {
   workspaceUserAccess,
   type AiMemberRuntimeSnapshot,
   type AdMapping,
+  type AiStopRules,
 } from './schema'
 
 const MAX_INSTRUCTIONS_CODE_POINTS = 20_000
@@ -38,6 +40,7 @@ type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 type QueryHandle = Database | Transaction
 
 export type AiMemberConfig = {
+  stopRules: AiStopRules
   splitRepliesEnabled: boolean
   automaticLanguageEnabled: boolean
   timeZone: string
@@ -64,6 +67,7 @@ export type AiMemberConfig = {
 }
 
 export type UpdateAiMemberConfigInput = {
+  stopRules?: AiStopRules
   splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
@@ -118,6 +122,7 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
     } else {
       await tx.insert(aiMemberConfig).values({
         memberId: target.id,
+        stopRules: draft.stopRules ?? EMPTY_AI_STOP_RULES,
         splitRepliesEnabled: draft.splitRepliesEnabled ?? false,
         automaticLanguageEnabled: draft.automaticLanguageEnabled ?? false,
         timeZone: draft.timeZone ?? 'UTC',
@@ -152,6 +157,7 @@ export async function publishAiMemberConfig(
   const now = input.now ?? new Date()
   return db.transaction(async (tx) => {
     await assertManager(tx, input.workspaceId, input.actingUserId)
+    await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
     const target = await lockAiMember(tx, input.workspaceId, input.memberId)
     const [stored] = await tx
       .select()
@@ -185,8 +191,14 @@ export async function publishAiMemberConfig(
     if (!config.responseLanguage.trim()) {
       throw invalidConfiguration('Response language is required')
     }
+    try {
+      await assertAiStopReferences(tx, input.workspaceId, config.stopRules)
+    } catch {
+      throw invalidConfiguration('Stop references need repair before publishing')
+    }
 
     const snapshot: AiMemberRuntimeSnapshot = {
+      stopRules: config.stopRules,
       splitRepliesEnabled: config.splitRepliesEnabled,
       automaticLanguageEnabled: config.automaticLanguageEnabled,
       timeZone: config.timeZone,
@@ -259,6 +271,7 @@ async function selectAiMemberConfig(
   const [row] = await db
     .select({
       memberId: member.id,
+      stopRules: aiMemberConfig.stopRules,
       memberType: member.type,
       memberDisplayName: member.displayName,
       memberStatus: member.status,
@@ -291,6 +304,7 @@ async function selectAiMemberConfig(
   if (row?.memberType !== 'AI') throw new AiMemberError('NOT_FOUND', 'AI member not found')
   return {
     memberId: row.memberId,
+    stopRules: row.stopRules ?? EMPTY_AI_STOP_RULES,
     memberDisplayName: row.memberDisplayName,
     memberStatus: row.memberStatus,
     instructions: row.instructions ?? '',
@@ -417,6 +431,7 @@ export async function restoreAiConfigVersion(
       .update(aiMemberConfig)
       .set({
         ...version.snapshot,
+        stopRules: version.snapshot.stopRules ?? EMPTY_AI_STOP_RULES,
         splitRepliesEnabled: version.snapshot.splitRepliesEnabled ?? false,
         automaticLanguageEnabled: version.snapshot.automaticLanguageEnabled ?? false,
         timeZone: version.snapshot.timeZone ?? 'UTC',
@@ -433,6 +448,14 @@ export async function restoreAiConfigVersion(
 }
 
 function normalizeDraft(input: UpdateAiMemberConfigInput) {
+  let stopRules: AiStopRules | undefined
+  if (input.stopRules !== undefined) {
+    try {
+      stopRules = normalizeAiStopRules(input.stopRules)
+    } catch {
+      throw new AiMemberError('INVALID_REQUEST', 'Stop rules are invalid')
+    }
+  }
   const instructions =
     input.instructions === undefined
       ? undefined
@@ -444,6 +467,7 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
   const handoffKeywords =
     input.handoffKeywords === undefined ? undefined : normalizeKeywords(input.handoffKeywords)
   return {
+    stopRules,
     instructions,
     splitRepliesEnabled: input.splitRepliesEnabled,
     automaticLanguageEnabled: input.automaticLanguageEnabled,
@@ -491,6 +515,7 @@ function cleanText(value: string, maxCodePoints: number, label: string) {
 
 function defaultConfig(memberId: string) {
   return {
+    stopRules: EMPTY_AI_STOP_RULES,
     splitRepliesEnabled: false,
     automaticLanguageEnabled: false,
     timeZone: 'UTC',
