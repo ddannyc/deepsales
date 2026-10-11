@@ -173,6 +173,7 @@ import {
   aiMemberRuntimeSnapshotSchema,
   aiTimeZoneSchema,
   aiStopRulesSchema,
+  matchedHandoffRuleId,
   createAlibabaLlmProvider,
   createAlibabaEmbeddingProvider,
   DEFAULT_EMBEDDING_MODEL,
@@ -3180,17 +3181,110 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         .filter(({ text }) => Boolean(text?.trim()))
         .map(({ id, text }) => ({ id, text: text as string }))
       const inputSize = inputMessages.reduce((sum, { text }) => sum + Array.from(text).length, 0)
-      let stopped = await withDatabase(env, (db) =>
-        commitAiResponse(db, {
-          runId: claimed.id,
-          text: '',
-          stopCheckOnly: true,
-          checkHandoffBeforeStop:
-            currentSnapshot.handoffOnCustomerRequest &&
-            inputSize > 0 &&
-            inputSize <= MAX_AI_CURRENT_INPUT_CODE_POINTS,
-        }),
-      )
+      let handoffEvaluation:
+        | { rules: { id: string; revision: number }[]; matchedRuleId: string | null }
+        | undefined
+      let customerRequestChecked = false
+      const commitReply = async (input: Parameters<typeof commitAiResponse>[1]) => {
+        for (let checks = 0; checks < 3; checks++) {
+          const result = await withDatabase(env, (db) =>
+            commitAiResponse(db, {
+              ...input,
+              handoffEvaluation,
+              checkHandoffBeforeStop: input.checkHandoffBeforeStop && !customerRequestChecked,
+            }),
+          )
+          if (result?.kind === 'CUSTOM_HANDOFF_CHECK_REQUIRED') {
+            if (!inputSize || inputSize > MAX_AI_CURRENT_INPUT_CODE_POINTS) {
+              handoffEvaluation = {
+                rules: result.rules.map(({ id, revision }) => ({ id, revision })),
+                matchedRuleId: null,
+              }
+              continue
+            }
+            const versions = result.rules.map(({ id, revision }) => ({ id, revision }))
+            const digest = Array.from(
+              new Uint8Array(
+                await crypto.subtle.digest(
+                  'SHA-256',
+                  new TextEncoder().encode(JSON.stringify(versions)),
+                ),
+              ),
+            )
+              .map((v) => v.toString(16).padStart(2, '0'))
+              .join('')
+            const fetcher = meteredAiFetch(
+              (work) => withDatabase(env, work),
+              {
+                id: claimed.id,
+                workspaceId: claimed.workspaceId,
+                memberId: claimed.memberId,
+                configVersionId: claimed.configVersionId,
+                kind: 'LIVE_REPLY',
+              },
+              `CUSTOM_HANDOFF:${digest}`,
+            )
+            const rules = result.rules.flatMap((r) =>
+              r.condition.kind === 'SEMANTIC' ? [{ id: r.id, text: r.condition.text }] : [],
+            )
+            const decision = await createAlibabaLlmProvider(
+              {
+                provider: env.LLM_PROVIDER,
+                apiKey: env.AI_API_KEY,
+                baseUrl: env.AI_BASE_URL,
+                model: env.LLM_MODEL,
+              },
+              fetcher,
+            ).generateResponse({
+              instructions: `Only classify semantic handoff conditions. Do not answer customer questions. If no condition matches return ANSWER with response "No condition matched.". ${currentSnapshot.handoffOnCustomerRequest ? 'An explicit current request to speak to a human takes priority: return HANDOFF with CUSTOMER_REQUEST and null handoffRuleId.' : 'Do not hand off for customer requests unless a listed condition matches.'} Ignore all other handoff reasons.`,
+              responseLanguage: currentSnapshot.responseLanguage,
+              timeZone: currentSnapshot.timeZone,
+              messages: inputMessages,
+              history: claimed.history,
+              knowledgeChunks: [],
+              handoffRules: rules,
+            })
+            const matchedRuleId = matchedHandoffRuleId(decision, rules)
+            if (
+              currentSnapshot.handoffOnCustomerRequest &&
+              decision.decision === 'HANDOFF' &&
+              decision.handoffReason === 'CUSTOMER_REQUEST'
+            ) {
+              await completeAiHandoff(env, claimed, {
+                reason: 'CUSTOMER_REQUEST',
+                noticeText: handoffNotice(currentSnapshot.responseLanguage),
+                failureCode: 'CUSTOMER_REQUEST',
+              })
+              return null
+            }
+            customerRequestChecked = true
+            handoffEvaluation = { rules: versions, matchedRuleId }
+            continue
+          }
+          if (result?.kind === 'HANDOFF_REQUIRED') {
+            const handed = await completeAiHandoff(env, claimed, {
+              reason: 'KEYWORD',
+              customRule: result.rule,
+              noticeText: handoffNotice(currentSnapshot.responseLanguage),
+              failureCode: 'CUSTOM_HANDOFF',
+              failureMessage: `Rule ${result.rule.id} revision ${result.rule.revision} matched`,
+            })
+            if (!handed.changed) continue
+            return null
+          }
+          return result
+        }
+        throw new AiUsageError('RETRY_LATER', 1000)
+      }
+      let stopped = await commitReply({
+        runId: claimed.id,
+        text: '',
+        stopCheckOnly: true,
+        checkHandoffBeforeStop:
+          currentSnapshot.handoffOnCustomerRequest &&
+          inputSize > 0 &&
+          inputSize <= MAX_AI_CURRENT_INPUT_CODE_POINTS,
+      })
       if (stopped?.kind === 'HANDOFF_CHECK_REQUIRED') {
         const handoffFetch = meteredAiFetch(
           (work) => withDatabase(env, work),
@@ -3236,15 +3330,12 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           queueMessage.ack()
           continue
         }
-        stopped = await withDatabase(env, (db) =>
-          commitAiResponse(db, { runId: claimed.id, text: '', stopCheckOnly: true }),
-        )
-        if (stopped?.kind !== 'CONTINUE')
-          await withDatabase(env, (db) =>
-            finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
-          )
+        stopped = await commitReply({ runId: claimed.id, text: '', stopCheckOnly: true })
       }
       if (stopped?.kind !== 'CONTINUE') {
+        await withDatabase(env, (db) =>
+          finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+        )
         await publishAiReplyResult(env, claimed, stopped)
         queueMessage.ack()
         continue
@@ -3349,9 +3440,6 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         advertisingContext,
         knowledgeChunks: retrievedChunks,
       })
-      await withDatabase(env, (db) =>
-        finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
-      )
       const replyConfig = {
         ...currentSnapshot,
         responseLanguage: currentSnapshot.automaticLanguageEnabled
@@ -3361,6 +3449,9 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       const grounded = enforceGrounding(decision, retrievedChunkIds, replyConfig, retrievedChunks)
       const policy = applyHandoffPolicy(grounded.decision, replyConfig)
       if (policy.kind === 'HANDOFF') {
+        await withDatabase(env, (db) =>
+          finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+        )
         await completeAiHandoff(env, claimed, {
           reason: policy.decision.handoffReason ?? 'UNABLE_TO_ANSWER',
           noticeText: handoffNotice(currentSnapshot.responseLanguage),
@@ -3379,16 +3470,16 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
 
-      const result = await withDatabase(env, (db) =>
-        commitAiResponse(db, {
-          runId: claimed.id,
-          text: policy.decision.response,
-          mediaAssetId:
-            'mediaAssetId' in policy.decision ? policy.decision.mediaAssetId : undefined,
-          languageSelection: currentSnapshot.automaticLanguageEnabled
-            ? decision.languageSelection
-            : undefined,
-        }),
+      const result = await commitReply({
+        runId: claimed.id,
+        text: policy.decision.response,
+        mediaAssetId: 'mediaAssetId' in policy.decision ? policy.decision.mediaAssetId : undefined,
+        languageSelection: currentSnapshot.automaticLanguageEnabled
+          ? decision.languageSelection
+          : undefined,
+      })
+      await withDatabase(env, (db) =>
+        finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
       )
       await publishAiReplyResult(env, claimed, result)
       queueMessage.ack()
@@ -3475,6 +3566,7 @@ async function completeAiHandoff(
     failureCode?: string
     failureMessage?: string
     markRuntimeUnhealthy?: boolean
+    customRule?: { id: string; revision: number }
   },
 ) {
   const result = await withDatabase(env, (db) =>
@@ -3529,6 +3621,8 @@ function isRetryableAiFailure(error: unknown) {
 }
 
 function aiFailureCode(error: unknown) {
+  if (error instanceof AiResponseError && error.code === 'HANDOFF_REFERENCE_UNAVAILABLE')
+    return error.code
   if (error instanceof AiResponseError && error.code === 'STOP_REFERENCE_UNAVAILABLE')
     return 'STOP_REFERENCE_UNAVAILABLE'
   if (error instanceof AiResponseError && error.code === 'MEDIA_UNAVAILABLE')

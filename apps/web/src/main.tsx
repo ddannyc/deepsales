@@ -85,6 +85,7 @@ import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 import { AiOperations } from './ai-operations'
 import { AiStopSettings, emptyStopRules, type AiStopRules } from './ai-stop-settings'
+import { AiHandoffSettings } from './ai-handoff-settings'
 import { CustomerSidebar } from './customer-sidebar'
 import { DemoPage } from './demo'
 import { InboxFilterControls, type InboxFilters, inboxQuery } from './inbox-filters'
@@ -4190,6 +4191,8 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
             />
           </section>
 
+          <Separator />
+          <AiHandoffSettings workspaceId={workspace.id} memberId={memberId} />
           <Separator />
           <AiStopSettings
             workspaceId={workspace.id}

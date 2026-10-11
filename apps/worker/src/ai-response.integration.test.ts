@@ -27,6 +27,7 @@ import {
   processFacebookReferral,
   publishAiMemberConfig,
   saveAiBudget,
+  saveAiHandoffRule,
   setMemberChannelAccess,
   takeOverConversation,
   transferConversation,
@@ -56,6 +57,139 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+
+  it('reclassifies an edited semantic condition without reusing its previous cached decision', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...identity, replyWaitEnabled: false })
+    await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    const rule = await saveAiHandoffRule(db, {
+      ...identity,
+      name: 'Comparison',
+      enabled: true,
+      condition: { kind: 'SEMANTIC', text: 'Compare options' },
+    })
+    let count = 0
+    const provider = vi.fn(async (_url: string, init?: RequestInit) => {
+      count++
+      if (count === 1)
+        await saveAiHandoffRule(db, {
+          ...identity,
+          id: rule.id,
+          revision: 1,
+          name: rule.name,
+          enabled: true,
+          condition: { kind: 'SEMANTIC', text: 'Compare technical options' },
+        })
+      else expect(String(init?.body)).toContain('Compare technical options')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'HANDOFF',
+                response: '',
+                handoffReason: 'KEYWORD',
+                handoffRuleId: rule.id,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    const received = await receiveContextInput(db, f, 'Compare technical options')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const send = vi.fn()
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+      environment({ send } as unknown as Queue),
+    )
+    expect(provider).toHaveBeenCalledTimes(2)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(1)
+    expect(
+      await db
+        .select({ routing: conversation.routingConstraint })
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId)),
+    ).toEqual([{ routing: 'HUMAN_ONLY' }])
+  })
+
+  it('hands off a semantic custom condition without retrieving knowledge or generating a customer answer', async () => {
+    const f = await createFixture(db)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      replyWaitEnabled: false,
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const rule = await saveAiHandoffRule(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      name: 'Detailed comparison',
+      enabled: true,
+      condition: {
+        kind: 'SEMANTIC',
+        text: 'The customer requests a detailed comparison of options.',
+      },
+    })
+    const provider = vi.fn(async (url: string) => {
+      expect(url).toContain('/chat/completions')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'HANDOFF',
+                response: '',
+                handoffReason: 'KEYWORD',
+                handoffRuleId: rule.id,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    const received = await receiveContextInput(db, f, 'Please compare these options in detail')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const send = vi.fn()
+    const env = environment({ send } as unknown as Queue)
+    const queued = queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })
+    await handleAiResponseBatch(batch('ai', queued), env)
+    await handleAiResponseBatch(batch('ai', queued), env)
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(
+      await db
+        .select({ routing: conversation.routingConstraint })
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId)),
+    ).toEqual([{ routing: 'HUMAN_ONLY' }])
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(1)
+  })
 
   it('stops without paid generation when semantic handoff is disabled, and honors explicit requests after enabling it', async () => {
     const f = await createFixture(db)

@@ -2,6 +2,8 @@ import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import { assertAiManager, AiMemberError, getAiMemberConfig } from './ai-members'
 import { assertInboxConversationAccess } from './inbox'
+import { readEnabledAiHandoffRules, assertAiHandoffReferences } from './ai-handoff-rules'
+import { assertAiStopReferences, EMPTY_AI_STOP_RULES } from './ai-stop'
 import {
   aiBudget,
   aiOperation,
@@ -103,6 +105,10 @@ export async function reserveAiOperation(
     now?: Date
     text?: string
     snapshot?: AiMemberRuntimeSnapshot
+    handoffContext?: {
+      rules: Awaited<ReturnType<typeof readEnabledAiHandoffRules>>
+      facts: { properties: { definitionId: string; value: string | number }[]; tags: string[] }
+    }
   },
 ) {
   const now = input.now ?? new Date()
@@ -117,6 +123,25 @@ export async function reserveAiOperation(
         (input.text !== undefined && existing.input !== input.text)
       ) {
         throw new AiMemberError('INVALID_REQUEST')
+      }
+      if (input.handoffContext) {
+        const output = existing.output as { handoffContext?: { facts: unknown } } | null
+        const stored = output?.handoffContext?.facts as
+          | typeof input.handoffContext.facts
+          | undefined
+        const normalize = (facts: typeof input.handoffContext.facts) =>
+          JSON.stringify({
+            properties: facts.properties
+              .map((p) => [p.definitionId, p.value])
+              .sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+            tags: [...facts.tags].sort(),
+          })
+        // Legacy tests had no mock facts; retries must retain that empty context.
+        if (
+          normalize(stored ?? { properties: [], tags: [] }) !==
+          normalize(input.handoffContext.facts)
+        )
+          throw new AiMemberError('INVALID_REQUEST')
       }
       return { ...existing, wasCreated: false }
     }
@@ -155,6 +180,7 @@ export async function reserveAiOperation(
         period,
         input: input.text,
         snapshot: input.snapshot,
+        output: input.handoffContext ? { handoffContext: input.handoffContext } : undefined,
         createdAt: now,
         updatedAt: now,
       })
@@ -331,6 +357,10 @@ export async function createAiTest(
     source: 'DRAFT' | 'PUBLISHED' | 'VERSION'
     versionId?: string
     text: string
+    simulatedHandoffFacts?: {
+      properties: { definitionId: string; value: string | number }[]
+      tags: string[]
+    }
   },
 ) {
   const config = await getAiMemberConfig(db, input)
@@ -387,6 +417,33 @@ export async function createAiTest(
   if (!base) throw new AiMemberError('INVALID_CONFIGURATION')
   if (!input.text.trim() || Array.from(input.text).length > 8_000)
     throw new AiMemberError('INVALID_REQUEST')
+  const facts = input.simulatedHandoffFacts ?? { properties: [], tags: [] }
+  if (
+    facts.properties.length > 20 ||
+    facts.tags.length > 20 ||
+    new Set(facts.properties.map((p) => p.definitionId)).size !== facts.properties.length ||
+    new Set(facts.tags).size !== facts.tags.length
+  )
+    throw new AiMemberError('INVALID_REQUEST')
+  const rules = await db.transaction(async (tx) => {
+    await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for share`)
+    const rules = await readEnabledAiHandoffRules(tx, input.workspaceId, input.memberId)
+    try {
+      await assertAiHandoffReferences(tx, input.workspaceId, rules)
+      await assertAiStopReferences(tx, input.workspaceId, {
+        ...EMPTY_AI_STOP_RULES,
+        groups: [
+          ...facts.properties.map((p) => [
+            { kind: 'PROPERTY' as const, definitionId: p.definitionId, value: p.value },
+          ]),
+          ...facts.tags.map((tagId) => [{ kind: 'TAG' as const, tagId }]),
+        ],
+      })
+    } catch {
+      throw new AiMemberError('INVALID_CONFIGURATION')
+    }
+    return rules
+  })
   const operation = await reserveAiOperation(db, {
     id: input.id,
     workspaceId: input.workspaceId,
@@ -395,6 +452,7 @@ export async function createAiTest(
     configVersionId: versionId,
     text: input.text.trim(),
     snapshot,
+    handoffContext: { rules, facts },
   })
   return { operation, created: operation.wasCreated }
 }

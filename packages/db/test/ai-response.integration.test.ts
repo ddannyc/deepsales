@@ -42,6 +42,11 @@ import {
   customerPropertyValue,
   customerTagDefinition,
   customerTag,
+  saveAiHandoffRule,
+  deleteAiHandoffRule,
+  listAiHandoffRules,
+  createAiTest,
+  aiOperation,
 } from '../src'
 
 const connectionString = process.env.DATABASE_URL
@@ -55,6 +60,203 @@ describe.skipIf(!connectionString)('AI response runs', () => {
   })
 
   afterAll(() => pool.end())
+
+  it('reuses a legacy isolated test without allowing new mock facts under its old id', async () => {
+    const f = await createFixture(db)
+    const input = {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      id: randomUUID(),
+      source: 'PUBLISHED' as const,
+      text: 'Hello',
+    }
+    await createAiTest(db, input)
+    await db
+      .update(aiOperation)
+      .set({ state: 'COMPLETED', output: { kind: 'ANSWER', decision: { response: 'Hello' } } })
+      .where(eq(aiOperation.id, input.id))
+    expect((await createAiTest(db, input)).operation.output).toMatchObject({ kind: 'ANSWER' })
+    const [tag] = await db
+      .insert(customerTagDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Simulation', level: 'CUSTOMER' })
+      .returning()
+    await expect(
+      createAiTest(db, { ...input, simulatedHandoffFacts: { properties: [], tags: [tag.id] } }),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+
+  it('keeps isolated test facts immutable when a test id is retried', async () => {
+    const f = await createFixture(db)
+    const [tag] = await db
+      .insert(customerTagDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Simulation', level: 'CUSTOMER' })
+      .returning()
+    const input = {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      id: randomUUID(),
+      source: 'PUBLISHED' as const,
+      text: 'Hello',
+      simulatedHandoffFacts: { properties: [], tags: [tag.id] },
+    }
+    const first = await createAiTest(db, input)
+    expect(first.created).toBe(true)
+    expect((await createAiTest(db, input)).created).toBe(false)
+    await expect(
+      createAiTest(db, { ...input, simulatedHandoffFacts: { properties: [], tags: [] } }),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  })
+
+  it('rejects stale semantic decisions after rule edits, disabling, and takeover', async () => {
+    const f = await createFixture(db)
+    const run = await createGeneratingRun(db, f, 'Compare options')
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    const original = await saveAiHandoffRule(db, {
+      ...identity,
+      name: 'Comparison',
+      enabled: true,
+      condition: { kind: 'SEMANTIC', text: 'Compare options' },
+    })
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true }),
+    ).toMatchObject({ kind: 'CUSTOM_HANDOFF_CHECK_REQUIRED' })
+    const updated = await saveAiHandoffRule(db, {
+      ...identity,
+      id: original.id,
+      revision: 1,
+      name: 'Comparison',
+      enabled: true,
+      condition: { kind: 'SEMANTIC', text: 'Compare technical options' },
+    })
+    await expect(
+      saveAiHandoffRule(db, {
+        ...identity,
+        id: original.id,
+        revision: 1,
+        name: 'Stale',
+        enabled: true,
+        condition: original.condition,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+    expect(
+      await commitAiResponse(db, {
+        runId: run.runId,
+        text: 'Answer',
+        handoffEvaluation: {
+          rules: [{ id: original.id, revision: 1 }],
+          matchedRuleId: original.id,
+        },
+      }),
+    ).toMatchObject({ kind: 'CUSTOM_HANDOFF_CHECK_REQUIRED' })
+    expect(
+      (
+        await handoffAiConversation(db, {
+          workspaceId: f.workspaceId,
+          conversationId: run.conversationId,
+          memberId: f.aiMemberId,
+          runId: run.runId,
+          reason: 'KEYWORD',
+          customRule: { id: original.id, revision: 1 },
+          noticeText: 'Connecting',
+        })
+      ).changed,
+    ).toBe(false)
+    const disabled = await saveAiHandoffRule(db, {
+      ...identity,
+      id: updated.id,
+      revision: updated.revision,
+      name: updated.name,
+      enabled: false,
+      condition: updated.condition,
+    })
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true }),
+    ).toMatchObject({ kind: 'CONTINUE' })
+    const enabled = await saveAiHandoffRule(db, {
+      ...identity,
+      id: disabled.id,
+      revision: disabled.revision,
+      name: disabled.name,
+      enabled: true,
+      condition: disabled.condition,
+    })
+    await takeOverConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: run.conversationId,
+      actingUserId: f.ownerId,
+    })
+    expect(
+      (
+        await handoffAiConversation(db, {
+          workspaceId: f.workspaceId,
+          conversationId: run.conversationId,
+          memberId: f.aiMemberId,
+          runId: run.runId,
+          reason: 'KEYWORD',
+          customRule: { id: enabled.id, revision: enabled.revision },
+          noticeText: 'Connecting',
+        })
+      ).changed,
+    ).toBe(false)
+    await deleteAiHandoffRule(db, { ...identity, id: enabled.id, revision: enabled.revision })
+    expect(await listAiHandoffRules(db, identity)).toEqual([])
+  })
+
+  it('applies a saved tag handoff condition immediately through the assignment boundary', async () => {
+    const f = await createFixture(db)
+    const run = await createGeneratingRun(db, f, 'Hello')
+    const [tag] = await db
+      .insert(customerTagDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Needs specialist',
+        level: 'CUSTOMER',
+      })
+      .returning()
+    const [identity] = await db
+      .select({ customerId: channelIdentity.customerId, channelId: channelIdentity.channelId })
+      .from(conversation)
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+      .where(eq(conversation.id, run.conversationId))
+    await db.insert(customerTag).values({
+      tagId: tag.id,
+      customerId: identity.customerId,
+      sourceChannelId: identity.channelId,
+    })
+    const rule = await saveAiHandoffRule(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      name: 'Specialist',
+      enabled: true,
+      condition: { kind: 'TAG', tagId: tag.id },
+    })
+    expect(
+      await commitAiResponse(db, { runId: run.runId, text: '', stopCheckOnly: true }),
+    ).toMatchObject({ kind: 'HANDOFF_REQUIRED', rule: { id: rule.id, revision: 1 } })
+    const result = await handoffAiConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: run.conversationId,
+      memberId: f.aiMemberId,
+      runId: run.runId,
+      reason: 'KEYWORD',
+      customRule: { id: rule.id, revision: rule.revision },
+      noticeText: 'Connecting you to our team.',
+    })
+    expect(result.changed).toBe(true)
+    expect(
+      await db
+        .select({
+          owner: conversation.assigneeMemberId,
+          routing: conversation.routingConstraint,
+          reason: conversation.queueReason,
+        })
+        .from(conversation)
+        .where(eq(conversation.id, run.conversationId)),
+    ).toEqual([{ owner: null, routing: 'HUMAN_ONLY', reason: 'AI_HANDOFF' }])
+  })
 
   it('keeps condition-stopped conversations assigned and stores later input without replying', async () => {
     const f = await createFixture(db)

@@ -23,6 +23,7 @@ const e2ePassword = 'correct-horse-battery-staple'
 const e2eOwnerKeys = [
   'ai-member',
   'ai-response',
+  'ai-handoff',
   'lifecycle',
   'facebook',
   'inbox',

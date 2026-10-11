@@ -10,6 +10,7 @@ import {
   mediaAsset,
   memberChannelAccess,
   type AiStopRules,
+  type AiStopCondition,
 } from './schema'
 
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
@@ -144,12 +145,10 @@ export function isAiStopPeriod(rules: AiStopRules, timeZone: string, at: Date) {
 }
 
 // Caller holds the workspace and conversation locks used by fact edits and AI commits.
-export async function matchesAiStopCondition(
+export async function readAiConditionFacts(
   tx: Transaction,
   input: { workspaceId: string; conversationId: string; memberId: string; customerId: string },
-  rules: AiStopRules,
 ) {
-  if (!rules.groups.length) return false
   const access = await tx
     .select({ id: channel.id })
     .from(memberChannelAccess)
@@ -218,13 +217,26 @@ export async function matchesAiStopCondition(
         eq(aiResponseRun.state, 'COMPLETED'),
       ),
     )
-  return rules.groups.some((group) =>
-    group.every((c) =>
-      c.kind === 'REPLIES'
-        ? replies.count >= c.minimum
-        : c.kind === 'TAG'
-          ? tags.some((t) => t.id === c.tagId)
-          : properties.some((p) => p.id === c.definitionId && p.value === c.value),
-    ),
-  )
+  return { properties, tags, replies: replies.count }
+}
+
+export function matchesAiCondition(
+  c: AiStopCondition,
+  facts: Awaited<ReturnType<typeof readAiConditionFacts>>,
+) {
+  return c.kind === 'REPLIES'
+    ? facts.replies >= c.minimum
+    : c.kind === 'TAG'
+      ? facts.tags.some((t) => t.id === c.tagId)
+      : facts.properties.some((p) => p.id === c.definitionId && p.value === c.value)
+}
+
+export async function matchesAiStopCondition(
+  tx: Transaction,
+  input: Parameters<typeof readAiConditionFacts>[1],
+  rules: AiStopRules,
+) {
+  if (!rules.groups.length) return false
+  const facts = await readAiConditionFacts(tx, input)
+  return rules.groups.some((g) => g.every((c) => matchesAiCondition(c, facts)))
 }

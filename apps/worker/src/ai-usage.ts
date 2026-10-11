@@ -11,7 +11,7 @@ import {
 export function meteredAiFetch(
   withDb: <T>(work: (db: Database) => Promise<T>) => Promise<T>,
   operation: Parameters<typeof reserveAiOperation>[1],
-  llmStage: 'LLM' | 'STOP_HANDOFF' = 'LLM',
+  llmStage: 'LLM' | 'STOP_HANDOFF' | `CUSTOM_HANDOFF:${string}` = 'LLM',
 ) {
   let embeddingBatch = 0
   return async (url: RequestInfo | URL, init?: RequestInit) => {

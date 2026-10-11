@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 import { cancelActiveAiResponseRuns } from './ai-responses'
 import type { Database } from './database'
+import { readEnabledAiHandoffRules, matchAiHandoffRule } from './ai-handoff-rules'
 import {
   aiMemberConfig,
   aiResponseRun,
@@ -59,6 +60,7 @@ export type AssignmentCommand =
         | 'UNSUPPORTED_ATTACHMENT'
         | 'PROVIDER_FAILURE'
       noticeText?: string | null
+      customRule?: { id: string; revision: number }
       runState?: 'HANDOFF' | 'FAILED'
       failureCode?: string
       failureMessage?: string
@@ -579,6 +581,44 @@ async function executeAiHandoff(
     return unchanged(current, current.assigneeMemberId)
   }
 
+  if (command.customRule) {
+    const rules = await readEnabledAiHandoffRules(tx, command.workspaceId, command.memberId)
+    const rule = rules.find(
+      (r) => r.id === command.customRule?.id && r.revision === command.customRule.revision,
+    )
+    if (!rule) return unchanged(current, current.assigneeMemberId)
+    const [identity] = await tx
+      .select({ customerId: channelIdentity.customerId })
+      .from(conversation)
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+      .where(eq(conversation.id, current.id))
+    const [access] = await tx
+      .select({ id: memberChannelAccess.memberId })
+      .from(memberChannelAccess)
+      .innerJoin(channel, eq(channel.id, memberChannelAccess.channelId))
+      .where(
+        and(
+          eq(memberChannelAccess.memberId, command.memberId),
+          eq(memberChannelAccess.channelId, current.channelId),
+          eq(channel.status, 'ACTIVE'),
+        ),
+      )
+    if (!access || !identity) return unchanged(current, current.assigneeMemberId)
+    if (
+      rule.condition.kind !== 'SEMANTIC' &&
+      !(await matchAiHandoffRule(
+        tx,
+        {
+          workspaceId: command.workspaceId,
+          memberId: command.memberId,
+          conversationId: current.id,
+          customerId: identity.customerId,
+        },
+        [rule],
+      ))
+    )
+      return unchanged(current, current.assigneeMemberId)
+  }
   const noticeText = command.noticeText?.trim() ?? ''
   if (noticeText.length > 2_000) {
     throw new AssignmentError('INVALID_REQUEST', 'Handoff notice is too long')

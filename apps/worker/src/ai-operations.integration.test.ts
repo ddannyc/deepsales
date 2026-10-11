@@ -55,6 +55,68 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('simulates semantic handoff with the configured timezone and keeps rule writes authorized', async () => {
+    const f = await fixture()
+    await f.configCall({ timeZone: 'Asia/Hong_Kong' })
+    const root = `/${f.aiId}/handoff-rules`
+    const created = await f.call(root, 'POST', {
+      name: 'Comparison',
+      enabled: true,
+      condition: { kind: 'SEMANTIC', text: 'Compare options today' },
+    })
+    expect(created.status).toBe(201)
+    const { rule } = (await created.json()) as { rule: { id: string; revision: number } }
+    const calls = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(init?.body)).toContain('Asia/Hong_Kong')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'HANDOFF',
+                response: '',
+                handoffReason: 'KEYWORD',
+                handoffRuleId: rule.id,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', calls)
+    const input = { id: crypto.randomUUID(), source: 'DRAFT', text: 'Compare options today' }
+    const result = await f.call(`/${f.aiId}/test`, 'POST', input)
+    expect(result.status).toBe(200)
+    expect(await result.json()).toMatchObject({
+      operation: {
+        state: 'COMPLETED',
+        output: { kind: 'HANDOFF', decision: { handoffRuleId: rule.id } },
+      },
+    })
+    expect((await f.call(`/${f.aiId}/test`, 'POST', input)).status).toBe(200)
+    expect(calls).toHaveBeenCalledTimes(1)
+    expect(
+      await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+    ).toEqual([])
+    const patch = {
+      name: 'Comparison',
+      enabled: false,
+      revision: rule.revision,
+      condition: { kind: 'SEMANTIC', text: 'Compare options today' },
+    }
+    expect((await f.call(`${root}/${rule.id}`, 'PATCH', patch)).status).toBe(200)
+    expect((await f.call(`${root}/${rule.id}`, 'PATCH', patch)).status).toBe(400)
+    const other = await fixture()
+    expect((await other.call(`/${f.aiId}/handoff-rules`)).status).toBe(404)
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'AGENT' })
+      .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+    expect((await f.call(root)).status).toBe(403)
+    expect((await f.call(`${root}/${rule.id}`, 'DELETE', { revision: 2 })).status).toBe(403)
+  })
   it('previews a grounded private asset in the sandbox without creating a conversation or sending', async () => {
     const f = await fixture()
     const assetId = crypto.randomUUID()

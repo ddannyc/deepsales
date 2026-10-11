@@ -1022,6 +1022,33 @@ export type AiStopRules = {
   endingMediaAssetId: string | null
 }
 
+export type AiHandoffCondition =
+  | Exclude<AiStopCondition, { kind: 'REPLIES' }>
+  | { kind: 'SEMANTIC'; text: string }
+
+export const aiHandoffRule = pgTable(
+  'ai_handoff_rule',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    enabled: boolean().default(true).notNull(),
+    revision: integer().default(1).notNull(),
+    condition: jsonb().$type<AiHandoffCondition>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('ai_handoff_rule_member_idx').on(t.workspaceId, t.memberId),
+    check('ai_handoff_rule_revision_valid', sql`${t.revision} > 0`),
+  ],
+)
+
 export type AdMapping = { adId: string; content: string }
 export type AdvertisingContext = {
   status: 'DISABLED' | 'NO_SOURCE' | 'UNAVAILABLE' | 'UNMAPPED' | 'MAPPED'

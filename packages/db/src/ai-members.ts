@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES, normalizeAiStopRules } from './ai-stop'
+import { readEnabledAiHandoffRules, assertAiHandoffReferences } from './ai-handoff-rules'
 import {
   aiMemberConfig,
   aiConfigVersion,
@@ -193,8 +194,13 @@ export async function publishAiMemberConfig(
     }
     try {
       await assertAiStopReferences(tx, input.workspaceId, config.stopRules)
+      await assertAiHandoffReferences(
+        tx,
+        input.workspaceId,
+        await readEnabledAiHandoffRules(tx, input.workspaceId, input.memberId),
+      )
     } catch {
-      throw invalidConfiguration('Stop references need repair before publishing')
+      throw invalidConfiguration('Configuration references need repair before publishing')
     }
 
     const snapshot: AiMemberRuntimeSnapshot = {

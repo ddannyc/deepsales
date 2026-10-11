@@ -14,6 +14,11 @@ import {
   restoreAiConfigVersion,
   saveAiBudget,
   type Database,
+  listAiHandoffRules,
+  saveAiHandoffRule,
+  deleteAiHandoffRule,
+  matchesAiCondition,
+  type AiHandoffCondition,
   KnowledgeError,
 } from '@deepsales/db'
 import { Hono } from 'hono'
@@ -26,6 +31,8 @@ import {
   createAlibabaLlmProvider,
   enforceGrounding,
   applyHandoffPolicy,
+  aiHandoffConditionSchema,
+  matchedHandoffRuleId,
 } from './ai'
 import { meteredAiFetch } from './ai-usage'
 import { retrieveKnowledgeChunks } from './knowledge'
@@ -48,7 +55,7 @@ export function aiOperationsRoutes(
       const identity = { workspaceId, actingUserId: session.user.id }
       const segments = c.req.path.split('/ai-operations/')[1]?.split('/') ?? []
       const [resource, action] = segments
-      const body = ['POST', 'PATCH'].includes(c.req.method)
+      const body = ['POST', 'PATCH', 'DELETE'].includes(c.req.method)
         ? await c.req.json().catch(() => null)
         : null
       try {
@@ -86,6 +93,36 @@ export function aiOperationsRoutes(
           )
         if (!uuid.safeParse(resource).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
+        if (action === 'handoff-rules') {
+          if (c.req.method === 'GET')
+            return c.json({ rules: await listAiHandoffRules(db, memberInput) })
+          if (c.req.method === 'DELETE') {
+            const input = z.object({ revision: z.number().int().positive() }).strict().parse(body)
+            await deleteAiHandoffRule(db, { ...memberInput, id: uuid.parse(segments[2]), ...input })
+            return c.json({ ok: true })
+          }
+          if (c.req.method === 'POST' || c.req.method === 'PATCH') {
+            const input = z
+              .object({
+                name: z.string().trim().min(1).max(100),
+                enabled: z.boolean(),
+                condition: aiHandoffConditionSchema,
+                revision: z.number().int().positive().optional(),
+              })
+              .strict()
+              .parse(body)
+            return c.json(
+              {
+                rule: await saveAiHandoffRule(db, {
+                  ...memberInput,
+                  ...input,
+                  id: c.req.method === 'PATCH' ? uuid.parse(segments[2]) : undefined,
+                }),
+              },
+              c.req.method === 'POST' ? 201 : 200,
+            )
+          }
+        }
         if (action === 'versions' && c.req.method === 'GET')
           return c.json({ versions: await listAiConfigVersions(db, memberInput) })
         if (action === 'restore' && c.req.method === 'POST') {
@@ -135,6 +172,22 @@ export function aiOperationsRoutes(
               source: z.enum(['DRAFT', 'PUBLISHED', 'VERSION']),
               versionId: uuid.optional(),
               text: z.string().min(1).max(8_000),
+              simulatedHandoffFacts: z
+                .object({
+                  properties: z
+                    .array(
+                      z
+                        .object({
+                          definitionId: uuid,
+                          value: z.union([z.string().max(2000), z.number().finite()]),
+                        })
+                        .strict(),
+                    )
+                    .max(20),
+                  tags: z.array(uuid).max(20),
+                })
+                .strict()
+                .optional(),
             })
             .strict()
             .parse(body)
@@ -143,6 +196,45 @@ export function aiOperationsRoutes(
             return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
           try {
             const snapshot = aiMemberRuntimeSnapshotSchema.parse(test.operation.snapshot)
+            const context = (
+              test.operation.output as {
+                handoffContext: {
+                  rules: { id: string; revision: number; condition: AiHandoffCondition }[]
+                  facts: {
+                    properties: { definitionId: string; value: string | number }[]
+                    tags: string[]
+                  }
+                }
+              }
+            ).handoffContext
+            const facts = {
+              properties: context.facts.properties.map((p) => ({
+                id: p.definitionId,
+                value: p.value,
+              })),
+              tags: context.facts.tags.map((id) => ({ id })),
+              replies: 0,
+            }
+            const deterministic = context.rules.find(
+              (r) => r.condition.kind !== 'SEMANTIC' && matchesAiCondition(r.condition, facts),
+            )
+            if (deterministic) {
+              await recordAiTestResult(db, {
+                id: input.id,
+                chunkIds: [],
+                output: {
+                  kind: 'HANDOFF',
+                  decision: {
+                    decision: 'HANDOFF',
+                    handoffReason: 'KEYWORD',
+                    handoffRuleId: deterministic.id,
+                    response: '模拟转人工；不会分配或发送。',
+                  },
+                  handoffContext: context,
+                },
+              })
+              return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
+            }
             const fetcher = meteredAiFetch((work) => withDb(c.env, work), {
               id: input.id,
               workspaceId,
@@ -160,6 +252,52 @@ export function aiOperationsRoutes(
               },
               fetcher,
             )
+            const semanticRules = context.rules.flatMap((r) =>
+              r.condition.kind === 'SEMANTIC' ? [{ id: r.id, text: r.condition.text }] : [],
+            )
+            if (semanticRules.length) {
+              const classifier = createAlibabaLlmProvider(
+                {
+                  provider: c.env.LLM_PROVIDER,
+                  apiKey: c.env.AI_API_KEY,
+                  baseUrl: c.env.AI_BASE_URL,
+                  model: c.env.LLM_MODEL,
+                },
+                meteredAiFetch(
+                  (work) => withDb(c.env, work),
+                  {
+                    id: input.id,
+                    workspaceId,
+                    memberId: uuid.parse(resource),
+                    kind: 'TEST',
+                    configVersionId: test.operation.configVersionId,
+                  },
+                  'CUSTOM_HANDOFF:TEST',
+                ),
+              )
+              const decision = await classifier.generateResponse({
+                instructions:
+                  'Only classify the listed handoff conditions. If none matches return ANSWER with response "No condition matched.". Do not answer questions or hand off for other reasons.',
+                responseLanguage: snapshot.responseLanguage,
+                timeZone: snapshot.timeZone,
+                messages: [{ id: input.id, text: input.text }],
+                history: [],
+                knowledgeChunks: [],
+                handoffRules: semanticRules,
+              })
+              if (matchedHandoffRuleId(decision, semanticRules)) {
+                await recordAiTestResult(db, {
+                  id: input.id,
+                  chunkIds: [],
+                  output: {
+                    kind: 'HANDOFF',
+                    decision: { ...decision, response: '模拟转人工；不会分配或发送。' },
+                    handoffContext: context,
+                  },
+                })
+                return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
+              }
+            }
             let chunks: Awaited<ReturnType<typeof retrieveKnowledgeChunks>> = []
             try {
               chunks = await retrieveKnowledgeChunks(db, embedding, c.env, {
@@ -212,7 +350,7 @@ export function aiOperationsRoutes(
             )
             await recordAiTestResult(db, {
               id: input.id,
-              output: result,
+              output: { ...result, handoffContext: context },
               chunkIds: chunks.map(({ id }) => id),
             })
           } catch (error) {

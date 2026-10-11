@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import type { HandoffRule } from './ai-handoff-settings'
 import { Button } from './components/ui/button'
 import {
   Dialog,
@@ -124,6 +125,8 @@ const labels: Record<string, string> = {
   INVALID_EMBEDDING: '检索输出无效',
   AI_PROVIDER_ERROR: '模型服务失败',
   MODEL_HANDOFF: '模型请求转人工',
+  CUSTOM_HANDOFF: '自定义条件匹配，已转人工',
+  HANDOFF_REFERENCE_UNAVAILABLE: '转人工条件引用已失效；管理员需修复或停用',
 }
 const label = (value: string) => labels[value] ?? value
 
@@ -178,6 +181,8 @@ export function AiOperations({
   const [note, setNote] = useState('')
   const [source, setSource] = useState('PUBLISHED')
   const [question, setQuestion] = useState('')
+  const [handoffRules, setHandoffRules] = useState<HandoffRule[]>([])
+  const [simulatedRuleId, setSimulatedRuleId] = useState('NONE')
   const [testId, setTestId] = useState<string>()
   const [error, setError] = useState('')
   const [status, setStatus] = useState('')
@@ -192,12 +197,13 @@ export function AiOperations({
   const [memberFilter, setMemberFilter] = useState('CURRENT')
   const [analytics, setAnalytics] = useState<Analytics>()
   const load = useCallback(async () => {
-    const [history, nextBudget, records] = await Promise.all([
+    const [history, nextBudget, records, conditions] = await Promise.all([
       api<{ versions: Version[] }>(`${root}/${memberId}/versions`),
       api<Budget>(`${root}/budget`),
       api<{ runs: Run[]; tests: Run[]; nextCursor: { createdAt: string; id: string } | null }>(
         `${root}/${memberId}/runs`,
       ),
+      api<{ rules: HandoffRule[] }>(`${root}/${memberId}/handoff-rules`),
     ])
     setVersions(history.versions)
     setBudget(nextBudget)
@@ -205,6 +211,7 @@ export function AiOperations({
     setRuns(records.runs)
     setTests(records.tests)
     setNextCursor(records.nextCursor)
+    setHandoffRules(conditions.rules)
   }, [root, memberId])
   async function act(work: () => Promise<void>) {
     setBusy(true)
@@ -320,6 +327,7 @@ export function AiOperations({
         <p className="table-muted">不创建客户、会话或外发消息。多轮和批量测试另行交付。</p>
         <Select
           value={source}
+          disabled={busy}
           onValueChange={(value) => {
             setSource(value)
             setTestId(undefined)
@@ -342,6 +350,7 @@ export function AiOperations({
           测试问题
           <Textarea
             id="ai-test-question"
+            disabled={busy}
             value={question}
             maxLength={8_000}
             onChange={(e) => {
@@ -350,12 +359,38 @@ export function AiOperations({
             }}
           />
         </label>
+        <p className="table-muted">
+          自然语义条件使用测试问题判断。属性和标签使用下方模拟值；保存条件后请刷新记录。
+        </p>
+        <Select
+          value={simulatedRuleId}
+          disabled={busy}
+          onValueChange={(value) => {
+            setSimulatedRuleId(value)
+            setTestId(undefined)
+          }}
+        >
+          <SelectTrigger aria-label="模拟属性标签条件">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="NONE">不提供模拟属性或标签</SelectItem>
+            {handoffRules
+              .filter((rule) => rule.enabled && rule.condition.kind !== 'SEMANTIC')
+              .map((rule) => (
+                <SelectItem key={rule.id} value={rule.id}>
+                  {rule.name}
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </Select>
         <Button
           size="sm"
           disabled={busy || !question.trim()}
           onClick={() =>
             void act(async () => {
               const id = testId ?? crypto.randomUUID()
+              const condition = handoffRules.find((rule) => rule.id === simulatedRuleId)?.condition
               setTestId(id)
               setDiagnostics(
                 await api<Diagnostics>(`${root}/${memberId}/test`, {
@@ -363,6 +398,13 @@ export function AiOperations({
                   source: source === 'DRAFT' || source === 'PUBLISHED' ? source : 'VERSION',
                   versionId: source === 'DRAFT' || source === 'PUBLISHED' ? undefined : source,
                   text: question,
+                  simulatedHandoffFacts: {
+                    properties:
+                      condition?.kind === 'PROPERTY'
+                        ? [{ definitionId: condition.definitionId, value: condition.value }]
+                        : [],
+                    tags: condition?.kind === 'TAG' ? [condition.tagId] : [],
+                  },
                 }),
               )
               await load()

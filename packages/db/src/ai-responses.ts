@@ -1,6 +1,11 @@
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import {
+  readEnabledAiHandoffRules,
+  matchAiHandoffRule,
+  type AiHandoffEvaluation,
+} from './ai-handoff-rules'
+import {
   assertAiStopReferences,
   EMPTY_AI_STOP_RULES,
   isAiStopPeriod,
@@ -78,7 +83,8 @@ export class AiResponseError extends Error {
       | 'NOT_FOUND'
       | 'INVALID_REQUEST'
       | 'MEDIA_UNAVAILABLE'
-      | 'STOP_REFERENCE_UNAVAILABLE',
+      | 'STOP_REFERENCE_UNAVAILABLE'
+      | 'HANDOFF_REFERENCE_UNAVAILABLE',
     message: string = code,
   ) {
     super(message)
@@ -532,6 +538,11 @@ export async function recoverStaleAiResponseRuns(
 export type CommitAiResponseResult =
   | { kind: 'CONTINUE' }
   | { kind: 'HANDOFF_CHECK_REQUIRED' }
+  | { kind: 'HANDOFF_REQUIRED'; rule: { id: string; revision: number } }
+  | {
+      kind: 'CUSTOM_HANDOFF_CHECK_REQUIRED'
+      rules: Awaited<ReturnType<typeof readEnabledAiHandoffRules>>
+    }
   | {
       kind: 'STOPPED'
       reason: 'CONDITION' | 'SCHEDULE'
@@ -555,6 +566,7 @@ export async function commitAiResponse(
     text: string
     stopCheckOnly?: boolean
     checkHandoffBeforeStop?: boolean
+    handoffEvaluation?: AiHandoffEvaluation
     now?: Date
     mediaAssetId?: string | null
     languageSelection?: { language: string; explicitSwitch: boolean } | null
@@ -651,6 +663,44 @@ export async function commitAiResponse(
       return { kind: 'CANCELLED' as const, cancellationReason: 'NEW_CUSTOMER_MESSAGE' as const }
     }
 
+    const handoffRules = await readEnabledAiHandoffRules(tx, current.workspaceId, run.memberId)
+    let matchedRule: (typeof handoffRules)[number] | undefined
+    try {
+      matchedRule = await matchAiHandoffRule(
+        tx,
+        {
+          workspaceId: current.workspaceId,
+          memberId: run.memberId,
+          conversationId: current.id,
+          customerId: current.customerId,
+        },
+        handoffRules,
+      )
+    } catch {
+      throw new AiResponseError('HANDOFF_REFERENCE_UNAVAILABLE')
+    }
+    if (!matchedRule && handoffRules.some((r) => r.condition.kind === 'SEMANTIC')) {
+      const evaluation = input.handoffEvaluation
+      if (
+        !evaluation ||
+        evaluation.rules.length !== handoffRules.length ||
+        handoffRules.some(
+          (r) => !evaluation.rules.some((v) => v.id === r.id && v.revision === r.revision),
+        )
+      )
+        return { kind: 'CUSTOM_HANDOFF_CHECK_REQUIRED' as const, rules: handoffRules }
+      if (evaluation.matchedRuleId) {
+        matchedRule = handoffRules.find(
+          (r) => r.id === evaluation.matchedRuleId && r.condition.kind === 'SEMANTIC',
+        )
+        if (!matchedRule) throw new AiResponseError('INVALID_REQUEST')
+      }
+    }
+    if (matchedRule)
+      return {
+        kind: 'HANDOFF_REQUIRED' as const,
+        rule: { id: matchedRule.id, revision: matchedRule.revision },
+      }
     const stopRules = run.configSnapshot?.stopRules ?? EMPTY_AI_STOP_RULES
     const timeZone = run.configSnapshot?.timeZone ?? 'UTC'
     if (current.stopState?.reason !== 'CONDITION') {
