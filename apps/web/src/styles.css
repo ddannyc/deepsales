@@ -1554,6 +1554,14 @@ form {
 .invite-copy input {
   min-width: 0;
 }
+.referral-timeline li {
+  padding-block: var(--space-3);
+  border-bottom: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+.referral-timeline p {
+  margin-block: var(--space-1);
+}
 .knowledge-base-toolbar {
   display: flex;
   align-items: flex-end;

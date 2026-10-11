@@ -55,6 +55,37 @@ export type FacebookInboundMessage = {
 
 export const FACEBOOK_WEBHOOK_RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000
 
+// Caller holds the channel/user advisory lock so referral and message intake share one identity.
+export async function ensureFacebookIdentity(
+  tx: Transaction,
+  input: { channelId: string; workspaceId: string; externalUserId: string },
+) {
+  let [identity] = await tx
+    .select({ id: channelIdentity.id, customerId: channelIdentity.customerId })
+    .from(channelIdentity)
+    .where(
+      and(
+        eq(channelIdentity.channelId, input.channelId),
+        eq(channelIdentity.externalUserId, input.externalUserId),
+      ),
+    )
+    .limit(1)
+  if (!identity) {
+    const [createdCustomer] = await tx
+      .insert(customer)
+      .values({ workspaceId: input.workspaceId })
+      .returning({ id: customer.id })
+    if (!createdCustomer) throw new InboxError('INVALID_REQUEST', 'Customer was not created')
+    const [createdIdentity] = await tx
+      .insert(channelIdentity)
+      .values({ ...input, customerId: createdCustomer.id })
+      .returning({ id: channelIdentity.id, customerId: channelIdentity.customerId })
+    identity = createdIdentity
+  }
+  if (!identity) throw new InboxError('INVALID_REQUEST', 'Channel identity was not created')
+  return identity
+}
+
 export async function processFacebookInbound(db: Database, input: FacebookInboundMessage) {
   const attachments = input.attachments ?? []
   if (!input.text && !attachments.length) {
@@ -117,36 +148,10 @@ export async function processFacebookInbound(db: Database, input: FacebookInboun
       }
     }
 
-    let [identity] = await tx
-      .select({ id: channelIdentity.id, customerId: channelIdentity.customerId })
-      .from(channelIdentity)
-      .where(
-        and(
-          eq(channelIdentity.channelId, activeChannel.channelId),
-          eq(channelIdentity.externalUserId, input.externalUserId),
-        ),
-      )
-      .limit(1)
-
-    if (!identity) {
-      const [createdCustomer] = await tx
-        .insert(customer)
-        .values({ workspaceId: activeChannel.workspaceId })
-        .returning({ id: customer.id })
-      if (!createdCustomer) throw new InboxError('INVALID_REQUEST', 'Customer was not created')
-
-      const [createdIdentity] = await tx
-        .insert(channelIdentity)
-        .values({
-          workspaceId: activeChannel.workspaceId,
-          customerId: createdCustomer.id,
-          channelId: activeChannel.channelId,
-          externalUserId: input.externalUserId,
-        })
-        .returning({ id: channelIdentity.id, customerId: channelIdentity.customerId })
-      identity = createdIdentity
-    }
-    if (!identity) throw new InboxError('INVALID_REQUEST', 'Channel identity was not created')
+    const identity = await ensureFacebookIdentity(tx, {
+      ...activeChannel,
+      externalUserId: input.externalUserId,
+    })
 
     await tx.execute(sql`select id from channel_identity where id = ${identity.id} for update`)
     await tx.execute(

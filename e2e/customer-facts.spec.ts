@@ -4,6 +4,7 @@ import {
   customer,
   facebookChannelConfig,
   processFacebookInbound,
+  processFacebookReferral,
 } from '@deepsales/db'
 import { expect, test } from '@playwright/test'
 import { Pool } from 'pg'
@@ -21,6 +22,7 @@ test('customer facts survive refresh and tags and identity changes preserve the 
   const pool = new Pool({ connectionString: process.env.DATABASE_URL })
   const db = createDatabase(pool)
   const pageId = crypto.randomUUID()
+  const visitor = crypto.randomUUID()
   try {
     const [support] = await db
       .insert(channel)
@@ -36,13 +38,27 @@ test('customer facts survive refresh and tags and identity changes preserve the 
     await processFacebookInbound(db, {
       ingressId: crypto.randomUUID(),
       pageId,
-      externalUserId: crypto.randomUUID(),
+      externalUserId: visitor,
       externalMessageId: crypto.randomUUID(),
       text: 'Hello from customer',
       providerSentAt: new Date(),
       receivedAt: new Date(),
       payloadSha256: 'a'.repeat(64),
       eventFragment: {},
+    })
+    await processFacebookReferral(db, {
+      pageId,
+      externalUserId: visitor,
+      externalMessageId: null,
+      providerSentAt: '2026-01-01T12:00:00.000Z',
+      receivedAt: new Date(),
+      source: 'ADS',
+      type: 'OPEN_THREAD',
+      ref: 'neutral-catalog',
+      adId: 'neutral-lamp-ad',
+      adTitle: 'Compact desk lamp',
+      imageUrl: 'https://example.com/untrusted-photo.png',
+      refererUri: null,
     })
     const [target] = await db
       .insert(customer)
@@ -51,6 +67,12 @@ test('customer facts survive refresh and tags and identity changes preserve the 
     await page.getByRole('button', { name: '刷新对话' }).click()
     await expect(page.getByText('Hello from customer', { exact: true }).last()).toBeVisible()
     await page.getByRole('button', { name: '客户资料', exact: true }).click()
+    const sources = page.getByRole('region', { name: '来源轨迹', exact: true })
+    await expect(sources).toContainText('Compact desk lamp')
+    await expect(sources).toContainText('neutral-lamp-ad')
+    await expect(sources).toContainText('来源提供图片（未加载）')
+    await expect(sources.locator('img')).toHaveCount(0)
+    await sources.screenshot({ path: test.info().outputPath('referral-timeline.png') })
     await page.getByLabel('客户名称', { exact: true }).fill('Alex')
     await page.getByLabel('电子邮箱', { exact: true }).fill('alex@example.com')
     await page.getByRole('button', { name: '保存客户资料', exact: true }).click()

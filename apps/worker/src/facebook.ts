@@ -113,7 +113,8 @@ export function createFacebookAdapter(
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: new URLSearchParams({
-          subscribed_fields: 'messages,message_deliveries,message_reads,message_echoes',
+          subscribed_fields:
+            'messages,message_deliveries,message_reads,message_echoes,messaging_referrals',
         }),
       })
       if (

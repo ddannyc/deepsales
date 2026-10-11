@@ -77,6 +77,8 @@ import {
   MemberError,
   processFacebookInbound,
   processFacebookReceipt,
+  processFacebookReferral,
+  listFacebookReferrals,
   acknowledgeConversationRead,
   createInternalNote,
   listInternalNotes,
@@ -123,6 +125,7 @@ import { Pool } from 'pg'
 import { z } from 'zod'
 import { createAuth } from './auth'
 import { meteredAiFetch } from './ai-usage'
+import { normalizeFacebookReferrals, facebookReferralJobSchema } from './facebook-referrals'
 import { aiOperationsRoutes } from './ai-operations'
 import type { Bindings } from './bindings'
 import {
@@ -2057,6 +2060,26 @@ async function customerRequest(
 app.get('/api/workspaces/:workspaceId/conversations/:conversationId/customer-profile', (c) =>
   customerRequest(c, getCustomerProfile),
 )
+app.get('/api/workspaces/:workspaceId/conversations/:conversationId/referrals', async (c) => {
+  if (!hasAuthBindings(c.env)) return notReady(c)
+  const ids = z
+    .object({
+      workspaceId: z.string().uuid(),
+      conversationId: z.string().uuid(),
+      before: z.string().uuid().optional(),
+    })
+    .safeParse({ ...c.req.param(), before: c.req.query('before') })
+  if (!ids.success) return inboxErrorResponse(c, new InboxError('INVALID_REQUEST'))
+  return withDatabase(c.env, async (db) => {
+    const session = await createAuth(db, c.env).api.getSession({ headers: c.req.raw.headers })
+    if (!session) return unauthorized(c)
+    try {
+      return c.json(await listFacebookReferrals(db, { ...ids.data, userId: session.user.id }))
+    } catch (error) {
+      return inboxErrorResponse(c, error)
+    }
+  })
+})
 app.patch('/api/workspaces/:workspaceId/conversations/:conversationId/customer-profile', (c) =>
   customerRequest(c, async (db, context) => {
     const parsed = customerProfileInput.safeParse(await c.req.json().catch(() => null))
@@ -2636,16 +2659,19 @@ app.post('/webhooks/facebook', async (c) => {
 
   let events: ReturnType<typeof normalizeFacebookWebhook>
   let receiptEvents: ReturnType<typeof normalizeFacebookReceipts>
+  let referralEvents: ReturnType<typeof normalizeFacebookReferrals>
   try {
     events = normalizeFacebookWebhook(payload)
     receiptEvents = normalizeFacebookReceipts(payload)
-    if (events.length + receiptEvents.length > MAX_FACEBOOK_WEBHOOK_EVENTS)
+    referralEvents = normalizeFacebookReferrals(payload)
+    if (events.length + receiptEvents.length + referralEvents.length > MAX_FACEBOOK_WEBHOOK_EVENTS)
       throw new FacebookWebhookPayloadError('TOO_MANY_EVENTS')
   } catch (error) {
     if (error instanceof FacebookWebhookPayloadError) return c.text('Payload Too Large', 413)
     throw error
   }
-  if (!events.length && !receiptEvents.length) return c.text('EVENT_RECEIVED')
+  if (!events.length && !receiptEvents.length && !referralEvents.length)
+    return c.text('EVENT_RECEIVED')
 
   const queue = c.env.WEBHOOKS_QUEUE ? createJobQueue(c.env.WEBHOOKS_QUEUE) : undefined
   if (!queue) {
@@ -2691,6 +2717,16 @@ app.post('/webhooks/facebook', async (c) => {
       ...jobs.map((job) => queue.send(job.data)),
       ...receiptEvents.map((event) =>
         queue.send(facebookReceiptJobSchema.parse({ v: 1, type: 'facebook.receipt', event })),
+      ),
+      ...referralEvents.map((event) =>
+        queue.send(
+          facebookReferralJobSchema.parse({
+            v: 1,
+            type: 'facebook.referral',
+            receivedAt: receivedAt.toISOString(),
+            event,
+          }),
+        ),
       ),
     ])
   } catch {
@@ -2866,6 +2902,24 @@ async function publishMemberChange(env: Bindings, workspaceId: string, memberId:
 export async function handleWebhookBatch(batch: MessageBatch<unknown>, env: Bindings) {
   const documentsQueue = env.DOCUMENTS_QUEUE ? createJobQueue(env.DOCUMENTS_QUEUE) : undefined
   for (const message of batch.messages) {
+    const referral = facebookReferralJobSchema.safeParse(message.body)
+    if (referral.success) {
+      try {
+        const changed = await withDatabase(env, (db) =>
+          processFacebookReferral(db, {
+            ...referral.data.event,
+            receivedAt: new Date(referral.data.receivedAt),
+          }),
+        )
+        if (changed)
+          for (const id of changed.conversationIds)
+            await publishInboxChange(env, changed.workspaceId, id, 'conversation.changed')
+        message.ack()
+      } catch {
+        message.retry()
+      }
+      continue
+    }
     const receipt = facebookReceiptJobSchema.safeParse(message.body)
     if (receipt.success) {
       try {

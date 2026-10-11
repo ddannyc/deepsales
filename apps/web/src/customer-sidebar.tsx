@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { Button } from './components/ui/button'
 import { Input } from './components/ui/input'
 import { Textarea } from './components/ui/textarea'
@@ -63,6 +63,23 @@ type Profile = {
   nextHistoryCursor: string | null
 }
 type Method = 'POST' | 'PATCH' | 'PUT' | 'DELETE'
+type Referrals = {
+  referrals: {
+    id: string
+    channelIdentityId: string
+    source: string
+    type: string
+    ref: string | null
+    adId: string | null
+    adTitle: string | null
+    imageUrl: string | null
+    refererUri: string | null
+    providerSentAt: string | null
+    receivedAt: string
+    messageId: string | null
+  }[]
+  nextReferralCursor: string | null
+}
 type Props = {
   workspaceId: string
   conversationId: string
@@ -132,6 +149,114 @@ export function CustomerSidebar(props: Props) {
         )}
       </SheetContent>
     </Sheet>
+  )
+}
+
+function ReferralTimeline({
+  workspaceId,
+  conversationId,
+}: Pick<Props, 'workspaceId' | 'conversationId'>) {
+  const [data, setData] = useState<Referrals | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const request = useRef(0)
+
+  const load = useCallback(
+    async (before?: string) => {
+      const sequence = ++request.current
+      setBusy(true)
+      try {
+        const result = await read<Referrals>(
+          `/api/workspaces/${workspaceId}/conversations/${conversationId}/referrals${before ? `?before=${encodeURIComponent(before)}` : ''}`,
+        )
+        if (sequence !== request.current) return
+        setData((current) => ({
+          ...result,
+          referrals:
+            before && current ? [...current.referrals, ...result.referrals] : result.referrals,
+        }))
+        setError('')
+      } catch {
+        if (sequence !== request.current) return
+        setData(null)
+        setError('来源暂不可用，请确认渠道权限后刷新。')
+      } finally {
+        if (sequence === request.current) setBusy(false)
+      }
+    },
+    [workspaceId, conversationId],
+  )
+
+  useEffect(() => {
+    void load()
+    return () => {
+      request.current++
+    }
+  }, [load])
+
+  return (
+    <section aria-label="来源轨迹" className="referral-timeline" aria-busy={busy}>
+      <div className="conversation-header-actions">
+        <h3>来源轨迹</h3>
+        <Button type="button" variant="ghost" disabled={busy} onClick={() => void load()}>
+          刷新来源
+        </Button>
+      </div>
+      <p className="muted">仅显示当前渠道身份的真实来源。广告 ID 不代表广告读取权限。</p>
+      {error && <p role="alert">{error}</p>}
+      {!data && !error && <p role="status">正在加载来源…</p>}
+      {data &&
+        (data.referrals.length ? (
+          <ol>
+            {data.referrals.map((item) => (
+              <li key={item.id}>
+                <strong>{item.adTitle ?? '标题未知'}</strong>
+                <p>
+                  {item.source} · {item.type}
+                  {item.adId ? ` · 广告 ID：${item.adId}` : ' · 广告 ID 未提供'}
+                </p>
+                {item.ref && <p>来源参数：{item.ref}</p>}
+                {item.refererUri && <p>来源地址：{item.refererUri}</p>}
+                <p className="muted">
+                  {item.imageUrl ? '来源提供图片（未加载）' : '图片未知'} · 身份{' '}
+                  {item.channelIdentityId.slice(0, 8)}
+                </p>
+                <p className="muted">
+                  平台时间：
+                  {item.providerSentAt ? (
+                    <time dateTime={item.providerSentAt}>
+                      {new Date(item.providerSentAt).toLocaleString()}
+                    </time>
+                  ) : (
+                    '未知'
+                  )}{' '}
+                  · 取得时间：
+                  <time dateTime={item.receivedAt}>
+                    {new Date(item.receivedAt).toLocaleString()}
+                  </time>
+                </p>
+                <p className="muted">
+                  {item.messageId
+                    ? `关联客户消息：${item.messageId.slice(0, 8)}`
+                    : '独立来源，未关联客户消息'}
+                </p>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p>尚无来源记录。未取得的信息保持未知。</p>
+        ))}
+      {data?.nextReferralCursor && (
+        <Button
+          type="button"
+          variant="outline"
+          disabled={busy}
+          onClick={() => void load(data.nextReferralCursor ?? undefined)}
+        >
+          加载更早来源
+        </Button>
+      )}
+    </section>
   )
 }
 
@@ -570,6 +695,7 @@ function CustomerFacts({
               </Button>
             )}
           </section>
+          <ReferralTimeline workspaceId={workspaceId} conversationId={conversationId} />
           <section aria-label="渠道身份">
             <h3>渠道身份</h3>
             <p>

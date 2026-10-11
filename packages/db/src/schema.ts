@@ -911,6 +911,32 @@ export const deliveryAttempt = pgTable(
   ],
 )
 
+export const facebookReferral = pgTable(
+  'facebook_referral',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    channelIdentityId: uuid('channel_identity_id')
+      .notNull()
+      .references(() => channelIdentity.id, { onDelete: 'cascade' }),
+    eventKey: text('event_key').notNull(),
+    externalMessageId: text('external_message_id'),
+    source: text().notNull(),
+    type: text().notNull(),
+    ref: text(),
+    adId: text('ad_id'),
+    refererUri: text('referer_uri'),
+    adTitle: text('ad_title'),
+    imageUrl: text('image_url'),
+    providerSentAt: timestamp('provider_sent_at', { withTimezone: true }),
+    receivedAt: timestamp('received_at', { withTimezone: true }).notNull(),
+    eventAt: timestamp('event_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('facebook_referral_identity_event_key').on(table.channelIdentityId, table.eventKey),
+    index('facebook_referral_timeline_idx').on(table.channelIdentityId, table.eventAt, table.id),
+  ],
+)
+
 export const facebookWebhookReceipt = pgTable(
   'facebook_webhook_receipt',
   {
