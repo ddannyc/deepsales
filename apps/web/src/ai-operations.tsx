@@ -8,6 +8,7 @@ import {
   DialogTitle,
 } from './components/ui/dialog'
 import { Input } from './components/ui/input'
+import { StatusBadge } from './components/ui/status-badge'
 import {
   Select,
   SelectContent,
@@ -59,6 +60,7 @@ type Diagnostics = {
   inputs: { id: string; text: string }[]
   history: { id: string; text: string; direction: string }[]
   output: { text: string } | null
+  segments?: { id: string; deliveryState: string | null }[]
   chunks: { id: string; text: string }[]
   missingChunkIds: string[]
   attempts: { id: string; stage: string; state: string; httpStatus: number | null }[]
@@ -85,6 +87,8 @@ const labels: Record<string, string> = {
   CANCELLED: '已取消',
   FAILED: '失败',
   UNKNOWN: '结果不明，已暂停',
+  PENDING: '发送中',
+  SENT: '已发送',
   RESERVED: '已预约',
   STARTED: '处理中',
   SUCCESS: '成功',
@@ -504,6 +508,9 @@ export function AiOperations({
         {analytics && (
           <>
             <p>汇总时间：{new Date(analytics.calculatedAt).toLocaleString()}</p>
+            <p className="field-description">
+              拆分回复按一次逻辑回复统计；全部分段发送成功才计为成功。
+            </p>
             {!analytics.runs.length && !analytics.usage.length && !analytics.replies.length && (
               <p>所选区间暂无数据。</p>
             )}
@@ -677,6 +684,23 @@ export function AiOperations({
                   diagnostics.operation?.output?.decision?.response ??
                   '未提交客户回复'}
               </pre>
+              {(diagnostics.segments?.length ?? 0) > 1 &&
+                diagnostics.segments?.map((part, index) => (
+                  <p key={part.id}>
+                    回复分段 {index + 1}/{diagnostics.segments?.length} ·{' '}
+                    <StatusBadge
+                      tone={
+                        part.deliveryState === 'FAILED'
+                          ? 'destructive'
+                          : part.deliveryState === 'SENT'
+                            ? 'success'
+                            : 'warning'
+                      }
+                    >
+                      {label(part.deliveryState ?? 'PENDING')}
+                    </StatusBadge>
+                  </p>
+                ))}
               <details>
                 <summary>实际配置</summary>
                 <SnapshotPreview
@@ -797,6 +821,10 @@ function SnapshotPreview({ snapshot }: { snapshot: Record<string, unknown> | nul
       <div>
         <dt>自然语气</dt>
         <dd>{snapshot.naturalToneEnabled ? '启用' : '停用'}</dd>
+      </div>
+      <div>
+        <dt>拆分长回复</dt>
+        <dd>{snapshot.splitRepliesEnabled ? '启用' : '停用'}</dd>
       </div>
       <div>
         <dt>等待合并输入</dt>

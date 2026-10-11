@@ -53,6 +53,63 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
 
+  it('queues every published reply segment with one generation and one budget charge', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...identity,
+      splitRepliesEnabled: true,
+      replyWaitEnabled: false,
+    })
+    await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    await updateAiMemberConfig(db, { ...identity, splitRepliesEnabled: false })
+    const received = await receiveContextInput(db, f, 'Please explain.')
+    const routed = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const text = 'Please share your question. '.repeat(40)
+    const provider = vi.fn(async (url: RequestInfo | URL) => {
+      if (String(url).endsWith('/embeddings'))
+        return Response.json({ data: [{ index: 0, embedding: vector() }] })
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: text,
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    const send = vi.fn()
+    const env = environment({ send } as unknown as Queue)
+    const job = { v: 1, type: 'ai.response', runId: routed.aiResponseRunId }
+    await handleAiResponseBatch(batch('deepsales-ai', queueMessage(job)), env)
+    await handleAiResponseBatch(batch('deepsales-ai', queueMessage(job)), env)
+    const output = await db
+      .select()
+      .from(message)
+      .where(
+        and(eq(message.conversationId, received.conversationId), eq(message.direction, 'OUTBOUND')),
+      )
+      .orderBy(message.createdAt)
+    expect(output).toHaveLength(3)
+    expect(output.map((part) => part.text).join('')).toBe(text.trim())
+    expect(send.mock.calls.map(([body]) => body.messageId)).toEqual(output.map((part) => part.id))
+    expect(
+      provider.mock.calls.filter(([url]) => String(url).endsWith('/chat/completions')),
+    ).toHaveLength(1)
+    expect((await getAiBudget(db, identity)).used).toBe(1)
+  })
+
   it('keeps a published automatic language until an explicit request and supplies only server time', async () => {
     const f = await createFixture(db)
     const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }

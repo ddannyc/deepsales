@@ -285,7 +285,11 @@ async function startFakeFacebook() {
     const uploaded = uploads.get(body.message?.attachment?.payload?.attachment_id ?? '')
     const rejectMedia = uploaded?.filename === 'reject-once.pdf' && !uploaded.rejected
     if (rejectMedia && uploaded) uploaded.rejected = true
-    if (body.message?.text === 'force failure' || rejectMedia) {
+    if (
+      body.message?.text === 'force failure' ||
+      body.message?.text?.startsWith('Split reject.') ||
+      rejectMedia
+    ) {
       response.statusCode = 400
       response.end(
         JSON.stringify({
@@ -300,6 +304,8 @@ async function startFakeFacebook() {
       return
     }
 
+    if (body.message?.text?.startsWith('Split first.'))
+      await new Promise((resolve) => setTimeout(resolve, 3000))
     response.end(JSON.stringify({ message_id: `fake-message-${++messageNumber}` }))
   })
   await new Promise<void>((resolve, reject) => {
@@ -378,13 +384,15 @@ async function startFakeAI() {
             content,
           )?.[1]
         : /<knowledge_chunk id="([^"]+)">/.exec(content)?.[1]
-    const answer = options
-      ? 'Option one is Torch One. Option two is Torch Two.'
-      : secondOption || humanContinuation
-        ? hasReferent && chunkId
-          ? 'Torch Two comes in blue.'
-          : 'Please clarify which option.'
-        : 'Shipping is free.'
+    const answer = current.includes('Explain split delivery')
+      ? `${'Split first.'.padEnd(500, '.')}${'Split reject.'.padEnd(500, '.')}Split tail.`
+      : options
+        ? 'Option one is Torch One. Option two is Torch Two.'
+        : secondOption || humanContinuation
+          ? hasReferent && chunkId
+            ? 'Torch Two comes in blue.'
+            : 'Please clarify which option.'
+          : 'Shipping is free.'
     response.end(
       JSON.stringify({
         choices: [
@@ -394,8 +402,10 @@ async function startFakeAI() {
                 decision: 'ANSWER',
                 response: answer,
                 handoffReason: null,
-                containsBusinessFacts: Boolean(chunkId),
-                usedChunkIds: chunkId ? [chunkId] : [],
+                containsBusinessFacts:
+                  !current.includes('Explain split delivery') && Boolean(chunkId),
+                usedChunkIds:
+                  !current.includes('Explain split delivery') && chunkId ? [chunkId] : [],
                 ...(body.messages?.[0]?.content.includes('Automatic language mode.')
                   ? { languageSelection: null }
                   : {}),

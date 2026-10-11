@@ -1,0 +1,6 @@
+ALTER TABLE "ai_member_config" ADD COLUMN "split_replies_enabled" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+ALTER TABLE "message" ADD COLUMN "reply_group_id" uuid;--> statement-breakpoint
+ALTER TABLE "message" ADD COLUMN "reply_segment_index" integer;--> statement-breakpoint
+ALTER TABLE "message" ADD COLUMN "reply_segment_count" integer;--> statement-breakpoint
+CREATE UNIQUE INDEX "message_reply_segment_idx" ON "message" USING btree ("reply_group_id","reply_segment_index");--> statement-breakpoint
+ALTER TABLE "message" ADD CONSTRAINT "message_reply_segments" CHECK (("message"."reply_group_id" is null and "message"."reply_segment_index" is null and "message"."reply_segment_count" is null) or ("message"."reply_group_id" is not null and "message"."reply_segment_index" is not null and "message"."reply_segment_count" is not null and "message"."reply_segment_index" between 1 and "message"."reply_segment_count" and "message"."reply_segment_count" between 2 and 3 and "message"."direction" = 'OUTBOUND' and "message"."message_type" = 'TEXT'));

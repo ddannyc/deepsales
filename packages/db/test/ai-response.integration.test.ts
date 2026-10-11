@@ -8,8 +8,13 @@ import {
   autoAssignConversation,
   bootstrapWorkspace,
   claimAiResponseRun,
+  claimOutboundMessage,
+  completeOutboundMessage,
+  failOutboundMessage,
+  aiOperationForMessage,
   commitAiResponse,
   getAiDiagnostics,
+  getAiAnalytics,
   connectFacebookPages,
   createAiMember,
   createDatabase,
@@ -36,6 +41,98 @@ describe.skipIf(!connectionString)('AI response runs', () => {
   })
 
   afterAll(() => pool.end())
+
+  it('commits an ordered split reply once without losing its tail', async () => {
+    const f = await createFixture(db)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      splitRepliesEnabled: true,
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    const run = await createGeneratingRun(db, f, 'Please explain.')
+    const text = `${'A'.repeat(499)}${'🙂'.repeat(250)}${'B'.repeat(650)}THE END`
+    const result = await commitAiResponse(db, { runId: run.runId, text })
+    expect(result?.kind).toBe('COMMITTED')
+    if (result?.kind !== 'COMMITTED') throw new Error('Reply not committed')
+    expect(result.messages).toHaveLength(3)
+    expect(result.messages.map((part) => part.text).join('')).toBe(text)
+    expect(result.messages[0].text).toBe(`${'A'.repeat(499)}🙂`)
+    expect(result.messages[1].text).toBe(`${'🙂'.repeat(249)}${'B'.repeat(251)}`)
+    expect(result.messages.map((part) => part.replySegmentIndex)).toEqual([1, 2, 3])
+    expect(await commitAiResponse(db, { runId: run.runId, text })).toBeNull()
+    await takeOverConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: run.conversationId,
+      actingUserId: f.ownerId,
+    })
+    const sentAt = new Date()
+    await expect(
+      claimOutboundMessage(db, { messageId: result.messages[2].id, now: sentAt }),
+    ).rejects.toMatchObject({ code: 'RETRY_LATER' })
+    const first = await claimOutboundMessage(db, { messageId: result.messages[0].id, now: sentAt })
+    if (!first) throw new Error('First segment not claimed')
+    await completeOutboundMessage(db, {
+      messageId: first.id,
+      attemptId: first.attemptId,
+      externalMessageId: 'split-first',
+      now: sentAt,
+    })
+    await expect(
+      claimOutboundMessage(db, {
+        messageId: result.messages[1].id,
+        now: new Date(sentAt.getTime() + 999),
+      }),
+    ).rejects.toMatchObject({ code: 'RETRY_LATER', retryAfterMs: 1 })
+    const second = await claimOutboundMessage(db, {
+      messageId: result.messages[1].id,
+      now: new Date(sentAt.getTime() + 1000),
+    })
+    if (!second) throw new Error('Second segment not claimed')
+    await failOutboundMessage(db, {
+      messageId: second.id,
+      attemptId: second.attemptId,
+      failureCode: 'AMBIGUOUS_DELIVERY',
+      failureMessage: 'Unknown send result',
+    })
+    expect(await claimOutboundMessage(db, { messageId: second.id })).toBeNull()
+    expect(await claimOutboundMessage(db, { messageId: result.messages[2].id })).toBeNull()
+    expect(
+      (
+        await aiOperationForMessage(db, {
+          workspaceId: f.workspaceId,
+          actingUserId: f.ownerId,
+          messageId: result.messages[2].id,
+        })
+      ).segments.map((part) => part.deliveryState),
+    ).toEqual(['SENT', 'FAILED', 'FAILED'])
+    expect(
+      (
+        await getAiDiagnostics(db, {
+          workspaceId: f.workspaceId,
+          actingUserId: f.ownerId,
+          id: run.runId,
+        })
+      ).output,
+    ).toMatchObject({ text, deliveryState: 'FAILED' })
+    expect(
+      (
+        await getAiAnalytics(db, {
+          workspaceId: f.workspaceId,
+          actingUserId: f.ownerId,
+          from: new Date(Date.now() - 60_000),
+          to: new Date(Date.now() + 60_000),
+          timezone: 'UTC',
+        })
+      ).replies,
+    ).toEqual([{ sender: 'AI', replies: 1, sent: 0, failed: 1 }])
+  })
 
   it('retains the automatic language across runs and commits a requested switch only for current input', async () => {
     const f = await createFixture(db)

@@ -521,6 +521,7 @@ export type CommitAiResponseResult =
       workspaceId: string
       conversationId: string
       message: typeof message.$inferSelect
+      messages: (typeof message.$inferSelect)[]
     }
   | { kind: 'CANCELLED'; cancellationReason: 'OWNERSHIP_CHANGED' | 'NEW_CUSTOMER_MESSAGE' }
   | null
@@ -633,21 +634,41 @@ export async function commitAiResponse(
     )
       throw new AiResponseError('INVALID_REQUEST', 'Language change needs an explicit request')
 
-    const [created] = await tx
+    const points = Array.from(text)
+    const texts =
+      run.configSnapshot?.splitRepliesEnabled && points.length > 500
+        ? [
+            points.slice(0, 500).join(''),
+            points.slice(500, 1000).join(''),
+            points.slice(1000).join(''),
+          ].filter(Boolean)
+        : [text]
+    const [stamp] = await tx
+      .select({ at: sql<string>`clock_timestamp()::text` })
+      .from(conversation)
+      .where(eq(conversation.id, current.id))
+      .limit(1)
+    const createdMessages = await tx
       .insert(message)
-      .values({
-        conversationId: current.id,
-        channelId: current.channelId,
-        direction: 'OUTBOUND',
-        senderType: 'MEMBER',
-        senderMemberId: run.memberId,
-        messageType: 'TEXT',
-        text,
-        deliveryState: 'PENDING',
-        createdAt: sql`clock_timestamp()`,
-        updatedAt: now,
-      })
+      .values(
+        texts.map((part, index) => ({
+          conversationId: current.id,
+          channelId: current.channelId,
+          senderMemberId: run.memberId,
+          text: part,
+          replyGroupId: texts.length > 1 ? run.id : null,
+          replySegmentIndex: texts.length > 1 ? index + 1 : null,
+          replySegmentCount: texts.length > 1 ? texts.length : null,
+          deliveryState: 'PENDING' as const,
+          direction: 'OUTBOUND' as const,
+          senderType: 'MEMBER' as const,
+          messageType: 'TEXT' as const,
+          createdAt: sql`${stamp.at}::timestamptz + ${index} * interval '1 microsecond'`,
+          updatedAt: now,
+        })),
+      )
       .returning()
+    const created = createdMessages[0]
     if (!created) throw new AiResponseError('INVALID_REQUEST', 'AI message was not created')
 
     await tx
@@ -669,6 +690,7 @@ export async function commitAiResponse(
       workspaceId: current.workspaceId,
       conversationId: current.id,
       message: created,
+      messages: createdMessages,
     }
   })
 }

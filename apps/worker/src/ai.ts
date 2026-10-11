@@ -217,6 +217,7 @@ function isHandoffEnabled(reason: AiHandoffReason | null, config: HandoffPolicyC
 }
 
 export const aiMemberRuntimeSnapshotSchema = z.object({
+  splitRepliesEnabled: z.boolean().default(false),
   automaticLanguageEnabled: z.boolean().default(false),
   timeZone: aiTimeZoneSchema.default('UTC'),
   instructions: z.string(),

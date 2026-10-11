@@ -357,6 +357,7 @@ const knowledgeTextInput = z
   .strict()
 const aiMemberConfigInput = z
   .object({
+    splitRepliesEnabled: z.boolean().optional(),
     automaticLanguageEnabled: z.boolean().optional(),
     timeZone: aiTimeZoneSchema.optional(),
     instructions: z.string().max(20_000).optional(),
@@ -3334,7 +3335,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           result.conversationId,
           'conversation.changed',
         )
-        await enqueueOutboundMessage(env, result.message.id)
+        for (const part of result.messages) await enqueueOutboundMessage(env, part.id)
       }
       queueMessage.ack()
     } catch (error) {
@@ -3879,8 +3880,10 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
       claimed = await withDatabase(env, (db) =>
         claimOutboundMessage(db, { messageId: job.data.messageId }),
       )
-    } catch {
-      queueMessage.retry()
+    } catch (error) {
+      if (error instanceof ReplyError && error.code === 'RETRY_LATER')
+        queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(error.retryAfterMs / 1000)) })
+      else queueMessage.retry()
       continue
     }
     if (!claimed) {

@@ -189,6 +189,9 @@ type InboxMessage = {
   deliveryState: 'PENDING' | 'SENT' | 'FAILED' | null
   failureCode: string | null
   failureMessage: string | null
+  replyGroupId?: string | null
+  replySegmentIndex?: number | null
+  replySegmentCount?: number | null
   createdAt: string
   attachments: InboxAttachment[]
 }
@@ -241,6 +244,9 @@ function sameInboxMessage(first: InboxMessage, second: InboxMessage) {
     first.read === second.read &&
     first.failureCode === second.failureCode &&
     first.failureMessage === second.failureMessage &&
+    first.replyGroupId === second.replyGroupId &&
+    first.replySegmentIndex === second.replySegmentIndex &&
+    first.replySegmentCount === second.replySegmentCount &&
     first.createdAt === second.createdAt &&
     first.attachments.length === second.attachments.length &&
     first.attachments.every((attachment, index) => {
@@ -293,6 +299,7 @@ type KnowledgeDocument = {
 }
 
 type AiMemberRuntimeSnapshot = {
+  splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
   naturalToneEnabled?: boolean
@@ -310,6 +317,7 @@ type AiMemberRuntimeSnapshot = {
 }
 
 type AiMemberConfig = {
+  splitRepliesEnabled: boolean
   automaticLanguageEnabled: boolean
   timeZone: string
   naturalToneEnabled: boolean
@@ -350,6 +358,7 @@ type AiMemberDraft = Pick<
   | 'replyWaitEnabled'
   | 'automaticLanguageEnabled'
   | 'timeZone'
+  | 'splitRepliesEnabled'
 >
 
 class ApiError extends Error {
@@ -2444,6 +2453,11 @@ function MessageBubble({
           {isAi ? <Bot aria-hidden="true" /> : <UserRound aria-hidden="true" />}
           <strong>{senderName}</strong>
           {isAi && <StatusBadge tone="info">AI</StatusBadge>}
+          {message.replySegmentIndex && (
+            <StatusBadge tone="neutral">
+              回复分段 {message.replySegmentIndex}/{message.replySegmentCount}
+            </StatusBadge>
+          )}
         </span>
         <time dateTime={message.createdAt} title={formatExactDate(message.createdAt)}>
           {formatDate(message.createdAt)}
@@ -2563,6 +2577,8 @@ function ConversationComposer({
 }
 
 function deliveryFailureLabel(code: string | null) {
+  if (code === 'REPLY_SEGMENT_BLOCKED') return '前段发送失败，后续分段已暂停'
+  if (code === 'AMBIGUOUS_DELIVERY') return '发送结果不明，已暂停；请核实后处理'
   return code === 'REPLY_WINDOW_CLOSED' ? '回复窗口已关闭' : '发送失败，请稍后重试'
 }
 
@@ -4143,6 +4159,24 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
               启用时等待 2 秒收齐连续输入，最多等待 30
               秒后尝试处理。关闭后立即进入处理队列；新输入和人工接管仍会阻止旧回复。
             </p>
+            <div className="switch-field">
+              <span id="ai-split-label">拆分长回复</span>
+              <Switch
+                aria-labelledby="ai-split-label"
+                aria-describedby="ai-split-description"
+                checked={draft.splitRepliesEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) =>
+                  setDraft((current) =>
+                    current ? { ...current, splitRepliesEnabled: checked } : current,
+                  )
+                }
+              />
+            </div>
+            <p id="ai-split-description" className="field-description">
+              默认停用。启用后约每 500 字拆分，最多 3 段，保留全部内容。前段发送成功后至少等待 1
+              秒发送下一段；前段失败时后续暂停。拆分不增加逻辑回复用量。
+            </p>
           </section>
           <Separator />
           <section aria-labelledby="ai-ad-title" className="ai-config-section">
@@ -4343,6 +4377,10 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                   <dd>{config.publishedSnapshot.naturalToneEnabled ? '启用' : '停用'}</dd>
                 </div>
                 <div>
+                  <dt>拆分长回复</dt>
+                  <dd>{config.publishedSnapshot.splitRepliesEnabled ? '启用' : '停用'}</dd>
+                </div>
+                <div>
                   <dt>等待合并输入</dt>
                   <dd>
                     {config.publishedSnapshot.replyWaitEnabled !== false
@@ -4403,6 +4441,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.replyWaitEnabled ?? true,
       left.automaticLanguageEnabled ?? false,
       left.timeZone ?? 'UTC',
+      left.splitRepliesEnabled ?? false,
     ]) ===
     JSON.stringify([
       right.instructions,
@@ -4419,6 +4458,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       right.replyWaitEnabled ?? true,
       right.automaticLanguageEnabled ?? false,
       right.timeZone ?? 'UTC',
+      right.splitRepliesEnabled ?? false,
     ])
   )
 }
@@ -4430,6 +4470,7 @@ function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
     replyWaitEnabled: config.replyWaitEnabled ?? true,
     automaticLanguageEnabled: config.automaticLanguageEnabled ?? false,
     timeZone: config.timeZone ?? 'UTC',
+    splitRepliesEnabled: config.splitRepliesEnabled ?? false,
     adLearningEnabled: config.adLearningEnabled ?? false,
     adMappings: config.adMappings ?? [],
     responseLanguage: config.responseLanguage,

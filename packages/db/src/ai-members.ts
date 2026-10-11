@@ -38,6 +38,7 @@ type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 type QueryHandle = Database | Transaction
 
 export type AiMemberConfig = {
+  splitRepliesEnabled: boolean
   automaticLanguageEnabled: boolean
   timeZone: string
   naturalToneEnabled: boolean
@@ -63,6 +64,7 @@ export type AiMemberConfig = {
 }
 
 export type UpdateAiMemberConfigInput = {
+  splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
   naturalToneEnabled?: boolean
@@ -116,6 +118,7 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
     } else {
       await tx.insert(aiMemberConfig).values({
         memberId: target.id,
+        splitRepliesEnabled: draft.splitRepliesEnabled ?? false,
         automaticLanguageEnabled: draft.automaticLanguageEnabled ?? false,
         timeZone: draft.timeZone ?? 'UTC',
         instructions: draft.instructions ?? '',
@@ -184,6 +187,7 @@ export async function publishAiMemberConfig(
     }
 
     const snapshot: AiMemberRuntimeSnapshot = {
+      splitRepliesEnabled: config.splitRepliesEnabled,
       automaticLanguageEnabled: config.automaticLanguageEnabled,
       timeZone: config.timeZone,
       instructions: config.instructions,
@@ -259,6 +263,7 @@ async function selectAiMemberConfig(
       memberDisplayName: member.displayName,
       memberStatus: member.status,
       configMemberId: aiMemberConfig.memberId,
+      splitRepliesEnabled: aiMemberConfig.splitRepliesEnabled,
       automaticLanguageEnabled: aiMemberConfig.automaticLanguageEnabled,
       timeZone: aiMemberConfig.timeZone,
       instructions: aiMemberConfig.instructions,
@@ -289,6 +294,7 @@ async function selectAiMemberConfig(
     memberDisplayName: row.memberDisplayName,
     memberStatus: row.memberStatus,
     instructions: row.instructions ?? '',
+    splitRepliesEnabled: row.splitRepliesEnabled ?? false,
     automaticLanguageEnabled: row.automaticLanguageEnabled ?? false,
     timeZone: row.timeZone ?? 'UTC',
     responseLanguage: row.responseLanguage ?? '',
@@ -411,6 +417,7 @@ export async function restoreAiConfigVersion(
       .update(aiMemberConfig)
       .set({
         ...version.snapshot,
+        splitRepliesEnabled: version.snapshot.splitRepliesEnabled ?? false,
         automaticLanguageEnabled: version.snapshot.automaticLanguageEnabled ?? false,
         timeZone: version.snapshot.timeZone ?? 'UTC',
         adLearningEnabled: version.snapshot.adLearningEnabled ?? false,
@@ -438,6 +445,7 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
     input.handoffKeywords === undefined ? undefined : normalizeKeywords(input.handoffKeywords)
   return {
     instructions,
+    splitRepliesEnabled: input.splitRepliesEnabled,
     automaticLanguageEnabled: input.automaticLanguageEnabled,
     timeZone: input.timeZone === undefined ? undefined : normalizeAiTimeZone(input.timeZone),
     responseLanguage,
@@ -483,6 +491,7 @@ function cleanText(value: string, maxCodePoints: number, label: string) {
 
 function defaultConfig(memberId: string) {
   return {
+    splitRepliesEnabled: false,
     automaticLanguageEnabled: false,
     timeZone: 'UTC',
     memberId,

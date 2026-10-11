@@ -183,6 +183,34 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
     page.locator('.message-bubble').filter({ hasText: 'Torch Two comes in blue.' }).first(),
   ).toBeVisible()
 
+  await page.goto(`/ai-member/${ai.member.id}`)
+  const split = page.getByRole('switch', { name: '拆分长回复' })
+  await expect(split).not.toBeChecked()
+  await split.click()
+  await page.getByRole('button', { name: '保存草稿' }).click()
+  await expect(page.getByRole('button', { name: '发布', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: '发布', exact: true }).click()
+  await expect(
+    page.locator('.ai-published-panel').getByText('拆分长回复', { exact: true }),
+  ).toBeVisible()
+  await page.goto('/inbox')
+  await page.locator('.conversation-items button').first().click()
+  await sendInbound(
+    page,
+    pageId,
+    `customer-${suffix}`,
+    `mid-split-${suffix}`,
+    'Explain split delivery',
+  )
+  const firstPart = page.locator('.message-bubble').filter({ hasText: '回复分段 1/3' })
+  const secondPart = page.locator('.message-bubble').filter({ hasText: '回复分段 2/3' })
+  const thirdPart = page.locator('.message-bubble').filter({ hasText: '回复分段 3/3' })
+  await expect(firstPart.getByText('发送中', { exact: true })).toBeVisible({ timeout: 20_000 })
+  await expect(firstPart.getByText('已发送', { exact: true })).toBeVisible({ timeout: 20_000 })
+  await expect(secondPart.getByText('发送失败', { exact: true })).toBeVisible({ timeout: 20_000 })
+  await expect(thirdPart.getByText('前段发送失败，后续分段已暂停')).toBeVisible({ timeout: 20_000 })
+  await expect(thirdPart.getByText('Split tail.', { exact: true })).toBeVisible()
+
   const followUp = `Could you explain that again ${suffix}`
   await sendInbound(page, pageId, `customer-${suffix}`, `mid-follow-up-${suffix}`, followUp)
   await expect(page.getByText('AI 正在生成', { exact: true }).first()).toBeVisible({

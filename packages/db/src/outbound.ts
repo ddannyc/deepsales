@@ -16,6 +16,7 @@ export const MAX_OUTBOUND_TEXT_LENGTH = 2_000
 export const OUTBOUND_CLAIM_TIMEOUT_MS = 5 * 60 * 1_000
 
 export type ReplyErrorCode =
+  | 'RETRY_LATER'
   | 'FORBIDDEN'
   | 'NOT_FOUND'
   | 'INVALID_REQUEST'
@@ -28,6 +29,7 @@ export class ReplyError extends Error {
   constructor(
     readonly code: ReplyErrorCode,
     message: string = code,
+    readonly retryAfterMs = 0,
   ) {
     super(message)
   }
@@ -208,6 +210,8 @@ export async function claimOutboundMessage(
         id: message.id,
         deliveryState: message.deliveryState,
         deliveryStartedAt: message.deliveryStartedAt,
+        replyGroupId: message.replyGroupId,
+        replySegmentIndex: message.replySegmentIndex,
       })
       .from(message)
       .where(and(eq(message.id, input.messageId), eq(message.direction, 'OUTBOUND')))
@@ -232,6 +236,35 @@ export async function claimOutboundMessage(
       return null
     }
 
+    if (current.replyGroupId && current.replySegmentIndex && current.replySegmentIndex > 1) {
+      const [previous] = await tx
+        .select({ state: message.deliveryState, completedAt: message.deliveryCompletedAt })
+        .from(message)
+        .where(
+          and(
+            eq(message.replyGroupId, current.replyGroupId),
+            eq(message.replySegmentIndex, current.replySegmentIndex - 1),
+          ),
+        )
+      if (previous?.state === 'FAILED' || !previous) {
+        await tx
+          .update(message)
+          .set({
+            deliveryState: 'FAILED',
+            failureCode: 'REPLY_SEGMENT_BLOCKED',
+            failureMessage: 'Previous reply segment failed; sending is paused',
+            deliveryCompletedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(message.id, current.id))
+        return null
+      }
+      const delay = previous.completedAt
+        ? previous.completedAt.getTime() + 1000 - now.getTime()
+        : 1000
+      if (previous.state !== 'SENT' || delay > 0)
+        throw new ReplyError('RETRY_LATER', 'Previous reply segment is pending', Math.max(1, delay))
+    }
     const [claimed] = await tx
       .update(message)
       .set({ deliveryStartedAt: now, updatedAt: now })

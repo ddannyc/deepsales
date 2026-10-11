@@ -336,6 +336,7 @@ export async function createAiTest(
   let versionId: string | null = null
   if (input.source === 'DRAFT' && config.knowledgeBaseId)
     snapshot = {
+      splitRepliesEnabled: config.splitRepliesEnabled,
       automaticLanguageEnabled: config.automaticLanguageEnabled,
       timeZone: config.timeZone,
       instructions: config.instructions,
@@ -461,16 +462,17 @@ export async function getAiDiagnostics(db: Database, input: Identity & { id: str
         )
         .orderBy(asc(message.createdAt), asc(message.id))
     : []
-  const [output] = run?.run.outputMessageId
+  const segments = run?.run.outputMessageId
     ? await db
         .select({ id: message.id, text: message.text, deliveryState: message.deliveryState })
         .from(message)
         .where(
           and(
-            eq(message.id, run.run.outputMessageId),
+            sql`(${message.id} = ${run.run.outputMessageId} or ${message.replyGroupId} = ${run.run.id})`,
             eq(message.conversationId, run.run.conversationId),
           ),
         )
+        .orderBy(asc(message.createdAt), asc(message.id))
     : []
   const attempts = await db
     .select({
@@ -525,7 +527,18 @@ export async function getAiDiagnostics(db: Database, input: Identity & { id: str
       : null,
     inputs,
     history: run?.run.contextMessageIds?.flatMap((id) => history.filter((m) => m.id === id)) ?? [],
-    output: output ?? null,
+    output: segments[0]
+      ? {
+          ...segments[0],
+          text: segments.map((part) => part.text ?? '').join(''),
+          deliveryState: segments.some((part) => part.deliveryState === 'FAILED')
+            ? 'FAILED'
+            : segments.every((part) => part.deliveryState === 'SENT')
+              ? 'SENT'
+              : 'PENDING',
+        }
+      : null,
+    segments,
     chunks,
     missingChunkIds: chunkIds.filter((id) => !chunks.some((c) => c.id === id)),
     attempts,
@@ -557,10 +570,14 @@ export async function aiOperationForMessage(db: Database, input: Identity & { me
     .select({ id: aiResponseRun.id })
     .from(aiResponseRun)
     .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
+    .innerJoin(
+      message,
+      and(eq(message.id, input.messageId), eq(message.conversationId, conversation.id)),
+    )
     .where(
       and(
         eq(conversation.workspaceId, input.workspaceId),
-        eq(aiResponseRun.outputMessageId, input.messageId),
+        sql`(${aiResponseRun.outputMessageId} = ${input.messageId} or ${aiResponseRun.id} = ${message.replyGroupId})`,
       ),
     )
     .limit(1)
@@ -613,15 +630,20 @@ export async function getAiAnalytics(
       ${input.versionId ? sql`and o.config_version_id = ${input.versionId}::uuid` : sql``}
     group by o.kind, o.state order by o.kind, o.state`)
   const replies = await db.execute(sql`
-    select m.type as sender, count(*)::integer as replies,
-      count(*) filter (where msg.delivery_state = 'SENT')::integer as sent,
-      count(*) filter (where msg.delivery_state = 'FAILED')::integer as failed
+    select sender, count(*)::integer as replies,
+      count(*) filter (where sent)::integer as sent,
+      count(*) filter (where failed)::integer as failed
+    from (
+    select m.type as sender, coalesce(msg.reply_group_id, msg.id) as reply_id,
+      bool_and(msg.delivery_state = 'SENT') as sent,
+      bool_or(msg.delivery_state = 'FAILED') as failed
     from message msg join conversation c on c.id = msg.conversation_id join member m on m.id = msg.sender_member_id
     where c.workspace_id = ${input.workspaceId} and msg.direction = 'OUTBOUND'
-      and msg.created_at >= ${input.from} and msg.created_at < ${input.to}
       ${input.memberId ? sql`and m.id = ${input.memberId}::uuid` : sql``}
-      ${input.versionId ? sql`and exists (select 1 from ai_response_run r where r.output_message_id = msg.id and r.config_version_id = ${input.versionId}::uuid)` : sql``}
-    group by m.type order by m.type`)
+      ${input.versionId ? sql`and exists (select 1 from ai_response_run r where (r.output_message_id = msg.id or r.id = msg.reply_group_id) and r.config_version_id = ${input.versionId}::uuid)` : sql``}
+    group by m.type, coalesce(msg.reply_group_id, msg.id)
+    having min(msg.created_at) >= ${input.from} and min(msg.created_at) < ${input.to}
+    ) logical_replies group by sender order by sender`)
   return {
     from: input.from,
     to: input.to,

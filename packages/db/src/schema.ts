@@ -658,6 +658,9 @@ export const message = pgTable(
     senderType: messageSenderType('sender_type').notNull(),
     senderMemberId: uuid('sender_member_id').references(() => member.id, { onDelete: 'set null' }),
     messageType: messageType('message_type').default('TEXT').notNull(),
+    replyGroupId: uuid('reply_group_id'),
+    replySegmentIndex: integer('reply_segment_index'),
+    replySegmentCount: integer('reply_segment_count'),
     clientKey: uuid('client_key'),
     text: text(),
     externalMessageId: text('external_message_id'),
@@ -671,6 +674,11 @@ export const message = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    check(
+      'message_reply_segments',
+      sql`(${table.replyGroupId} is null and ${table.replySegmentIndex} is null and ${table.replySegmentCount} is null) or (${table.replyGroupId} is not null and ${table.replySegmentIndex} is not null and ${table.replySegmentCount} is not null and ${table.replySegmentIndex} between 1 and ${table.replySegmentCount} and ${table.replySegmentCount} between 2 and 3 and ${table.direction} = 'OUTBOUND' and ${table.messageType} = 'TEXT')`,
+    ),
+    uniqueIndex('message_reply_segment_idx').on(table.replyGroupId, table.replySegmentIndex),
     index('message_conversation_created_idx').on(table.conversationId, table.createdAt, table.id),
     uniqueIndex('message_human_retry_idx').on(
       table.conversationId,
@@ -975,6 +983,7 @@ export const knowledgeBase = pgTable(
 )
 
 export type AiMemberRuntimeSnapshot = {
+  splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
   naturalToneEnabled?: boolean
@@ -1000,6 +1009,7 @@ export type AdvertisingContext = {
 }
 
 export const aiMemberConfig = pgTable('ai_member_config', {
+  splitRepliesEnabled: boolean('split_replies_enabled').default(false).notNull(),
   automaticLanguageEnabled: boolean('automatic_language_enabled').default(false).notNull(),
   timeZone: text('time_zone').default('UTC').notNull(),
   naturalToneEnabled: boolean('natural_tone_enabled').default(false).notNull(),
