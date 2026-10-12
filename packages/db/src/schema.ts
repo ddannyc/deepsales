@@ -1151,6 +1151,84 @@ export const aiTestSession = pgTable(
   ],
 )
 
+export const aiQuestionSet = pgTable(
+  'ai_question_set',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    questions: jsonb().$type<string[]>().notNull(),
+    revision: integer().default(1).notNull(),
+  },
+  (t) => [
+    index('ai_question_set_workspace_idx').on(t.workspaceId, t.memberId),
+    check('ai_question_set_size_valid', sql`jsonb_array_length(${t.questions}) between 1 and 100`),
+    check('ai_question_set_revision_valid', sql`${t.revision} > 0`),
+  ],
+)
+
+export const aiTestBatch = pgTable(
+  'ai_test_batch',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    questionSetId: uuid('question_set_id').references(() => aiQuestionSet.id, {
+      onDelete: 'set null',
+    }),
+    name: text().notNull(),
+    source: text().notNull(),
+    snapshot: jsonb().$type<AiMemberRuntimeSnapshot>().notNull(),
+    configVersionId: uuid('config_version_id').references(() => aiConfigVersion.id, {
+      onDelete: 'set null',
+    }),
+    cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('ai_test_batch_workspace_idx').on(t.workspaceId, t.memberId),
+    check('ai_test_batch_source_valid', sql`${t.source} in ('DRAFT', 'PUBLISHED', 'VERSION')`),
+  ],
+)
+
+export const aiTestBatchItem = pgTable(
+  'ai_test_batch_item',
+  {
+    id: uuid().primaryKey(),
+    batchId: uuid('batch_id')
+      .notNull()
+      .references(() => aiTestBatch.id, { onDelete: 'cascade' }),
+    position: integer().notNull(),
+    text: text().notNull(),
+    state: text().default('QUEUED').notNull(),
+    attempt: integer().default(0).notNull(),
+    claimedAt: timestamp('claimed_at', { withTimezone: true }),
+    retryAt: timestamp('retry_at', { withTimezone: true }),
+    failureCode: text('failure_code'),
+  },
+  (t) => [
+    uniqueIndex('ai_test_batch_item_position_unique').on(t.batchId, t.position),
+    uniqueIndex('ai_test_batch_item_running_unique')
+      .on(t.batchId)
+      .where(sql`${t.state} = 'RUNNING'`),
+    check('ai_test_batch_item_position_valid', sql`${t.position} between 0 and 99`),
+    check('ai_test_batch_item_attempt_valid', sql`${t.attempt} between 0 and 3`),
+    check(
+      'ai_test_batch_item_state_valid',
+      sql`${t.state} in ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'UNKNOWN', 'CANCELLED')`,
+    ),
+  ],
+)
+
 export const aiOperation = pgTable(
   'ai_operation',
   {

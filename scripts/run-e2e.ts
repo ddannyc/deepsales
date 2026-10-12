@@ -26,6 +26,7 @@ const e2eOwnerKeys = [
   'ai-handoff',
   'ai-bench',
   'ai-persona',
+  'ai-batch',
   'lifecycle',
   'facebook',
   'inbox',
@@ -418,6 +419,10 @@ async function startFakeAI() {
       return
     }
     const current = /<customer_messages>([\s\S]*?)<\/customer_messages>/.exec(content)?.[1] ?? ''
+    if (current.includes('What help can you offer?')) {
+      response.end(JSON.stringify({ choices: [{ message: { content: 'invalid JSON' } }] }))
+      return
+    }
     const history =
       /<conversation_history>([\s\S]*?)<\/conversation_history>/.exec(content)?.[1] ?? ''
     const options = current.includes('Compare Torch options')

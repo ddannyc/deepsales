@@ -1,3 +1,4 @@
+export * from './ai-batch-tests'
 export * from './ai-handoff-rules'
 export * from './ai-members'
 export * from './ai-operations'

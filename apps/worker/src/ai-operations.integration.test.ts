@@ -2,6 +2,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   aiOperation,
+  aiTestBatchItem,
   bootstrapWorkspace,
   channel,
   claimKnowledgeDocument,
@@ -60,6 +61,531 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('maintains question sets and freezes each batch before drafts or questions change', async () => {
+    const f = await fixture()
+    const setId = crypto.randomUUID()
+    const saved = await f.call(`/${f.aiId}/question-sets`, 'POST', {
+      id: setId,
+      name: 'Neutral checks',
+      questions: ['Hello.', 'Explain your role.'],
+    })
+    expect(saved.status).toBe(201)
+    const id = crypto.randomUUID()
+    expect(
+      (await f.call(`/${f.aiId}/batches`, 'POST', { id, questionSetId: setId, source: 'DRAFT' }))
+        .status,
+    ).toBe(201)
+    await f.configCall({ instructions: 'A newer draft.' })
+    await f.call(`/${f.aiId}/question-sets`, 'POST', {
+      id: setId,
+      revision: 1,
+      name: 'Changed',
+      questions: ['Changed question.'],
+    })
+    const result = (await (await f.call(`/${f.aiId}/batches/${id}`)).json()) as {
+      batch: unknown
+      items: unknown[]
+    }
+    expect(result.batch).toMatchObject({
+      id,
+      source: 'DRAFT',
+      snapshot: { instructions: 'Answer safely.' },
+    })
+    expect(result.items).toMatchObject([
+      { text: 'Hello.', state: 'QUEUED', charged: false },
+      { text: 'Explain your role.', state: 'QUEUED', charged: false },
+    ])
+    const other = await fixture()
+    expect((await other.call(`/${f.aiId}/batches/${id}`)).status).toBe(404)
+    const maximumSet = crypto.randomUUID(),
+      maximumBatch = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/question-sets`, 'POST', {
+          id: maximumSet,
+          name: 'Maximum batch',
+          questions: Array(100).fill('Hello.'),
+        })
+      ).status,
+    ).toBe(201)
+    expect(
+      (
+        await f.call(`/${f.aiId}/batches`, 'POST', {
+          id: maximumBatch,
+          questionSetId: maximumSet,
+          source: 'DRAFT',
+        })
+      ).status,
+    ).toBe(201)
+    const maximum = (await (await f.call(`/${f.aiId}/batches/${maximumBatch}`)).json()) as {
+      items: unknown[]
+    }
+    expect(maximum.items).toHaveLength(100)
+    expect(
+      (
+        await f.call(`/${f.aiId}/question-sets`, 'POST', {
+          id: crypto.randomUUID(),
+          name: 'Too many',
+          questions: Array(101).fill('Hello.'),
+        })
+      ).status,
+    ).toBe(400)
+  })
+  it('executes batch questions serially, deduplicates scheduling and protects the per-question budget', async () => {
+    const f = await fixture()
+    const setId = crypto.randomUUID(),
+      id = crypto.randomUUID()
+    await f.call(`/${f.aiId}/question-sets`, 'POST', {
+      id: setId,
+      name: 'Greetings',
+      questions: ['Hello.', 'Good morning.'],
+    })
+    await f.call(`/${f.aiId}/batches`, 'POST', { id, questionSetId: setId, source: 'DRAFT' })
+    const root = `/${f.aiId}/batches/${id}`
+    const batch = (await (await f.call(root)).json()) as { items: [{ id: string }, { id: string }] }
+    const [first, second] = batch.items
+    if (!first || !second) throw new Error('Missing batch questions')
+    await f.call('/budget', 'PATCH', { monthlyLimit: 1 })
+    let release: () => void = () => {},
+      started: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const received = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    const provider = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(init?.body)).toContain('Answer safely.')
+      started()
+      await gate
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Hello.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    const running = f.call(`${root}/execute`, 'POST', { itemId: first.id, attempt: 0 })
+    await received
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: second.id, attempt: 0 })).status,
+    ).toBe(409)
+    expect((await f.call(`${root}/execute`, 'POST', { itemId: first.id, attempt: 0 })).status).toBe(
+      409,
+    )
+    await f.configCall({ instructions: 'A later draft.' })
+    release()
+    expect((await running).status).toBe(200)
+    expect((await f.call(`${root}/execute`, 'POST', { itemId: first.id, attempt: 0 })).status).toBe(
+      200,
+    )
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: second.id, attempt: 0 })).status,
+    ).toBe(200)
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [
+        { state: 'COMPLETED', charged: true, output: { decision: { response: 'Hello.' } } },
+        { state: 'FAILED', charged: false, failureCode: 'QUOTA_EXHAUSTED' },
+      ],
+    })
+    expect(await (await f.call('/budget')).json()).toMatchObject({ used: 1, reserved: 0 })
+    expect(
+      await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+    ).toHaveLength(0)
+  })
+  it('cancels only unstarted questions and keeps late results attached to the original run', async () => {
+    const f = await fixture()
+    const setId = crypto.randomUUID(),
+      id = crypto.randomUUID(),
+      nextId = crypto.randomUUID()
+    await f.call(`/${f.aiId}/question-sets`, 'POST', {
+      id: setId,
+      name: 'Neutral checks',
+      questions: ['Hello.', 'Good morning.'],
+    })
+    await f.call(`/${f.aiId}/batches`, 'POST', { id, questionSetId: setId, source: 'DRAFT' })
+    const root = `/${f.aiId}/batches/${id}`
+    const { items } = (await (await f.call(root)).json()) as {
+      items: [{ id: string }, { id: string }]
+    }
+    let release: () => void = () => {},
+      started: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const received = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    vi.stubGlobal('fetch', async () => {
+      started()
+      await gate
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Hello.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    const executing = f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 0 })
+    await received
+    expect((await f.call(`${root}/cancel`, 'POST', {})).status).toBe(200)
+    await f.call(`/${f.aiId}/batches`, 'POST', {
+      id: nextId,
+      questionSetId: setId,
+      source: 'DRAFT',
+    })
+    release()
+    await executing
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [{ state: 'COMPLETED' }, { state: 'CANCELLED', charged: false }],
+    })
+    expect(await (await f.call(`/${f.aiId}/batches/${nextId}`)).json()).toMatchObject({
+      items: [
+        { state: 'QUEUED', charged: false },
+        { state: 'QUEUED', charged: false },
+      ],
+    })
+  })
+  it('recovers a failed question independently without charging again and pauses unknown results', async () => {
+    const f = await fixture()
+    const setId = crypto.randomUUID(),
+      id = crypto.randomUUID()
+    await f.call(`/${f.aiId}/question-sets`, 'POST', {
+      id: setId,
+      name: 'Retry checks',
+      questions: ['Hello.', 'Good morning.'],
+    })
+    await f.call(`/${f.aiId}/batches`, 'POST', { id, questionSetId: setId, source: 'DRAFT' })
+    const root = `/${f.aiId}/batches/${id}`
+    const { items } = (await (await f.call(root)).json()) as {
+      items: [{ id: string }, { id: string }]
+    }
+    let calls = 0
+    vi.stubGlobal('fetch', async () => {
+      calls++
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content:
+                calls === 1
+                  ? 'invalid JSON'
+                  : JSON.stringify({
+                      decision: 'ANSWER',
+                      response: 'Hello again.',
+                      handoffReason: null,
+                      containsBusinessFacts: false,
+                      usedChunkIds: [],
+                    }),
+            },
+          },
+        ],
+      })
+    })
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 0 })).status,
+    ).toBe(200)
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [
+        { state: 'FAILED', failureCode: 'INVALID_OUTPUT', attempt: 1, charged: true },
+        { state: 'QUEUED' },
+      ],
+    })
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 1 })).status,
+    ).toBe(409)
+    const [tag] = await db
+      .insert(customerTagDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Support review', level: 'CUSTOMER' })
+      .returning()
+    expect(
+      (
+        await f.call(`/${f.aiId}/handoff-rules`, 'POST', {
+          name: 'Review tagged requests',
+          enabled: true,
+          condition: { kind: 'TAG', tagId: tag.id },
+        })
+      ).status,
+    ).toBe(201)
+    await db
+      .update(aiTestBatchItem)
+      .set({ retryAt: new Date(0) })
+      .where(eq(aiTestBatchItem.id, items[0].id))
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 1 })).status,
+    ).toBe(200)
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 1 })).status,
+    ).toBe(200)
+    expect(calls).toBe(2)
+    expect(await (await f.call('/budget')).json()).toMatchObject({ used: 1, reserved: 0 })
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('Connection lost')
+    })
+    await f.call(`${root}/execute`, 'POST', { itemId: items[1].id, attempt: 0 })
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [
+        { state: 'COMPLETED' },
+        { state: 'UNKNOWN', charged: true, failureCode: 'OPERATION_PAUSED' },
+      ],
+    })
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[1].id, attempt: 1 })).status,
+    ).toBe(409)
+  })
+  it('restores an interrupted batch from durable provider results and prevents unauthorized completion', async () => {
+    const f = await fixture()
+    const setId = crypto.randomUUID(),
+      id = crypto.randomUUID()
+    await f.call(`/${f.aiId}/question-sets`, 'POST', {
+      id: setId,
+      name: 'Recovery',
+      questions: ['Hello.', 'Good morning.'],
+    })
+    await f.call(`/${f.aiId}/batches`, 'POST', { id, questionSetId: setId, source: 'DRAFT' })
+    const root = `/${f.aiId}/batches/${id}`
+    const { items } = (await (await f.call(root)).json()) as {
+      items: [{ id: string }, { id: string }]
+    }
+    const provider = vi.fn(async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Hello.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', provider)
+    await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 0 })
+    // Simulate a process stopping after its successful provider response was persisted.
+    await db
+      .update(aiOperation)
+      .set({
+        state: 'STARTED',
+        output: { handoffContext: { rules: [], facts: { properties: [], tags: [] } } },
+      })
+      .where(eq(aiOperation.id, items[0].id))
+    await db
+      .update(aiTestBatchItem)
+      .set({ state: 'RUNNING', claimedAt: new Date(0) })
+      .where(eq(aiTestBatchItem.id, items[0].id))
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 1 })).status,
+    ).toBe(200)
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [{ state: 'COMPLETED', attempt: 1, charged: true }, { state: 'QUEUED' }],
+    })
+    vi.stubGlobal('fetch', async () => {
+      await db
+        .update(workspaceUserAccess)
+        .set({ role: 'AGENT' })
+        .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Private answer.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[1].id, attempt: 0 })).status,
+    ).toBe(403)
+    expect((await f.call(`/${f.aiId}/question-sets`)).status).toBe(403)
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'OWNER' })
+      .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [
+        { state: 'COMPLETED' },
+        {
+          state: 'FAILED',
+          failureCode: 'FORBIDDEN',
+          output: { handoffContext: { facts: { properties: [], tags: [] } } },
+        },
+      ],
+    })
+    const other = await fixture()
+    expect(
+      (
+        await other.call(`/${other.aiId}/batches/${id}/execute`, 'POST', {
+          itemId: items[0].id,
+          attempt: 1,
+        })
+      ).status,
+    ).toBe(404)
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [{ state: 'COMPLETED' }, { state: 'FAILED' }],
+    })
+  })
+  it('regenerates invalid retrieval on a failed-question retry while retaining one logical charge', async () => {
+    const f = await fixture()
+    const doc = await createInlineKnowledgeDocument(db, {
+      workspaceId: f.workspaceId,
+      knowledgeBaseId: f.baseId,
+      createdByUserId: f.userId,
+      name: 'Shipping',
+      text: 'Shipping is free.',
+    })
+    const claim = await claimKnowledgeDocument(db, { documentId: doc.id })
+    if (!claim) throw new Error('No document claim')
+    await completeKnowledgeDocument(db, {
+      documentId: doc.id,
+      processingStartedAt: claim.processingStartedAt,
+      workspaceId: f.workspaceId,
+      knowledgeBaseId: f.baseId,
+      contentSha256: 'f'.repeat(64),
+      embeddingMetadata: { provider: 'alibaba', model: 'qwen3.7-text-embedding', dimensions: 1536 },
+      chunks: [
+        {
+          text: 'Shipping is free.',
+          embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
+        },
+      ],
+    })
+    const setId = crypto.randomUUID(),
+      id = crypto.randomUUID()
+    await f.call(`/${f.aiId}/question-sets`, 'POST', {
+      id: setId,
+      name: 'Retrieval',
+      questions: ['How is shipping handled?'],
+    })
+    await f.call(`/${f.aiId}/batches`, 'POST', { id, questionSetId: setId, source: 'DRAFT' })
+    const root = `/${f.aiId}/batches/${id}`
+    const { items } = (await (await f.call(root)).json()) as { items: [{ id: string }] }
+    let embeddings = 0
+    vi.stubGlobal('fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).endsWith('/embeddings')) {
+        embeddings++
+        return Response.json({
+          data: [
+            {
+              index: 0,
+              embedding:
+                embeddings === 1 ? [1] : Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
+            },
+          ],
+        })
+      }
+      const chunkId = /knowledge_chunk id=\\"([^\\]+)\\"/.exec(String(init?.body))?.[1]
+      if (!chunkId) throw new Error('No retrieved chunk')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Shipping is free.',
+                handoffReason: null,
+                containsBusinessFacts: true,
+                usedChunkIds: [chunkId],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 0 })
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [{ state: 'FAILED', charged: true }],
+    })
+    await db
+      .update(aiTestBatchItem)
+      .set({ retryAt: new Date(0) })
+      .where(eq(aiTestBatchItem.id, items[0].id))
+    await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 1 })
+    expect(embeddings).toBe(2)
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [
+        {
+          state: 'COMPLETED',
+          charged: true,
+          output: { decision: { response: 'Shipping is free.' } },
+          chunkIds: [expect.any(String)],
+        },
+      ],
+    })
+    expect(await (await f.call('/budget')).json()).toMatchObject({ used: 1, reserved: 0 })
+  })
+  it('honors provider retry-after and blocks every remaining question when a result is unknown', async () => {
+    const f = await fixture()
+    const setId = crypto.randomUUID(),
+      id = crypto.randomUUID()
+    await f.call(`/${f.aiId}/question-sets`, 'POST', {
+      id: setId,
+      name: 'Pause checks',
+      questions: ['Hello.', 'Good morning.'],
+    })
+    await f.call(`/${f.aiId}/batches`, 'POST', { id, questionSetId: setId, source: 'DRAFT' })
+    const root = `/${f.aiId}/batches/${id}`
+    const { items } = (await (await f.call(root)).json()) as {
+      items: [{ id: string }, { id: string }]
+    }
+    vi.stubGlobal(
+      'fetch',
+      async () => new Response(null, { status: 429, headers: { 'retry-after': '600' } }),
+    )
+    const before = Date.now()
+    await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 0 })
+    const data = (await (await f.call(root)).json()) as { items: [{ retryAt: string }] }
+    expect(new Date(data.items[0].retryAt).getTime()).toBeGreaterThanOrEqual(before + 600000)
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 1 })).status,
+    ).toBe(409)
+    vi.stubGlobal('fetch', async () => {
+      throw new Error('Connection lost')
+    })
+    await f.call(`${root}/execute`, 'POST', { itemId: items[1].id, attempt: 0 })
+    await db
+      .update(aiTestBatchItem)
+      .set({ retryAt: new Date(0) })
+      .where(eq(aiTestBatchItem.id, items[0].id))
+    expect(
+      (await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 1 })).status,
+    ).toBe(409)
+    expect(await (await f.call(root)).json()).toMatchObject({
+      items: [{ state: 'FAILED' }, { state: 'UNKNOWN' }],
+    })
+  })
   it('shows missing setup resources without changing a saved draft and checks workspace access', async () => {
     const f = await fixture()
     const setup = await f.call(`/${f.aiId}/setup`)

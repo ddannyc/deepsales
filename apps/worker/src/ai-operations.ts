@@ -1,17 +1,20 @@
 import {
-  type AiHandoffCondition,
   AiMemberError,
-  type AiTestContext,
   AiUsageError,
   addAiFeedback,
   aiOperationForMessage,
+  cancelAiTestBatch,
+  claimAiTestBatchItem,
   clearAiTestSession,
   completePersonaOperation,
   createAiTest,
+  createAiTestBatch,
   createAiTestSession,
   createPersonaOperation,
   type Database,
   deleteAiHandoffRule,
+  deleteAiQuestionSet,
+  failAiBatchItem,
   finishAiOperation,
   getAiAnalytics,
   getAiBudget,
@@ -21,12 +24,16 @@ import {
   listAiConfigVersions,
   listAiDiagnostics,
   listAiHandoffRules,
-  matchesAiCondition,
+  listAiQuestionSets,
+  listAiTestBatches,
+  readAiTestBatch,
   readAiTestSession,
+  recordAiBatchResult,
   recordAiTestResult,
   restoreAiConfigVersion,
   saveAiBudget,
   saveAiHandoffRule,
+  saveAiQuestionSet,
 } from '@deepsales/db'
 import { Hono } from 'hono'
 import { z } from 'zod'
@@ -35,18 +42,13 @@ import {
   AIOutputError,
   AIProviderError,
   aiHandoffConditionSchema,
-  aiMemberRuntimeSnapshotSchema,
-  applyHandoffPolicy,
-  createAlibabaEmbeddingProvider,
   createAlibabaLlmProvider,
-  enforceGrounding,
   isLlmProviderConfigurationUsable,
-  matchedHandoffRuleId,
 } from './ai'
+import { executeAiTest } from './ai-test'
 import { meteredAiFetch } from './ai-usage'
 import { createAuth } from './auth'
 import type { Bindings } from './bindings'
-import { retrieveKnowledgeChunks } from './knowledge'
 
 export function aiOperationsRoutes(
   withDb: <T>(env: Bindings, work: (db: Database) => Promise<T>) => Promise<T>,
@@ -103,6 +105,101 @@ export function aiOperationsRoutes(
           )
         if (!uuid.safeParse(resource).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
+        if (action === 'question-sets') {
+          if (c.req.method === 'GET')
+            return c.json({ sets: await listAiQuestionSets(db, memberInput) })
+          if (c.req.method === 'DELETE') {
+            const input = z
+              .object({ id: uuid, revision: z.number().int().positive() })
+              .strict()
+              .parse(body)
+            await deleteAiQuestionSet(db, { ...memberInput, ...input })
+            return c.json({ ok: true })
+          }
+          if (c.req.method === 'POST') {
+            const input = z
+              .object({
+                id: uuid,
+                name: z.string().trim().min(1).max(100),
+                questions: z.array(z.string().trim().min(1).max(8000)).min(1).max(100),
+                revision: z.number().int().positive().optional(),
+              })
+              .strict()
+              .parse(body)
+            return c.json({ set: await saveAiQuestionSet(db, { ...memberInput, ...input }) }, 201)
+          }
+        }
+        if (action === 'batches') {
+          if (c.req.method === 'POST' && segments[3] === 'cancel') {
+            await cancelAiTestBatch(db, { ...memberInput, id: uuid.parse(segments[2]) })
+            return c.json(
+              await readAiTestBatch(db, { ...memberInput, id: uuid.parse(segments[2]) }),
+            )
+          }
+          if (c.req.method === 'POST' && segments[3] === 'execute') {
+            const limit = await c.env.AUTH_RATE_LIMITER.limit({ key: `ai-test:${session.user.id}` })
+            if (!limit.success) return c.json({ error: { code: 'RATE_LIMITED' } }, 429)
+            const input = z
+              .object({ itemId: uuid, attempt: z.number().int().min(0).max(3) })
+              .strict()
+              .parse(body)
+            const batchInput = { ...memberInput, id: uuid.parse(segments[2]), ...input }
+            let attempt = input.attempt
+            let started = false
+            try {
+              const claimed = await claimAiTestBatchItem(db, batchInput)
+              if (claimed) {
+                started = true
+                attempt = claimed.attempt
+                await executeAiTest(
+                  db,
+                  c.env,
+                  withDb,
+                  claimed.operation,
+                  (result) => recordAiBatchResult(db, { ...batchInput, attempt }, result),
+                  `BATCH:${attempt}`,
+                )
+              }
+            } catch (error) {
+              if (!started && !(error instanceof AiUsageError && error.code === 'QUOTA_EXHAUSTED'))
+                throw error
+              const code =
+                error instanceof AiUsageError || error instanceof AiMemberError
+                  ? error.code
+                  : error instanceof AIOutputError
+                    ? 'INVALID_OUTPUT'
+                    : 'AI_PROVIDER_ERROR'
+              if (started)
+                await finishAiOperation(db, {
+                  operationId: input.itemId,
+                  state: 'FAILED',
+                  failureCode: code,
+                })
+              await failAiBatchItem(db, { ...batchInput, attempt, code })
+              if (error instanceof AiMemberError && ['FORBIDDEN', 'NOT_FOUND'].includes(error.code))
+                throw error
+            }
+            return c.json(await readAiTestBatch(db, batchInput))
+          }
+          if (c.req.method === 'GET')
+            return c.json(
+              segments[2]
+                ? await readAiTestBatch(db, { ...memberInput, id: uuid.parse(segments[2]) })
+                : { batches: await listAiTestBatches(db, memberInput) },
+            )
+          if (c.req.method === 'POST' && !segments[2]) {
+            const input = z
+              .object({
+                id: uuid,
+                questionSetId: uuid,
+                source: z.enum(['DRAFT', 'PUBLISHED', 'VERSION']),
+                versionId: uuid.optional(),
+              })
+              .strict()
+              .parse(body)
+            return c.json({ batch: await createAiTestBatch(db, { ...memberInput, ...input }) }, 201)
+          }
+        }
         if (action === 'setup' && c.req.method === 'GET')
           return c.json({
             ...(await getAiSetupStatus(db, memberInput)),
@@ -346,175 +443,9 @@ export function aiOperationsRoutes(
           if (!test.created)
             return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
           try {
-            const snapshot = aiMemberRuntimeSnapshotSchema.parse(test.operation.snapshot)
-            const testContext = (test.operation.output as { testContext?: AiTestContext } | null)
-              ?.testContext
-            const history = (testContext?.history ?? []).map((item) => ({
-              ...item,
-              createdAt: new Date(item.createdAt),
-            }))
-            const context = (
-              test.operation.output as {
-                handoffContext: {
-                  rules: { id: string; revision: number; condition: AiHandoffCondition }[]
-                  facts: {
-                    properties: { definitionId: string; value: string | number }[]
-                    tags: string[]
-                  }
-                }
-              }
-            ).handoffContext
-            const facts = {
-              properties: context.facts.properties.map((p) => ({
-                id: p.definitionId,
-                value: p.value,
-              })),
-              tags: context.facts.tags.map((id) => ({ id })),
-              replies: 0,
-            }
-            const deterministic = context.rules.find(
-              (r) => r.condition.kind !== 'SEMANTIC' && matchesAiCondition(r.condition, facts),
+            await executeAiTest(db, c.env, withDb, test.operation, (result) =>
+              recordAiTestResult(db, result),
             )
-            if (deterministic) {
-              await recordAiTestResult(db, {
-                id: input.id,
-                chunkIds: [],
-                output: {
-                  kind: 'HANDOFF',
-                  decision: {
-                    decision: 'HANDOFF',
-                    handoffReason: 'KEYWORD',
-                    handoffRuleId: deterministic.id,
-                    response: '模拟转人工；不会分配或发送。',
-                  },
-                  handoffContext: context,
-                },
-              })
-              return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
-            }
-            const fetcher = meteredAiFetch((work) => withDb(c.env, work), {
-              id: input.id,
-              workspaceId,
-              memberId: uuid.parse(resource),
-              kind: 'TEST',
-              configVersionId: test.operation.configVersionId,
-            })
-            const embedding = createAlibabaEmbeddingProvider(
-              {
-                provider: c.env.EMBEDDING_PROVIDER,
-                apiKey: c.env.AI_API_KEY,
-                baseUrl: c.env.AI_BASE_URL,
-                model: c.env.EMBEDDING_MODEL,
-                dimensions: c.env.EMBEDDING_DIMENSIONS,
-              },
-              fetcher,
-            )
-            const semanticRules = context.rules.flatMap((r) =>
-              r.condition.kind === 'SEMANTIC' ? [{ id: r.id, text: r.condition.text }] : [],
-            )
-            if (semanticRules.length) {
-              const classifier = createAlibabaLlmProvider(
-                {
-                  provider: c.env.LLM_PROVIDER,
-                  apiKey: c.env.AI_API_KEY,
-                  baseUrl: c.env.AI_BASE_URL,
-                  model: c.env.LLM_MODEL,
-                },
-                meteredAiFetch(
-                  (work) => withDb(c.env, work),
-                  {
-                    id: input.id,
-                    workspaceId,
-                    memberId: uuid.parse(resource),
-                    kind: 'TEST',
-                    configVersionId: test.operation.configVersionId,
-                  },
-                  'CUSTOM_HANDOFF:TEST',
-                ),
-              )
-              const decision = await classifier.generateResponse({
-                instructions:
-                  'Only classify the listed handoff conditions. If none matches return ANSWER with response "No condition matched.". Do not answer questions or hand off for other reasons.',
-                responseLanguage: snapshot.responseLanguage,
-                timeZone: snapshot.timeZone,
-                messages: [{ id: input.id, text: input.text }],
-                history,
-                simulatedCustomer: testContext?.customer,
-                knowledgeChunks: [],
-                handoffRules: semanticRules,
-              })
-              if (matchedHandoffRuleId(decision, semanticRules)) {
-                await recordAiTestResult(db, {
-                  id: input.id,
-                  chunkIds: [],
-                  output: {
-                    kind: 'HANDOFF',
-                    decision: { ...decision, response: '模拟转人工；不会分配或发送。' },
-                    handoffContext: context,
-                  },
-                })
-                return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
-              }
-            }
-            let chunks: Awaited<ReturnType<typeof retrieveKnowledgeChunks>> = []
-            try {
-              chunks = await retrieveKnowledgeChunks(db, embedding, c.env, {
-                workspaceId,
-                knowledgeBaseId: snapshot.knowledgeBaseId,
-                query: input.text,
-              })
-            } catch (error) {
-              if (
-                !(
-                  error instanceof KnowledgeError &&
-                  ['NOT_FOUND', 'INVALID_REQUEST'].includes(error.code)
-                )
-              )
-                throw error
-            }
-            const llm = createAlibabaLlmProvider(
-              {
-                provider: c.env.LLM_PROVIDER,
-                apiKey: c.env.AI_API_KEY,
-                baseUrl: c.env.AI_BASE_URL,
-                model: c.env.LLM_MODEL,
-              },
-              fetcher,
-            )
-            const decision = await llm.generateResponse({
-              automaticLanguageEnabled: snapshot.automaticLanguageEnabled,
-              timeZone: snapshot.timeZone,
-              naturalToneEnabled: snapshot.naturalToneEnabled,
-              instructions: snapshot.instructions,
-              responseLanguage: snapshot.responseLanguage,
-              messages: [{ id: input.id, text: input.text }],
-              history,
-              simulatedCustomer: testContext?.customer,
-              establishedLanguage: snapshot.automaticLanguageEnabled
-                ? testContext?.customer.language || undefined
-                : undefined,
-              knowledgeChunks: chunks,
-            })
-            const replyConfig = {
-              ...snapshot,
-              responseLanguage: snapshot.automaticLanguageEnabled
-                ? (decision.languageSelection?.language ?? snapshot.responseLanguage)
-                : snapshot.responseLanguage,
-            }
-            const result = applyHandoffPolicy(
-              enforceGrounding(
-                decision,
-                chunks.map(({ id }) => id),
-                replyConfig,
-                chunks,
-              ).decision,
-              replyConfig,
-            )
-            await recordAiTestResult(db, {
-              id: input.id,
-              output: { ...result, handoffContext: context },
-              chunkIds: chunks.map(({ id }) => id),
-            })
           } catch (error) {
             await finishAiOperation(db, {
               operationId: input.id,

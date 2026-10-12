@@ -1,21 +1,23 @@
 import {
   AiUsageError,
-  reserveAiOperation,
   beginAiProviderAttempt,
+  type Database,
   finishAiProviderAttempt,
   getAiProviderResponse,
-  type Database,
+  reserveAiOperation,
 } from '@deepsales/db'
 
 // One logical charge includes retrieval and generation; embedding batches remain separate attempts.
 export function meteredAiFetch(
   withDb: <T>(work: (db: Database) => Promise<T>) => Promise<T>,
   operation: Parameters<typeof reserveAiOperation>[1],
-  llmStage: 'LLM' | 'STOP_HANDOFF' | `CUSTOM_HANDOFF:${string}` = 'LLM',
+  llmStage: string = 'LLM',
 ) {
   let embeddingBatch = 0
   return async (url: RequestInfo | URL, init?: RequestInit) => {
-    const stage = String(url).endsWith('/embeddings') ? `EMBEDDING:${embeddingBatch++}` : llmStage
+    const stage = String(url).endsWith('/embeddings')
+      ? `${llmStage.startsWith('BATCH:') ? `${llmStage}:` : ''}EMBEDDING:${embeddingBatch++}`
+      : llmStage
     await withDb((db) => reserveAiOperation(db, operation))
     const cached = await withDb((db) => getAiProviderResponse(db, operation.id, stage))
     if (cached) return Response.json(cached.response)

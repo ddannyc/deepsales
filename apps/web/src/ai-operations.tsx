@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { AiBatchTests } from './ai-batch-tests'
 import type { HandoffRule } from './ai-handoff-settings'
 import { AiTestBench } from './ai-test-bench'
 import { Button } from './components/ui/button'
@@ -254,6 +255,17 @@ export function AiOperations({
       )}
       {status && <p role="status">{status}</p>}
       {loading && <p role="status">正在加载运营记录…</p>}
+      <AiBatchTests
+        key={`batch-${memberId}`}
+        workspaceId={workspaceId}
+        memberId={memberId}
+        versions={versions}
+        request={api}
+        onInspect={(id) =>
+          void act(async () => setDiagnostics(await api<Diagnostics>(`${root}/${id}/diagnostics`)))
+        }
+        onUpdated={load}
+      />
       <section className="runtime-section">
         <h3>发布历史</h3>
         {!loading && !versions.length && <p className="table-muted">尚无发布版本。</p>}

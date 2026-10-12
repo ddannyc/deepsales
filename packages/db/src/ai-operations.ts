@@ -387,7 +387,10 @@ const customerKey = (value: AiTestCustomer) =>
     [...value.tags].sort(),
   ])
 
-async function resolveTestConfiguration(db: Database | Transaction, input: TestConfiguration) {
+export async function resolveTestConfiguration(
+  db: Database | Transaction,
+  input: TestConfiguration,
+) {
   const config = await getAiMemberConfig(db, input)
   let snapshot: AiMemberRuntimeSnapshot | null = null
   let versionId: string | null = null
@@ -599,7 +602,7 @@ export async function clearAiTestSession(
 }
 
 export async function createAiTest(
-  db: Database,
+  db: Database | Transaction,
   input: TestConfiguration & {
     id: string
     text: string
@@ -609,10 +612,12 @@ export async function createAiTest(
       properties: { definitionId: string; value: string | number }[]
       tags: string[]
     }
+    frozenConfiguration?: { snapshot: AiMemberRuntimeSnapshot; versionId: string | null }
   },
 ) {
   return db.transaction(async (tx) => {
     await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
+    if (input.frozenConfiguration) await getAiMemberConfig(tx, input)
     const session = input.sessionId
       ? await lockTestSession(tx, { ...input, sessionId: input.sessionId })
       : null
@@ -626,7 +631,7 @@ export async function createAiTest(
       throw new AiMemberError('INVALID_REQUEST')
     const { snapshot, versionId } = session
       ? { snapshot: session.snapshot, versionId: session.configVersionId }
-      : await resolveTestConfiguration(tx, input)
+      : (input.frozenConfiguration ?? (await resolveTestConfiguration(tx, input)))
     if (!input.text.trim() || Array.from(input.text).length > 8_000)
       throw new AiMemberError('INVALID_REQUEST')
     const facts = session?.customer ?? input.simulatedHandoffFacts ?? { properties: [], tags: [] }
@@ -730,7 +735,7 @@ export async function createAiTest(
 }
 
 export async function recordAiTestResult(
-  db: Database,
+  db: Database | Transaction,
   input: { id: string; output: unknown; chunkIds: string[] },
 ) {
   await db.transaction(async (tx) => {
