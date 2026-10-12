@@ -1178,7 +1178,7 @@ export const aiOperation = pgTable(
     index('ai_operation_workspace_period_idx').on(table.workspaceId, table.period),
     check(
       'ai_operation_kind_valid',
-      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION', 'SUGGESTION')`,
+      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION', 'SUGGESTION', 'PERSONA')`,
     ),
     check(
       'ai_operation_state_valid',

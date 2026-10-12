@@ -108,6 +108,7 @@ const labels: Record<string, string> = {
   KNOWLEDGE_INDEX: '知识索引',
   TRANSLATION: '人工翻译',
   SUGGESTION: '回复建议',
+  PERSONA: '人设草稿',
   HUMAN: '人工',
   AI: 'AI',
   KNOWLEDGE: '知识问题',
@@ -279,7 +280,7 @@ export function AiOperations({
         <h3>工作区用量限额</h3>
         <p>
           自然月 UTC · 每个逻辑操作计 1
-          次。真实回复（含检索）、隔离测试、知识索引、人工翻译和回复建议分别计数。已发起调用即计费，服务失败仍计
+          次。真实回复（含检索）、隔离测试、知识索引、人工翻译、回复建议和人设草稿分别计数。已发起调用即计费，服务失败仍计
           1 次，重试不重复扣应用额度。
         </p>
         {budget && (

@@ -85,6 +85,7 @@ import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 import { AiHandoffSettings } from './ai-handoff-settings'
 import { AiOperations } from './ai-operations'
+import { AiSetupGuide } from './ai-setup-guide'
 import { type AiStopRules, AiStopSettings, emptyStopRules } from './ai-stop-settings'
 import { CustomerSidebar } from './customer-sidebar'
 import { DemoPage } from './demo'
@@ -4165,6 +4166,21 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
         <Badge variant="outline">{draftStateLabel}</Badge>
       </div>
 
+      <AiSetupGuide
+        key={memberId}
+        workspaceId={workspace.id}
+        memberId={memberId}
+        instructions={draft.instructions}
+        responseLanguage={draft.responseLanguage}
+        knowledgeBaseId={draft.knowledgeBaseId}
+        draftDirty={draftDirty}
+        disabled={busy}
+        onApply={(source, instructions) =>
+          setDraft((current) =>
+            current?.instructions === source ? { ...current, instructions } : current,
+          )
+        }
+      />
       <div className="ai-member-layout">
         <form className="ai-config-form" onSubmit={save}>
           <section aria-labelledby="ai-draft-title" className="ai-config-section">

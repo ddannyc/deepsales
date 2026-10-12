@@ -6,14 +6,17 @@ import {
   addAiFeedback,
   aiOperationForMessage,
   clearAiTestSession,
+  completePersonaOperation,
   createAiTest,
   createAiTestSession,
+  createPersonaOperation,
   type Database,
   deleteAiHandoffRule,
   finishAiOperation,
   getAiAnalytics,
   getAiBudget,
   getAiDiagnostics,
+  getAiSetupStatus,
   KnowledgeError,
   listAiConfigVersions,
   listAiDiagnostics,
@@ -28,13 +31,16 @@ import {
 import { Hono } from 'hono'
 import { z } from 'zod'
 import {
+  AI_PERSONA_SAFETY_SUFFIX,
   AIOutputError,
+  AIProviderError,
   aiHandoffConditionSchema,
   aiMemberRuntimeSnapshotSchema,
   applyHandoffPolicy,
   createAlibabaEmbeddingProvider,
   createAlibabaLlmProvider,
   enforceGrounding,
+  isLlmProviderConfigurationUsable,
   matchedHandoffRuleId,
 } from './ai'
 import { meteredAiFetch } from './ai-usage'
@@ -97,6 +103,104 @@ export function aiOperationsRoutes(
           )
         if (!uuid.safeParse(resource).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
+        if (action === 'setup' && c.req.method === 'GET')
+          return c.json({
+            ...(await getAiSetupStatus(db, memberInput)),
+            providerReady: isLlmProviderConfigurationUsable({
+              apiKey: c.env.AI_API_KEY,
+              baseUrl: c.env.AI_BASE_URL,
+              provider: c.env.LLM_PROVIDER,
+              model: c.env.LLM_MODEL,
+            }),
+          })
+        if (action === 'persona' && c.req.method === 'POST') {
+          const limit = await c.env.AUTH_RATE_LIMITER.limit({
+            key: `ai-persona:${session.user.id}`,
+          })
+          if (!limit.success) return c.json({ error: { code: 'RATE_LIMITED' } }, 429)
+          const input = z
+            .object({
+              id: uuid,
+              mode: z.enum(['GENERATE', 'OPTIMIZE']),
+              brief: z.string().trim().min(1).max(2000),
+              sourceInstructions: z.string().max(20000),
+            })
+            .strict()
+            .parse(body)
+          const operation = await createPersonaOperation(db, { ...memberInput, ...input })
+          if (operation.state === 'COMPLETED')
+            return c.json({
+              candidate: {
+                id: operation.id,
+                sourceInstructions: input.sourceInstructions,
+                instructions: (operation.output as { instructions: string }).instructions,
+              },
+            })
+          if (operation.state === 'FAILED' || operation.state === 'CANCELLED')
+            return c.json({ error: { code: 'PERSONA_UNAVAILABLE' } }, 502)
+          try {
+            const llm = createAlibabaLlmProvider(
+              {
+                provider: c.env.LLM_PROVIDER,
+                apiKey: c.env.AI_API_KEY,
+                baseUrl: c.env.AI_BASE_URL,
+                model: c.env.LLM_MODEL,
+              },
+              meteredAiFetch((work) => withDb(c.env, work), {
+                id: operation.id,
+                workspaceId,
+                memberId: memberInput.memberId,
+                kind: 'PERSONA',
+                text: operation.input ?? undefined,
+              }),
+            )
+            const decision = await llm.generateResponse({
+              purpose: 'PERSONA',
+              instructions: '',
+              responseLanguage: 'Chinese',
+              messages: [
+                {
+                  id: operation.id,
+                  text: JSON.stringify({
+                    mode: input.mode,
+                    brief: input.brief,
+                    sourceInstructions: input.sourceInstructions,
+                  }),
+                },
+              ],
+              history: [],
+              knowledgeChunks: [],
+            })
+            if (
+              decision.decision !== 'ANSWER' ||
+              decision.containsBusinessFacts ||
+              decision.usedChunkIds.length ||
+              decision.mediaAssetId ||
+              decision.handoffRuleId ||
+              decision.languageSelection
+            )
+              throw new AIOutputError()
+            const instructions = `${decision.response}${AI_PERSONA_SAFETY_SUFFIX}`
+            return c.json({
+              candidate: await completePersonaOperation(db, {
+                ...memberInput,
+                id: operation.id,
+                instructions,
+              }),
+            })
+          } catch (error) {
+            if (error instanceof AiUsageError)
+              return c.json({ error: { code: error.code, retryAfterMs: error.retryAfterMs } }, 409)
+            if (!(error instanceof AIProviderError && error.retryable))
+              await finishAiOperation(db, {
+                operationId: operation.id,
+                state: 'FAILED',
+                failureCode: error instanceof AIOutputError ? 'INVALID_OUTPUT' : 'PERSONA_FAILED',
+              })
+            if (error instanceof AiMemberError) throw error
+            return c.json({ error: { code: 'PERSONA_UNAVAILABLE' } }, 502)
+          }
+        }
         if (action === 'sessions') {
           const sessionId = segments[2]
           if (c.req.method === 'POST' && !sessionId) {

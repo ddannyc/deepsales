@@ -1,0 +1,2 @@
+ALTER TABLE "ai_operation" DROP CONSTRAINT "ai_operation_kind_valid";--> statement-breakpoint
+ALTER TABLE "ai_operation" ADD CONSTRAINT "ai_operation_kind_valid" CHECK ("ai_operation"."kind" in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION', 'SUGGESTION', 'PERSONA'));

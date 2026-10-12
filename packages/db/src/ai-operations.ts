@@ -102,7 +102,7 @@ export async function reserveAiOperation(
   input: {
     id: string
     workspaceId: string
-    kind: 'LIVE_REPLY' | 'TEST' | 'KNOWLEDGE_INDEX' | 'TRANSLATION' | 'SUGGESTION'
+    kind: 'LIVE_REPLY' | 'TEST' | 'KNOWLEDGE_INDEX' | 'TRANSLATION' | 'SUGGESTION' | 'PERSONA'
     memberId?: string
     configVersionId?: string | null
     now?: Date

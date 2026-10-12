@@ -209,7 +209,7 @@ export function AiTestBench({
   }
   const frozen = busy || clearing || loading || Boolean(session)
   return (
-    <section className="runtime-section" aria-label="多轮测试台">
+    <section id={`ai-test-bench-${memberId}`} className="runtime-section" aria-label="多轮测试台">
       <h3>多轮测试台</h3>
       <p className="table-muted">
         模拟资料仅用于隔离测试，不创建真实客户、会话、分配或外发。每次生成计入用量。清空会取消旧运行并重置模拟记忆；已发生的调用仍计费。

@@ -60,6 +60,218 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('shows missing setup resources without changing a saved draft and checks workspace access', async () => {
+    const f = await fixture()
+    const setup = await f.call(`/${f.aiId}/setup`)
+    expect(await setup.json()).toMatchObject({
+      memberActive: true,
+      providerReady: true,
+      knowledgeBaseId: f.baseId,
+      readyDocuments: 0,
+      channels: [],
+    })
+    const doc = await createInlineKnowledgeDocument(db, {
+      workspaceId: f.workspaceId,
+      knowledgeBaseId: f.baseId,
+      createdByUserId: f.userId,
+      name: 'Greeting',
+      text: 'Welcome.',
+    })
+    const claim = await claimKnowledgeDocument(db, { documentId: doc.id })
+    if (!claim) throw new Error('No document claim')
+    await completeKnowledgeDocument(db, {
+      documentId: doc.id,
+      processingStartedAt: claim.processingStartedAt,
+      workspaceId: f.workspaceId,
+      knowledgeBaseId: f.baseId,
+      contentSha256: 'd'.repeat(64),
+      embeddingMetadata: { provider: 'alibaba', model: 'qwen3.7-text-embedding', dimensions: 1536 },
+      chunks: [
+        { text: 'Welcome.', embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)) },
+      ],
+    })
+    const [accessChannel] = await db
+      .insert(channel)
+      .values({
+        workspaceId: f.workspaceId,
+        provider: 'FACEBOOK_MESSENGER',
+        displayName: 'Support',
+      })
+      .returning()
+    await setMemberChannelAccess(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiId,
+      actingUserId: f.userId,
+      channelIds: [accessChannel.id],
+    })
+    expect(await (await f.call(`/${f.aiId}/setup`)).json()).toMatchObject({
+      readyDocuments: 1,
+      channels: [{ id: accessChannel.id, name: 'Support' }],
+    })
+    await db.update(channel).set({ status: 'DISABLED' }).where(eq(channel.id, accessChannel.id))
+    expect(await (await f.call(`/${f.aiId}/setup`)).json()).toMatchObject({ channels: [] })
+    const other = await fixture()
+    expect((await other.call(`/${f.aiId}/setup`)).status).toBe(404)
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'AGENT' })
+      .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+    expect((await f.call(`/${f.aiId}/setup`)).status).toBe(403)
+  })
+  it('blocks unaffordable or invalid persona generation and rejects completion after permission revocation', async () => {
+    const f = await fixture()
+    const input = {
+      id: crypto.randomUUID(),
+      mode: 'GENERATE',
+      brief: 'Give clear explanations.',
+      sourceInstructions: '',
+    }
+    const before = await getAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiId,
+      actingUserId: f.userId,
+    })
+    await f.call('/budget', 'PATCH', { monthlyLimit: 0 })
+    const provider = vi.fn(async () =>
+      Response.json({ choices: [{ message: { content: 'invalid JSON' } }] }),
+    )
+    vi.stubGlobal('fetch', provider)
+    expect((await f.call(`/${f.aiId}/persona`, 'POST', input)).status).toBe(409)
+    expect(provider).not.toHaveBeenCalled()
+    await f.call('/budget', 'PATCH', { monthlyLimit: 2 })
+    expect((await f.call(`/${f.aiId}/persona`, 'POST', input)).status).toBe(502)
+    expect((await f.call(`/${f.aiId}/persona`, 'POST', input)).status).toBe(502)
+    expect(provider).toHaveBeenCalledTimes(1)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        await db
+          .update(workspaceUserAccess)
+          .set({ role: 'AGENT' })
+          .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Be concise.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    expect(
+      (await f.call(`/${f.aiId}/persona`, 'POST', { ...input, id: crypto.randomUUID() })).status,
+    ).toBe(403)
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'OWNER' })
+      .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+    expect(
+      await getAiMemberConfig(db, {
+        workspaceId: f.workspaceId,
+        memberId: f.aiId,
+        actingUserId: f.userId,
+      }),
+    ).toEqual(before)
+    expect(await (await f.call('/budget')).json()).toMatchObject({ used: 2, reserved: 0 })
+  })
+  it('generates an editable persona candidate without saving or publishing and reuses its charge', async () => {
+    const f = await fixture()
+    const provider = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      expect(String(init?.body)).toContain('configuration draft')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Be a concise support assistant.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    const before = await getAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiId,
+      actingUserId: f.userId,
+    })
+    const input = {
+      id: crypto.randomUUID(),
+      mode: 'OPTIMIZE',
+      brief: 'Use concise explanations.',
+      sourceInstructions: before.instructions,
+    }
+    const response = await f.call(`/${f.aiId}/persona`, 'POST', input)
+    expect(response.status).toBe(200)
+    const result = await response.json()
+    expect(result).toMatchObject({
+      candidate: {
+        id: input.id,
+        sourceInstructions: 'Answer safely.',
+        instructions: expect.stringContaining('Be a concise support assistant.'),
+      },
+    })
+    expect((await f.call(`/${f.aiId}/persona`, 'POST', input)).status).toBe(200)
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(
+      await getAiMemberConfig(db, {
+        workspaceId: f.workspaceId,
+        memberId: f.aiId,
+        actingUserId: f.userId,
+      }),
+    ).toEqual(before)
+    expect(await (await f.call('/budget')).json()).toMatchObject({ used: 1, reserved: 0 })
+    const other = await fixture()
+    expect((await other.call(`/${f.aiId}/persona`, 'POST', input)).status).toBe(404)
+  })
+  it('accepts long persona candidates and reserves room for mandatory safety instructions', async () => {
+    const f = await fixture()
+    let instructions = 'Explain clearly. '.repeat(1000)
+    vi.stubGlobal('fetch', async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: instructions,
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      }),
+    )
+    const input = { mode: 'GENERATE', brief: 'Give clear explanations.', sourceInstructions: '' }
+    const response = await f.call(`/${f.aiId}/persona`, 'POST', {
+      ...input,
+      id: crypto.randomUUID(),
+    })
+    expect(response.status).toBe(200)
+    const result = (await response.json()) as { candidate: { instructions: string } }
+    expect(result.candidate.instructions).toContain(instructions.trim())
+    expect(result.candidate.instructions).toContain('Respect current authorization')
+    expect(result.candidate.instructions.length).toBeLessThanOrEqual(20000)
+    instructions = 'x'.repeat(20000)
+    expect(
+      (await f.call(`/${f.aiId}/persona`, 'POST', { ...input, id: crypto.randomUUID() })).status,
+    ).toBe(502)
+  })
   it('uses canonical simulated language codes and retains an explicit language change across turns', async () => {
     const f = await fixture()
     await f.configCall({ automaticLanguageEnabled: true })

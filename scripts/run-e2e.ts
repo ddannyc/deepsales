@@ -25,6 +25,7 @@ const e2eOwnerKeys = [
   'ai-response',
   'ai-handoff',
   'ai-bench',
+  'ai-persona',
   'lifecycle',
   'facebook',
   'inbox',
@@ -343,6 +344,26 @@ async function startFakeAI() {
       messages?: Array<{ content?: string }>
     }
     response.setHeader('content-type', 'application/json')
+    if (body.messages?.[0]?.content?.includes('AI member configuration draft')) {
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Be a concise support assistant. Ask clarifying questions when needed.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        }),
+      )
+      return
+    }
     if (pathname === '/v1/embeddings') {
       const input = Array.isArray(body.input) ? body.input : []
       if (body.model !== 'qwen3.7-text-embedding' || body.dimensions !== 1_536) {
