@@ -1,10 +1,13 @@
 import { and, desc, eq, sql } from 'drizzle-orm'
-import type { Database } from './database'
+import { assertAiHandoffReferences, readEnabledAiHandoffRules } from './ai-handoff-rules'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES, normalizeAiStopRules } from './ai-stop'
-import { readEnabledAiHandoffRules, assertAiHandoffReferences } from './ai-handoff-rules'
+import type { Database } from './database'
 import {
-  aiMemberConfig,
+  type AdMapping,
+  type AiMemberRuntimeSnapshot,
+  type AiStopRules,
   aiConfigVersion,
+  aiMemberConfig,
   aiResponseRun,
   channel,
   knowledgeBase,
@@ -12,9 +15,6 @@ import {
   memberChannelAccess,
   workspace,
   workspaceUserAccess,
-  type AiMemberRuntimeSnapshot,
-  type AdMapping,
-  type AiStopRules,
 } from './schema'
 
 const MAX_INSTRUCTIONS_CODE_POINTS = 20_000
@@ -90,7 +90,7 @@ export type UpdateAiMemberConfigInput = {
 }
 
 export async function getAiMemberConfig(
-  db: Database,
+  db: QueryHandle,
   input: { workspaceId: string; memberId: string; actingUserId: string },
 ) {
   return db.transaction(async (tx) => {

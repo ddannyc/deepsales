@@ -57,6 +57,7 @@ test('edits independent handoff rules and simulates a tag without creating a cus
   await page.getByRole('combobox', { name: '模拟属性标签条件', exact: true }).click()
   await page.getByRole('option', { name: 'Specialist routing', exact: true }).click()
   await page.getByRole('button', { name: '运行测试', exact: true }).click()
+  await page.getByRole('button', { name: '查看测试诊断', exact: true }).click()
   await expect(page.getByText('模拟转人工；不会分配或发送。', { exact: true })).toBeVisible()
   const inbox = await page.request.get(`${root}/conversations?view=all-open`).then((r) => r.json())
   expect(inbox.conversations).toEqual([])

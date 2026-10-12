@@ -24,6 +24,7 @@ const e2eOwnerKeys = [
   'ai-member',
   'ai-response',
   'ai-handoff',
+  'ai-bench',
   'lifecycle',
   'facebook',
   'inbox',

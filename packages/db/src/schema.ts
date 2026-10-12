@@ -1113,6 +1113,44 @@ export const aiBudget = pgTable(
   (table) => [check('ai_budget_limit_nonnegative', sql`${table.monthlyLimit} >= 0`)],
 )
 
+export type AiTestCustomer = {
+  properties: { definitionId: string; value: string | number }[]
+  tags: string[]
+  source: string
+  language: string
+  memory: string
+}
+
+export const aiTestSession = pgTable(
+  'ai_test_session',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => user.id, { onDelete: 'cascade' }),
+    source: text().notNull(),
+    snapshot: jsonb().$type<AiMemberRuntimeSnapshot>().notNull(),
+    configVersionId: uuid('config_version_id').references(() => aiConfigVersion.id, {
+      onDelete: 'set null',
+    }),
+    generation: integer().default(1).notNull(),
+    customer: jsonb().$type<AiTestCustomer>().notNull(),
+    operationIds: uuid('operation_ids').array().default(sql`ARRAY[]::uuid[]`).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('ai_test_session_workspace_idx').on(t.workspaceId, t.memberId),
+    check('ai_test_session_source_valid', sql`${t.source} in ('DRAFT', 'PUBLISHED', 'VERSION')`),
+    check('ai_test_session_generation_valid', sql`${t.generation} > 0`),
+  ],
+)
+
 export const aiOperation = pgTable(
   'ai_operation',
   {

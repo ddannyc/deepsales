@@ -160,6 +160,7 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
 
     await page.getByLabel('测试问题').fill('Hello')
     await page.getByRole('button', { name: '运行测试', exact: true }).click()
+    await page.getByRole('button', { name: '查看测试诊断', exact: true }).click()
     const diagnostics = page.getByRole('dialog')
     await expect(diagnostics).toContainText('已完成')
     await diagnostics.getByLabel('问题说明').fill('Review response tone.')
@@ -169,7 +170,7 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await page.getByLabel('本月硬限额').fill('1')
     await page.getByRole('button', { name: '保存限额', exact: true }).click()
     await expect(page.getByText('限额已保存', { exact: true })).toBeVisible()
-    await page.getByRole('button', { name: '新测试', exact: true }).click()
+    await page.getByRole('button', { name: '清空测试', exact: true }).click()
     await page.getByLabel('测试问题').fill('Another hello')
     await page.getByRole('button', { name: '运行测试', exact: true }).click()
     await expect(page.getByRole('alert')).toContainText('本月额度已耗尽')

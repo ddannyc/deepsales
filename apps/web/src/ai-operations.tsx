@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { HandoffRule } from './ai-handoff-settings'
+import { AiTestBench } from './ai-test-bench'
 import { Button } from './components/ui/button'
 import {
   Dialog,
@@ -181,11 +182,7 @@ export function AiOperations({
   const [diagnostics, setDiagnostics] = useState<Diagnostics>()
   const [category, setCategory] = useState('MODEL')
   const [note, setNote] = useState('')
-  const [source, setSource] = useState('PUBLISHED')
-  const [question, setQuestion] = useState('')
   const [handoffRules, setHandoffRules] = useState<HandoffRule[]>([])
-  const [simulatedRuleId, setSimulatedRuleId] = useState('NONE')
-  const [testId, setTestId] = useState<string>()
   const [error, setError] = useState('')
   const [status, setStatus] = useState('')
   const [busy, setBusy] = useState(false)
@@ -324,110 +321,18 @@ export function AiOperations({
           AI。
         </p>
       </section>
-      <section className="runtime-section">
-        <h3>隔离单题测试</h3>
-        <p className="table-muted">不创建客户、会话或外发消息。多轮和批量测试另行交付。</p>
-        <Select
-          value={source}
-          disabled={busy}
-          onValueChange={(value) => {
-            setSource(value)
-            setTestId(undefined)
-          }}
-        >
-          <SelectTrigger aria-label="测试配置">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="DRAFT">当前已保存草稿</SelectItem>
-            <SelectItem value="PUBLISHED">当前发布版本</SelectItem>
-            {versions.map((v) => (
-              <SelectItem key={v.id} value={v.id}>
-                历史：{new Date(v.publishedAt).toLocaleString()}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <label className="field" htmlFor="ai-test-question">
-          测试问题
-          <Textarea
-            id="ai-test-question"
-            disabled={busy}
-            value={question}
-            maxLength={8_000}
-            onChange={(e) => {
-              setQuestion(e.target.value)
-              setTestId(undefined)
-            }}
-          />
-        </label>
-        <p className="table-muted">
-          自然语义条件使用测试问题判断。属性和标签使用下方模拟值；保存条件后请刷新记录。
-        </p>
-        <Select
-          value={simulatedRuleId}
-          disabled={busy}
-          onValueChange={(value) => {
-            setSimulatedRuleId(value)
-            setTestId(undefined)
-          }}
-        >
-          <SelectTrigger aria-label="模拟属性标签条件">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="NONE">不提供模拟属性或标签</SelectItem>
-            {handoffRules
-              .filter((rule) => rule.enabled && rule.condition.kind !== 'SEMANTIC')
-              .map((rule) => (
-                <SelectItem key={rule.id} value={rule.id}>
-                  {rule.name}
-                </SelectItem>
-              ))}
-          </SelectContent>
-        </Select>
-        <Button
-          size="sm"
-          disabled={busy || !question.trim()}
-          onClick={() =>
-            void act(async () => {
-              const id = testId ?? crypto.randomUUID()
-              const condition = handoffRules.find((rule) => rule.id === simulatedRuleId)?.condition
-              setTestId(id)
-              setDiagnostics(
-                await api<Diagnostics>(`${root}/${memberId}/test`, {
-                  id,
-                  source: source === 'DRAFT' || source === 'PUBLISHED' ? source : 'VERSION',
-                  versionId: source === 'DRAFT' || source === 'PUBLISHED' ? undefined : source,
-                  text: question,
-                  simulatedHandoffFacts: {
-                    properties:
-                      condition?.kind === 'PROPERTY'
-                        ? [{ definitionId: condition.definitionId, value: condition.value }]
-                        : [],
-                    tags: condition?.kind === 'TAG' ? [condition.tagId] : [],
-                  },
-                }),
-              )
-              await load()
-            })
-          }
-        >
-          运行测试
-        </Button>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={busy}
-          onClick={() => {
-            setTestId(undefined)
-            setQuestion('')
-            setDiagnostics(undefined)
-          }}
-        >
-          新测试
-        </Button>
-      </section>
+      <AiTestBench
+        key={memberId}
+        workspaceId={workspaceId}
+        memberId={memberId}
+        versions={versions}
+        rules={handoffRules}
+        request={api}
+        onInspect={(id) =>
+          void act(async () => setDiagnostics(await api<Diagnostics>(`${root}/${id}/diagnostics`)))
+        }
+        onUpdated={load}
+      />
       <section className="runtime-section">
         <h3>运行与问题诊断</h3>
         {!runs.length && !tests.length && !loading && <p className="table-muted">暂无运行记录。</p>}

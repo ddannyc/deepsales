@@ -1,42 +1,46 @@
 import {
+  type AiHandoffCondition,
   AiMemberError,
+  type AiTestContext,
   AiUsageError,
   addAiFeedback,
   aiOperationForMessage,
+  clearAiTestSession,
   createAiTest,
+  createAiTestSession,
+  type Database,
+  deleteAiHandoffRule,
   finishAiOperation,
   getAiAnalytics,
   getAiBudget,
   getAiDiagnostics,
+  KnowledgeError,
   listAiConfigVersions,
   listAiDiagnostics,
+  listAiHandoffRules,
+  matchesAiCondition,
+  readAiTestSession,
   recordAiTestResult,
   restoreAiConfigVersion,
   saveAiBudget,
-  type Database,
-  listAiHandoffRules,
   saveAiHandoffRule,
-  deleteAiHandoffRule,
-  matchesAiCondition,
-  type AiHandoffCondition,
-  KnowledgeError,
 } from '@deepsales/db'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { createAuth } from './auth'
 import {
-  aiMemberRuntimeSnapshotSchema,
   AIOutputError,
+  aiHandoffConditionSchema,
+  aiMemberRuntimeSnapshotSchema,
+  applyHandoffPolicy,
   createAlibabaEmbeddingProvider,
   createAlibabaLlmProvider,
   enforceGrounding,
-  applyHandoffPolicy,
-  aiHandoffConditionSchema,
   matchedHandoffRuleId,
 } from './ai'
 import { meteredAiFetch } from './ai-usage'
-import { retrieveKnowledgeChunks } from './knowledge'
+import { createAuth } from './auth'
 import type { Bindings } from './bindings'
+import { retrieveKnowledgeChunks } from './knowledge'
 
 export function aiOperationsRoutes(
   withDb: <T>(env: Bindings, work: (db: Database) => Promise<T>) => Promise<T>,
@@ -93,6 +97,47 @@ export function aiOperationsRoutes(
           )
         if (!uuid.safeParse(resource).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
+        if (action === 'sessions') {
+          const sessionId = segments[2]
+          if (c.req.method === 'POST' && !sessionId) {
+            const input = z
+              .object({
+                id: uuid,
+                source: z.enum(['DRAFT', 'PUBLISHED', 'VERSION']),
+                versionId: uuid.optional(),
+                customer: z
+                  .object({
+                    properties: z
+                      .array(
+                        z
+                          .object({
+                            definitionId: uuid,
+                            value: z.union([z.string().max(2000), z.number().finite()]),
+                          })
+                          .strict(),
+                      )
+                      .max(20),
+                    tags: z.array(uuid).max(20),
+                    source: z.string().max(1000),
+                    language: z.string().max(100),
+                    memory: z.string().max(1000),
+                  })
+                  .strict(),
+              })
+              .strict()
+              .parse(body)
+            return c.json(
+              { session: await createAiTestSession(db, { ...memberInput, ...input }) },
+              201,
+            )
+          }
+          const sessionInput = { ...memberInput, sessionId: uuid.parse(sessionId) }
+          if (c.req.method === 'GET') return c.json(await readAiTestSession(db, sessionInput))
+          if (c.req.method === 'POST' && segments[3] === 'clear') {
+            const input = z.object({ generation: z.number().int().positive() }).strict().parse(body)
+            return c.json(await clearAiTestSession(db, { ...sessionInput, ...input }))
+          }
+        }
         if (action === 'handoff-rules') {
           if (c.req.method === 'GET')
             return c.json({ rules: await listAiHandoffRules(db, memberInput) })
@@ -172,6 +217,8 @@ export function aiOperationsRoutes(
               source: z.enum(['DRAFT', 'PUBLISHED', 'VERSION']),
               versionId: uuid.optional(),
               text: z.string().min(1).max(8_000),
+              sessionId: uuid.optional(),
+              generation: z.number().int().positive().optional(),
               simulatedHandoffFacts: z
                 .object({
                   properties: z
@@ -196,6 +243,12 @@ export function aiOperationsRoutes(
             return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
           try {
             const snapshot = aiMemberRuntimeSnapshotSchema.parse(test.operation.snapshot)
+            const testContext = (test.operation.output as { testContext?: AiTestContext } | null)
+              ?.testContext
+            const history = (testContext?.history ?? []).map((item) => ({
+              ...item,
+              createdAt: new Date(item.createdAt),
+            }))
             const context = (
               test.operation.output as {
                 handoffContext: {
@@ -281,7 +334,8 @@ export function aiOperationsRoutes(
                 responseLanguage: snapshot.responseLanguage,
                 timeZone: snapshot.timeZone,
                 messages: [{ id: input.id, text: input.text }],
-                history: [],
+                history,
+                simulatedCustomer: testContext?.customer,
                 knowledgeChunks: [],
                 handoffRules: semanticRules,
               })
@@ -330,7 +384,11 @@ export function aiOperationsRoutes(
               instructions: snapshot.instructions,
               responseLanguage: snapshot.responseLanguage,
               messages: [{ id: input.id, text: input.text }],
-              history: [],
+              history,
+              simulatedCustomer: testContext?.customer,
+              establishedLanguage: snapshot.automaticLanguageEnabled
+                ? testContext?.customer.language || undefined
+                : undefined,
               knowledgeChunks: chunks,
             })
             const replyConfig = {
@@ -360,11 +418,13 @@ export function aiOperationsRoutes(
               failureCode:
                 error instanceof AiUsageError
                   ? error.code
-                  : error instanceof KnowledgeError
-                    ? 'KNOWLEDGE_UNAVAILABLE'
-                    : error instanceof AIOutputError
-                      ? 'INVALID_OUTPUT'
-                      : 'AI_PROVIDER_ERROR',
+                  : error instanceof AiMemberError
+                    ? error.code
+                    : error instanceof KnowledgeError
+                      ? 'KNOWLEDGE_UNAVAILABLE'
+                      : error instanceof AIOutputError
+                        ? 'INVALID_OUTPUT'
+                        : 'AI_PROVIDER_ERROR',
             })
           }
           return c.json(await getAiDiagnostics(db, { ...identity, id: input.id }))

@@ -3,19 +3,24 @@ import { fileURLToPath } from 'node:url'
 import {
   aiOperation,
   bootstrapWorkspace,
+  channel,
+  claimKnowledgeDocument,
+  completeKnowledgeDocument,
   conversation,
   createAiMember,
   createDatabase,
+  createInlineKnowledgeDocument,
   createKnowledgeBase,
+  customerPropertyDefinition,
+  customerTagDefinition,
   getAiAnalytics,
   getAiMemberConfig,
+  knowledgeChunk,
   listAiDiagnostics,
   mediaAsset,
-  createInlineKnowledgeDocument,
-  claimKnowledgeDocument,
-  completeKnowledgeDocument,
-  knowledgeChunk,
   member,
+  publishAiMemberConfig,
+  setMemberChannelAccess,
   updateAiMemberConfig,
   workspaceUserAccess,
 } from '@deepsales/db'
@@ -55,6 +60,347 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('uses canonical simulated language codes and retains an explicit language change across turns', async () => {
+    const f = await fixture()
+    await f.configCall({ automaticLanguageEnabled: true })
+    const id = crypto.randomUUID()
+    const customer = { properties: [], tags: [], source: '', language: 'English', memory: '' }
+    expect(
+      (await f.call(`/${f.aiId}/sessions`, 'POST', { id, source: 'DRAFT', customer })).status,
+    ).toBe(400)
+    const created = await f.call(`/${f.aiId}/sessions`, 'POST', {
+      id,
+      source: 'DRAFT',
+      customer: { ...customer, language: 'EN-us' },
+    })
+    expect(await created.json()).toMatchObject({ session: { customer: { language: 'en-US' } } })
+    let turn = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        const body = String(init?.body)
+        expect(body).toContain(
+          turn === 2 ? 'Established language: zh' : 'Established language: en-US',
+        )
+        turn++
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Hello',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  languageSelection:
+                    turn === 1
+                      ? { language: 'en-US', explicitSwitch: false }
+                      : turn === 2
+                        ? { language: 'zh', explicitSwitch: true }
+                        : null,
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    for (const text of ['Hello', 'Please reply in Chinese', 'OK']) {
+      const response = await f.call(`/${f.aiId}/test`, 'POST', {
+        id: crypto.randomUUID(),
+        source: 'DRAFT',
+        text,
+        sessionId: id,
+        generation: 1,
+      })
+      expect(await response.json()).toMatchObject({ operation: { state: 'COMPLETED' } })
+    }
+    expect(await (await f.call(`/${f.aiId}/sessions/${id}`)).json()).toMatchObject({
+      session: { customer: { language: 'zh' } },
+    })
+  })
+  it('freezes published and selected historical configurations and records invalid model output as failure', async () => {
+    const f = await fixture()
+    const [accessChannel] = await db
+      .insert(channel)
+      .values({
+        workspaceId: f.workspaceId,
+        provider: 'FACEBOOK_MESSENGER',
+        displayName: 'Test channel',
+      })
+      .returning()
+    await setMemberChannelAccess(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiId,
+      actingUserId: f.userId,
+      channelIds: [accessChannel.id],
+    })
+    const published = await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiId,
+      actingUserId: f.userId,
+      providerConfigured: true,
+    })
+    const versionId = published.publishedVersionId
+    if (!versionId) throw new Error('No published version')
+    const sessions = []
+    for (const source of ['PUBLISHED', 'VERSION']) {
+      const id = crypto.randomUUID()
+      const input = {
+        id,
+        source,
+        versionId: source === 'VERSION' ? versionId : undefined,
+        customer: { properties: [], tags: [], source: '', language: '', memory: '' },
+      }
+      expect((await f.call(`/${f.aiId}/sessions`, 'POST', input)).status).toBe(201)
+      expect((await f.call(`/${f.aiId}/sessions`, 'POST', input)).status).toBe(201)
+      sessions.push(input)
+    }
+    expect((await f.configCall({ instructions: 'A later draft instruction.' })).status).toBe(200)
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiId,
+      actingUserId: f.userId,
+      providerConfigured: true,
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+        expect(String(init?.body)).toContain('Answer safely.')
+        expect(String(init?.body)).not.toContain('A later draft instruction.')
+        return Response.json({ choices: [{ message: { content: 'bad JSON' } }] })
+      }),
+    )
+    for (const session of sessions) {
+      const result = await f.call(`/${f.aiId}/test`, 'POST', {
+        id: crypto.randomUUID(),
+        source: session.source,
+        versionId: session.versionId,
+        sessionId: session.id,
+        generation: 1,
+        text: 'Hello',
+      })
+      expect(await result.json()).toMatchObject({
+        operation: { configVersionId: versionId, state: 'FAILED', failureCode: 'INVALID_OUTPUT' },
+      })
+    }
+  })
+  it('validates simulated property types and tenant references before spending and protects quota', async () => {
+    const f = await fixture()
+    const other = await fixture()
+    const [number] = await db
+      .insert(customerPropertyDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Count', level: 'CUSTOMER', type: 'NUMBER' })
+      .returning()
+    const [option] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Color',
+        level: 'CONVERSATION',
+        type: 'OPTION',
+        options: ['Blue'],
+      })
+      .returning()
+    const [tag] = await db
+      .insert(customerTagDefinition)
+      .values({ workspaceId: other.workspaceId, name: 'Other', level: 'CUSTOMER' })
+      .returning()
+    const customer = { properties: [], tags: [], source: '', language: '', memory: '' }
+    for (const change of [
+      { properties: [{ definitionId: number.id, value: 'three' }] },
+      { properties: [{ definitionId: option.id, value: 'Red' }] },
+      { tags: [tag.id] },
+    ])
+      expect(
+        (
+          await f.call(`/${f.aiId}/sessions`, 'POST', {
+            id: crypto.randomUUID(),
+            source: 'DRAFT',
+            customer: { ...customer, ...change },
+          })
+        ).status,
+      ).toBe(400)
+    const id = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/sessions`, 'POST', {
+          id,
+          source: 'DRAFT',
+          customer: {
+            ...customer,
+            properties: [
+              { definitionId: number.id, value: 3 },
+              { definitionId: option.id, value: 'Blue' },
+            ],
+          },
+        })
+      ).status,
+    ).toBe(201)
+    expect((await f.call('/budget', 'PATCH', { monthlyLimit: 0 })).status).toBe(200)
+    const provider = vi.fn()
+    vi.stubGlobal('fetch', provider)
+    expect(
+      (
+        await f.call(`/${f.aiId}/test`, 'POST', {
+          id: crypto.randomUUID(),
+          source: 'DRAFT',
+          text: 'Hello',
+          sessionId: id,
+          generation: 1,
+        })
+      ).status,
+    ).toBe(409)
+    expect(provider).not.toHaveBeenCalled()
+    expect(await (await f.call(`/${f.aiId}/sessions/${id}`)).json()).toMatchObject({ turns: [] })
+  })
+  it('cancels an in-flight test durably and rejects old generations and concurrent new turns', async () => {
+    const f = await fixture()
+    const sessionId = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/sessions`, 'POST', {
+          id: sessionId,
+          source: 'DRAFT',
+          customer: { properties: [], tags: [], source: '', language: '', memory: 'Old memory' },
+        })
+      ).status,
+    ).toBe(201)
+    let release: () => void = () => {}
+    let started: () => void = () => {}
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const entered = new Promise<void>((resolve) => {
+      started = resolve
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        started()
+        await waiting
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Late answer',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    const input = {
+      id: crypto.randomUUID(),
+      source: 'DRAFT',
+      text: 'Hello',
+      sessionId,
+      generation: 1,
+    }
+    const pending = f.call(`/${f.aiId}/test`, 'POST', input)
+    await entered
+    expect(
+      (await f.call(`/${f.aiId}/test`, 'POST', { ...input, id: crypto.randomUUID() })).status,
+    ).toBe(409)
+    expect(
+      (await f.call(`/${f.aiId}/sessions/${sessionId}/clear`, 'POST', { generation: 1 })).status,
+    ).toBe(200)
+    release()
+    expect(await (await pending).json()).toMatchObject({
+      operation: {
+        state: 'CANCELLED',
+        failureCode: 'TEST_CLEARED',
+        output: { testContext: { customer: { memory: 'Old memory' } } },
+      },
+    })
+    expect(await (await f.call(`/${f.aiId}/sessions/${sessionId}`)).json()).toMatchObject({
+      session: { customer: { memory: '' } },
+      turns: [],
+    })
+    expect((await f.call(`/${f.aiId}/test`, 'POST', input)).status).toBe(400)
+    const other = await fixture()
+    expect((await other.call(`/${f.aiId}/sessions/${sessionId}`)).status).toBe(404)
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'AGENT' })
+      .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+    expect((await f.call(`/${f.aiId}/sessions/${sessionId}`)).status).toBe(403)
+  })
+  it('keeps multi-turn tests and simulated memory isolated and clears the context', async () => {
+    const f = await fixture()
+    const sessionId = crypto.randomUUID()
+    const created = await f.call(`/${f.aiId}/sessions`, 'POST', {
+      id: sessionId,
+      source: 'DRAFT',
+      customer: {
+        properties: [],
+        tags: [],
+        source: 'Demo',
+        language: 'en',
+        memory: 'Likes colors',
+      },
+    })
+    expect(created.status).toBe(201)
+    const provider = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      if (String(url).includes('embeddings'))
+        return Response.json({
+          data: [{ embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)) }],
+        })
+      const prompt = String(init?.body)
+      expect(prompt).toContain('Likes colors')
+      const second = prompt.includes('The second option')
+      if (second) expect(prompt).toContain('Choose blue or green.')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: second ? 'You chose green.' : 'Choose blue or green.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    for (const text of ['Show two colors', 'The second option']) {
+      const response = await f.call(`/${f.aiId}/test`, 'POST', {
+        id: crypto.randomUUID(),
+        source: 'DRAFT',
+        text,
+        sessionId,
+        generation: 1,
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ operation: { state: 'COMPLETED' } })
+    }
+    const read = await f.call(`/${f.aiId}/sessions/${sessionId}`)
+    expect(await read.json()).toMatchObject({
+      session: { generation: 1 },
+      turns: [{ input: 'Show two colors' }, { input: 'The second option' }],
+    })
+    expect(
+      (await f.call(`/${f.aiId}/sessions/${sessionId}/clear`, 'POST', { generation: 1 })).status,
+    ).toBe(200)
+    expect(await (await f.call(`/${f.aiId}/sessions/${sessionId}`)).json()).toMatchObject({
+      session: { generation: 2, customer: { memory: '', tags: [], properties: [] } },
+      turns: [],
+    })
+    expect(
+      await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+    ).toEqual([])
+  })
   it('simulates semantic handoff with the configured timezone and keeps rule writes authorized', async () => {
     const f = await fixture()
     await f.configCall({ timeZone: 'Asia/Hong_Kong' })
