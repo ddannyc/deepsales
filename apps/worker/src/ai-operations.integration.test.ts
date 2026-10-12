@@ -61,6 +61,22 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('keeps customer memory disabled by default and enables it only after explicit publication', async () => {
+    const f = await fixture()
+    expect(
+      await getAiMemberConfig(db, {
+        workspaceId: f.workspaceId,
+        memberId: f.aiId,
+        actingUserId: f.userId,
+      }),
+    ).toMatchObject({ memoryEnabled: false })
+    const saved = await f.configCall({ memoryEnabled: true })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({
+      config: { memoryEnabled: true, publishedSnapshot: null },
+    })
+    expect((await f.configCall({ memoryEnabled: 'true' })).status).toBe(400)
+  })
   it('maintains question sets and freezes each batch before drafts or questions change', async () => {
     const f = await fixture()
     const setId = crypto.randomUUID()

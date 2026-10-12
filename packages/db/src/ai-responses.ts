@@ -1,9 +1,8 @@
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
-import type { Database } from './database'
 import {
-  readEnabledAiHandoffRules,
-  matchAiHandoffRule,
   type AiHandoffEvaluation,
+  matchAiHandoffRule,
+  readEnabledAiHandoffRules,
 } from './ai-handoff-rules'
 import {
   assertAiStopReferences,
@@ -11,6 +10,9 @@ import {
   isAiStopPeriod,
   matchesAiStopCondition,
 } from './ai-stop'
+import { ensureAiResponseRun } from './assignments'
+import { readCustomerMemory } from './customer-memory'
+import type { Database } from './database'
 import {
   type AiMemberRuntimeSnapshot,
   aiMemberConfig,
@@ -18,13 +20,13 @@ import {
   channel,
   channelIdentity,
   conversation,
+  knowledgeChunk,
+  knowledgeDocument,
+  mediaAsset,
   member,
   memberChannelAccess,
   message,
   messageAttachment,
-  mediaAsset,
-  knowledgeDocument,
-  knowledgeChunk,
   workspace,
 } from './schema'
 
@@ -51,6 +53,12 @@ export type AiResponseInputMessage = {
 }
 
 export type AiResponseRunClaim = {
+  customerMemoryInput?: {
+    customerId: string
+    revision: number
+    summary: string
+    sourceChannelIds: string[]
+  } | null
   replyLanguage: string | null
   kind: 'CLAIMED'
   state: 'GENERATING'
@@ -73,7 +81,8 @@ export type AiResponseRunClaimResult =
       kind: 'CANCELLED'
       workspaceId: string
       conversationId: string
-      cancellationReason: 'OWNERSHIP_CHANGED' | 'NEW_CUSTOMER_MESSAGE'
+      cancellationReason: 'OWNERSHIP_CHANGED' | 'NEW_CUSTOMER_MESSAGE' | 'CUSTOMER_MEMORY_CHANGED'
+      aiResponseRunId?: string | null
     }
   | null
 
@@ -105,7 +114,10 @@ export function normalizeAiReplyLanguage(value: string) {
   }
 }
 
-export type AiResponseCancellationReason = 'OWNERSHIP_CHANGED' | 'NEW_CUSTOMER_MESSAGE'
+export type AiResponseCancellationReason =
+  | 'OWNERSHIP_CHANGED'
+  | 'NEW_CUSTOMER_MESSAGE'
+  | 'CUSTOMER_MEMORY_CHANGED'
 
 export async function cancelActiveAiResponseRuns(
   tx: Transaction,
@@ -178,6 +190,8 @@ export async function claimAiResponseRun(
         configVersionId: aiResponseRun.configVersionId,
         configSnapshot: aiResponseRun.configSnapshot,
         contextMessageIds: aiResponseRun.contextMessageIds,
+        customerMemoryInput: aiResponseRun.customerMemoryInput,
+        customerId: channelIdentity.customerId,
         workspaceId: conversation.workspaceId,
         conversationStatus: conversation.status,
         assigneeMemberId: conversation.assigneeMemberId,
@@ -185,6 +199,7 @@ export async function claimAiResponseRun(
       })
       .from(aiResponseRun)
       .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
       .innerJoin(member, eq(member.id, aiResponseRun.memberId))
       .where(eq(aiResponseRun.id, input.runId))
       .limit(1)
@@ -391,8 +406,51 @@ export async function claimAiResponseRun(
       }
     }
 
+    const memory =
+      snapshot?.memoryEnabled && config?.publishedSnapshot?.memoryEnabled
+        ? await readCustomerMemory(tx, {
+            workspaceId: current.workspaceId,
+            customerId: current.customerId,
+            memberId: current.memberId,
+          })
+        : null
+    if (
+      current.customerMemoryInput &&
+      (!memory?.available ||
+        current.customerMemoryInput.customerId !== current.customerId ||
+        current.customerMemoryInput.revision !== memory.revision)
+    ) {
+      await cancelRun(tx, current.id, 'CUSTOMER_MEMORY_CHANGED', now)
+      const aiResponseRunId = await ensureAiResponseRun(tx, {
+        conversationId: current.conversationId,
+        memberId: current.memberId,
+        now,
+      })
+      return {
+        kind: 'CANCELLED',
+        workspaceId: current.workspaceId,
+        conversationId: current.conversationId,
+        cancellationReason: 'CUSTOMER_MEMORY_CHANGED',
+        aiResponseRunId,
+      }
+    }
+    const customerMemoryInput =
+      current.customerMemoryInput ??
+      (memory?.available && memory.summary
+        ? {
+            customerId: current.customerId,
+            summary: memory.summary,
+            revision: memory.revision,
+            sourceChannelIds: memory.sourceChannelIds,
+          }
+        : null)
+    await tx
+      .update(aiResponseRun)
+      .set({ customerMemoryInput })
+      .where(eq(aiResponseRun.id, current.id))
     return {
       kind: 'CLAIMED' as const,
+      customerMemoryInput,
       state: 'GENERATING' as const,
       id: current.id,
       workspaceId: current.workspaceId,
@@ -556,7 +614,11 @@ export type CommitAiResponseResult =
       message: typeof message.$inferSelect
       messages: (typeof message.$inferSelect)[]
     }
-  | { kind: 'CANCELLED'; cancellationReason: 'OWNERSHIP_CHANGED' | 'NEW_CUSTOMER_MESSAGE' }
+  | {
+      kind: 'CANCELLED'
+      cancellationReason: AiResponseCancellationReason
+      aiResponseRunId?: string | null
+    }
   | null
 
 export async function commitAiResponse(
@@ -625,6 +687,7 @@ export async function commitAiResponse(
         inputLastMessageId: aiResponseRun.inputLastMessageId,
         configSnapshot: aiResponseRun.configSnapshot,
         retrievedChunkIds: aiResponseRun.retrievedChunkIds,
+        customerMemoryInput: aiResponseRun.customerMemoryInput,
       })
       .from(aiResponseRun)
       .where(eq(aiResponseRun.id, input.runId))
@@ -664,6 +727,35 @@ export async function commitAiResponse(
     }
 
     const handoffRules = await readEnabledAiHandoffRules(tx, current.workspaceId, run.memberId)
+    if (run.customerMemoryInput) {
+      const memory = await readCustomerMemory(tx, {
+        workspaceId: current.workspaceId,
+        customerId: current.customerId,
+        memberId: run.memberId,
+      })
+      const [configuration] = await tx
+        .select({ snapshot: aiMemberConfig.publishedSnapshot })
+        .from(aiMemberConfig)
+        .where(eq(aiMemberConfig.memberId, run.memberId))
+      if (
+        !memory.available ||
+        memory.revision !== run.customerMemoryInput.revision ||
+        current.customerId !== run.customerMemoryInput.customerId ||
+        !configuration?.snapshot?.memoryEnabled
+      ) {
+        await cancelRun(tx, run.id, 'CUSTOMER_MEMORY_CHANGED', now)
+        const fresh = await ensureAiResponseRun(tx, {
+          conversationId: current.id,
+          memberId: run.memberId,
+          now,
+        })
+        return {
+          kind: 'CANCELLED' as const,
+          cancellationReason: 'CUSTOMER_MEMORY_CHANGED' as const,
+          aiResponseRunId: fresh,
+        }
+      }
+    }
     let matchedRule: (typeof handoffRules)[number] | undefined
     try {
       matchedRule = await matchAiHandoffRule(

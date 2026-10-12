@@ -1,31 +1,38 @@
-﻿import { dirname, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   aiMemberConfig,
+  aiProviderAttempt,
   aiResponseRun,
   autoAssignConversation,
   bootstrapWorkspace,
+  changeCustomerIdentity,
+  channelIdentity,
   claimAiResponseRun,
+  clearCustomerMemory,
   commitAiResponse,
   connectFacebookPages,
   conversation,
   conversationAssignment,
-  channelIdentity,
-  customerPropertyDefinition,
-  customerPropertyValue,
-  aiProviderAttempt,
   createAiMember,
   createDatabase,
   createInlineKnowledgeDocument,
   createInternalNote,
   createKnowledgeBase,
+  customerMemory,
+  customerMemoryCommunication,
+  customerPropertyDefinition,
+  customerPropertyValue,
   getAiBudget,
   getAiFacebookAdvertisingContext,
+  getCustomerProfile,
   member,
   message,
   processFacebookInbound,
   processFacebookReferral,
   publishAiMemberConfig,
+  readCustomerMemory,
+  retryAiResponseRun,
   saveAiBudget,
   saveAiHandoffRule,
   setMemberChannelAccess,
@@ -33,13 +40,19 @@ import {
   transferConversation,
   updateAiMemberConfig,
   user,
+  workspaceUserAccess,
 } from '@deepsales/db'
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Bindings } from './bindings'
-import { handleAiResponseBatch, handleDocumentsBatch, handleScheduled } from './index'
+import {
+  handleAiResponseBatch,
+  handleDocumentsBatch,
+  handleMaintenanceBatch,
+  handleScheduled,
+} from './index'
 
 const connectionString = process.env.DATABASE_URL
 const migrationsFolder = resolve(
@@ -57,6 +70,834 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('serializes clearing memory with a SENT communication without deadlocking', async () => {
+    const f = await createFixture(db)
+    const received = await receiveContextInput(db, f, 'Please keep this brief.')
+    const [identity] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+        ),
+      )
+    const [pending] = await db
+      .insert(message)
+      .values({
+        channelId: f.channelId,
+        conversationId: received.conversationId,
+        direction: 'OUTBOUND',
+        senderType: 'MEMBER',
+        senderMemberId: f.aiMemberId,
+        messageType: 'TEXT',
+        text: 'A pending reply.',
+        deliveryState: 'PENDING',
+      })
+      .returning()
+    const [memory] = await db
+      .select()
+      .from(customerMemory)
+      .where(eq(customerMemory.customerId, identity.customerId))
+    const clearClient = await pool.connect()
+    try {
+      const { rows: clients } = await clearClient.query<{ pid: number }>(
+        'select pg_backend_pid() as pid',
+      )
+      let clear: Promise<unknown> | undefined
+      await db.transaction(async (tx) => {
+        await tx
+          .select()
+          .from(channelIdentity)
+          .where(eq(channelIdentity.id, identity.id))
+          .for('share')
+        clear = clearCustomerMemory(createDatabase(clearClient), {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+          expectedCustomerId: identity.customerId,
+          expectedRevision: memory.revision,
+        }).then(
+          (value) => ({ value }),
+          (error: unknown) => ({ error }),
+        )
+        // Observe the competing clear waiting on the held identity before completing SENT.
+        await vi.waitFor(async () => {
+          const { rows } = await pool.query(
+            'select wait_event_type from pg_stat_activity where pid = $1',
+            [clients[0]?.pid],
+          )
+          expect(rows[0]?.wait_event_type).toBe('Lock')
+        })
+        await tx
+          .update(message)
+          .set({ deliveryState: 'SENT', deliveryCompletedAt: new Date() })
+          .where(eq(message.id, pending.id))
+      })
+      await expect(clear).resolves.toMatchObject({ error: { code: 'CONFLICT' } })
+      const [fresh] = await db
+        .select()
+        .from(customerMemory)
+        .where(eq(customerMemory.customerId, identity.customerId))
+      await expect(
+        clearCustomerMemory(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+          expectedCustomerId: identity.customerId,
+          expectedRevision: fresh.revision,
+        }),
+      ).resolves.toEqual({ cleared: true })
+      expect(
+        await db
+          .select()
+          .from(customerMemory)
+          .where(eq(customerMemory.customerId, identity.customerId)),
+      ).toMatchObject([{ summary: '', pendingOperationId: null }])
+      expect(await db.select().from(message).where(eq(message.id, pending.id))).toMatchObject([
+        { deliveryState: 'SENT' },
+      ])
+    } finally {
+      clearClient.release()
+    }
+  })
+  it('does not let fifty restricted customers block an authorized memory update', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, memoryEnabled: true })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const [extra] = await connectFacebookPages(db, {
+      workspaceId: f.workspaceId,
+      actingUserId: f.ownerId,
+      pages: [
+        {
+          pageId: crypto.randomUUID(),
+          displayName: 'Restricted support',
+          encryptedPageAccessToken: 'cipher',
+          tokenIv: 'iv',
+          tokenKeyVersion: 'v1',
+        },
+      ],
+    })
+    const customers: string[] = []
+    for (let index = 0; index < 51; index++) {
+      const received = await receiveContextInput(
+        db,
+        { ...f, ownerId: crypto.randomUUID() },
+        'Please keep this brief.',
+      )
+      const [identity] = await db
+        .select()
+        .from(channelIdentity)
+        .where(
+          eq(
+            channelIdentity.id,
+            sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+          ),
+        )
+      customers.push(identity.customerId)
+      await db
+        .update(customerMemory)
+        .set({
+          latestActivityAt: new Date(index === 50 ? 2 : 1),
+          sourceChannelIds: [index === 50 ? f.channelId : extra.id],
+        })
+        .where(eq(customerMemory.customerId, identity.customerId))
+    }
+    const send = vi.fn()
+    await handleScheduled(environment(undefined, { send } as unknown as Queue))
+    const jobs = send.mock.calls
+      .map(([job]) => job)
+      .filter((job) => job.type === 'customer.memory' && customers.includes(job.customerId))
+    expect(jobs).toEqual([
+      { v: 1, type: 'customer.memory', customerId: customers[50], revision: 1 },
+    ])
+  })
+  it.each(['clear', 'disable', 'revoke'] as const)(
+    'never reuses an invalid memory snapshot on retry after %s',
+    async (change) => {
+      const f = await createFixture(db)
+      const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+      await updateAiMemberConfig(db, { ...config, memoryEnabled: true, replyWaitEnabled: false })
+      await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+      const received = await receiveContextInput(db, f, 'Hello again.')
+      const [identity] = await db
+        .select()
+        .from(channelIdentity)
+        .where(
+          eq(
+            channelIdentity.id,
+            sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+          ),
+        )
+      const [extra] = await connectFacebookPages(db, {
+        workspaceId: f.workspaceId,
+        actingUserId: f.ownerId,
+        pages: [
+          {
+            pageId: crypto.randomUUID(),
+            displayName: 'Other support',
+            encryptedPageAccessToken: 'cipher',
+            tokenIv: 'iv',
+            tokenKeyVersion: 'v1',
+          },
+        ],
+      })
+      await setMemberChannelAccess(db, { ...config, channelIds: [f.channelId, extra.id] })
+      await db
+        .update(customerMemory)
+        .set({ summary: 'Private prior preference.', sourceChannelIds: [f.channelId, extra.id] })
+        .where(eq(customerMemory.customerId, identity.customerId))
+      const assigned = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: received.conversationId,
+      })
+      if (!assigned.aiResponseRunId) throw new Error('Missing run')
+      const claimed = await claimAiResponseRun(db, { runId: assigned.aiResponseRunId })
+      expect(claimed).toMatchObject({
+        kind: 'CLAIMED',
+        customerMemoryInput: { summary: 'Private prior preference.' },
+      })
+      await retryAiResponseRun(db, { runId: assigned.aiResponseRunId })
+      if (change === 'clear') {
+        const [owner] = await db
+          .select()
+          .from(member)
+          .where(and(eq(member.workspaceId, f.workspaceId), eq(member.type, 'HUMAN')))
+        await setMemberChannelAccess(db, {
+          ...config,
+          memberId: owner.id,
+          channelIds: [f.channelId, extra.id],
+        })
+        const profile = await getCustomerProfile(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+        })
+        await clearCustomerMemory(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+          expectedCustomerId: identity.customerId,
+          expectedRevision: profile.memory.revision,
+        })
+      } else if (change === 'disable') {
+        await updateAiMemberConfig(db, { ...config, memoryEnabled: false })
+        await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+      } else {
+        await setMemberChannelAccess(db, { ...config, channelIds: [f.channelId] })
+      }
+      const retried = await claimAiResponseRun(db, { runId: assigned.aiResponseRunId })
+      expect(retried).toMatchObject({
+        kind: 'CANCELLED',
+        cancellationReason: 'CUSTOMER_MEMORY_CHANGED',
+        aiResponseRunId: expect.any(String),
+      })
+      expect(
+        await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, assigned.aiResponseRunId)),
+      ).toMatchObject([{ state: 'CANCELLED', cancellationReason: 'CUSTOMER_MEMORY_CHANGED' }])
+    },
+  )
+  it('cancels a queued memory revision on new input and prevents a late cleared summary from returning', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, memoryEnabled: true })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveContextInput(db, f, 'I prefer email updates.')
+    const context = {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: received.conversationId,
+    }
+    const [identity] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+        ),
+      )
+    const [owner] = await db
+      .select()
+      .from(member)
+      .where(and(eq(member.workspaceId, f.workspaceId), eq(member.type, 'HUMAN')))
+    await setMemberChannelAccess(db, { ...config, memberId: owner.id, channelIds: [f.channelId] })
+    const send = vi.fn(),
+      env = environment(undefined, { send } as unknown as Queue)
+    await db
+      .update(customerMemory)
+      .set({ latestActivityAt: new Date(0) })
+      .where(eq(customerMemory.customerId, identity.customerId))
+    await handleScheduled(env)
+    const oldJob = send.mock.calls
+      .map(([job]) => job)
+      .find((job) => job.type === 'customer.memory' && job.customerId === identity.customerId)
+    await receiveContextInput(db, f, 'Use short explanations too.')
+    const provider = vi.fn(async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Customer prefers email and short explanations.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', provider)
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(oldJob)), env)
+    expect(provider).not.toHaveBeenCalled()
+    await db
+      .update(customerMemory)
+      .set({ latestActivityAt: new Date(0) })
+      .where(eq(customerMemory.customerId, identity.customerId))
+    send.mockClear()
+    await handleScheduled(env)
+    const job = send.mock.calls
+      .map(([value]) => value)
+      .find((value) => value.type === 'customer.memory' && value.customerId === identity.customerId)
+    vi.stubGlobal('fetch', async () => {
+      const profile = await getCustomerProfile(db, context)
+      await clearCustomerMemory(db, {
+        ...context,
+        expectedCustomerId: identity.customerId,
+        expectedRevision: profile.memory.revision,
+      })
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Old preference.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(job)), env)
+    expect((await getCustomerProfile(db, context)).memory).toMatchObject({
+      summary: '',
+      state: 'EMPTY',
+    })
+    send.mockClear()
+    await handleScheduled(env)
+    expect(
+      send.mock.calls.filter(
+        ([value]) => value.type === 'customer.memory' && value.customerId === identity.customerId,
+      ),
+    ).toHaveLength(0)
+    expect(
+      await db.select().from(message).where(eq(message.conversationId, received.conversationId)),
+    ).toHaveLength(2)
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'AGENT' })
+      .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+    await expect(
+      clearCustomerMemory(db, {
+        ...context,
+        expectedCustomerId: identity.customerId,
+        expectedRevision: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN' })
+    const other = await createFixture(db)
+    await expect(
+      clearCustomerMemory(db, {
+        workspaceId: other.workspaceId,
+        userId: other.ownerId,
+        conversationId: received.conversationId,
+        expectedCustomerId: identity.customerId,
+        expectedRevision: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' })
+  })
+  it('shares a linked target summary only with authorized channels and excludes detached history', async () => {
+    const f = await createFixture(db)
+    const pageId = crypto.randomUUID()
+    const [secondChannel] = await connectFacebookPages(db, {
+      workspaceId: f.workspaceId,
+      actingUserId: f.ownerId,
+      pages: [
+        {
+          pageId,
+          displayName: 'Second support',
+          encryptedPageAccessToken: 'cipher',
+          tokenIv: 'iv',
+          tokenKeyVersion: 'v1',
+        },
+      ],
+    })
+    if (!secondChannel) throw new Error('Missing channel')
+    const first = await receiveContextInput(db, f, 'I prefer short explanations.')
+    const second = await receiveContextInput(
+      db,
+      { ...f, pageId },
+      'I previously preferred phone updates.',
+    )
+    const [a] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${first.conversationId})`,
+        ),
+      )
+    const [b] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${second.conversationId})`,
+        ),
+      )
+    const [owner] = await db
+      .select()
+      .from(member)
+      .where(and(eq(member.workspaceId, f.workspaceId), eq(member.type, 'HUMAN')))
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await setMemberChannelAccess(db, {
+      ...config,
+      memberId: owner.id,
+      channelIds: [f.channelId, secondChannel.id],
+    })
+    await setMemberChannelAccess(db, { ...config, channelIds: [f.channelId, secondChannel.id] })
+    await db
+      .update(customerMemory)
+      .set({ summary: 'Customer prefers short explanations.', sourceChannelIds: [f.channelId] })
+      .where(eq(customerMemory.customerId, a.customerId))
+    await changeCustomerIdentity(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: second.conversationId,
+      identityId: b.id,
+      targetCustomerId: a.customerId,
+      expectedCustomerId: b.customerId,
+      confirmed: true,
+    })
+    expect(
+      (
+        await getCustomerProfile(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: second.conversationId,
+        })
+      ).memory.summary,
+    ).toBe('Customer prefers short explanations.')
+    await updateAiMemberConfig(db, { ...config, memoryEnabled: true })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    await receiveContextInput(db, { ...f, pageId }, 'I now prefer email updates.')
+    await db
+      .update(customerMemory)
+      .set({ latestActivityAt: new Date(0) })
+      .where(eq(customerMemory.customerId, a.customerId))
+    const send = vi.fn(),
+      env = environment(undefined, { send } as unknown as Queue)
+    await handleScheduled(env)
+    const job = send.mock.calls
+      .map(([value]) => value)
+      .find((value) => value.type === 'customer.memory' && value.customerId === a.customerId)
+    vi.stubGlobal('fetch', async (_url: unknown, init?: RequestInit) => {
+      expect(String(init?.body)).toContain('I now prefer email updates.')
+      expect(String(init?.body)).not.toContain('I previously preferred phone updates.')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Customer prefers concise explanations and email updates.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(job)), env)
+    await setMemberChannelAccess(db, { ...config, channelIds: [secondChannel.id] })
+    expect(
+      await readCustomerMemory(db, {
+        workspaceId: f.workspaceId,
+        customerId: a.customerId,
+        memberId: f.aiMemberId,
+      }),
+    ).toMatchObject({ available: false, summary: '' })
+    await changeCustomerIdentity(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: second.conversationId,
+      identityId: b.id,
+      targetCustomerId: null,
+      expectedCustomerId: a.customerId,
+      confirmed: true,
+    })
+    const detached = await getCustomerProfile(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: second.conversationId,
+    })
+    expect(detached.memory.summary).toBe('')
+    if (!detached.customer) throw new Error('Missing detached customer')
+    const detachedCustomerId = detached.customer.id
+    await db
+      .update(customerMemory)
+      .set({ latestActivityAt: new Date(0) })
+      .where(inArray(customerMemory.customerId, [a.customerId, detachedCustomerId]))
+    send.mockClear()
+    await handleScheduled(env)
+    expect(
+      send.mock.calls.filter(
+        ([value]) =>
+          value.type === 'customer.memory' &&
+          [a.customerId, detachedCustomerId].includes(value.customerId),
+      ),
+    ).toHaveLength(0)
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(inArray(message.conversationId, [first.conversationId, second.conversationId])),
+    ).toHaveLength(3)
+  })
+  it('processes fifty-message and Unicode input limits in order without duplicate batches or quota bypass', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, memoryEnabled: true })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    let received: Awaited<ReturnType<typeof receiveContextInput>> | undefined
+    for (let i = 1; i <= 52; i++)
+      received = await receiveContextInput(db, f, i === 52 ? '🙂'.repeat(9000) : `Preference ${i}.`)
+    if (!received) throw new Error('Missing messages')
+    const [identity] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+        ),
+      )
+    await db
+      .update(customerMemory)
+      .set({ latestActivityAt: new Date(0) })
+      .where(eq(customerMemory.customerId, identity.customerId))
+    await saveAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId, monthlyLimit: 1 })
+    const send = vi.fn(),
+      env = environment(undefined, { send } as unknown as Queue)
+    const captures: { messages: { text: string; truncated: boolean }[] }[] = []
+    vi.stubGlobal('fetch', async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body)) as { messages: { content: string }[] }
+      const wrapper = JSON.parse(body.messages[1]?.content ?? '') as { communication: string[] }
+      captures.push(JSON.parse(wrapper.communication[0] ?? 'null') as (typeof captures)[number])
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Customer has stated communication preferences.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    const nextJob = async () => {
+      send.mockClear()
+      await handleScheduled(env)
+      return send.mock.calls
+        .map(([value]) => value)
+        .find(
+          (value) => value.type === 'customer.memory' && value.customerId === identity.customerId,
+        )
+    }
+    const first = await nextJob()
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(first)), env)
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(first)), env)
+    expect(captures.map((c) => c.messages.length)).toEqual([50])
+    const second = await nextJob()
+    const exhausted = queueMessage(second)
+    await handleMaintenanceBatch(batch('maintenance', exhausted), env)
+    expect(exhausted.ack).toHaveBeenCalledOnce()
+    expect(captures).toHaveLength(1)
+    await saveAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId, monthlyLimit: 3 })
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(second)), env)
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(second)), env)
+    expect(captures.map((c) => c.messages.length)).toEqual([50, 1])
+    expect(captures[1]?.messages[0]?.text).toBe('Preference 51.')
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(await nextJob())), env)
+    expect(captures.map((c) => c.messages.length)).toEqual([50, 1, 1])
+    expect(captures[2]?.messages[0]?.truncated).toBe(true)
+    expect(Array.from(captures[2]?.messages[0]?.text ?? '')).toHaveLength(8000)
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(3)
+    expect(
+      await db
+        .select()
+        .from(customerMemoryCommunication)
+        .where(eq(customerMemoryCommunication.identityId, identity.id)),
+    ).toHaveLength(52)
+  })
+  it('rejects a memory write after channel revocation and preserves stored memory when disabled', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, memoryEnabled: true })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveContextInput(db, f, 'I prefer email updates.')
+    const [identity] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+        ),
+      )
+    await db
+      .update(customerMemory)
+      .set({
+        summary: 'Customer prefers concise replies.',
+        sourceChannelIds: [f.channelId],
+        latestActivityAt: new Date(0),
+      })
+      .where(eq(customerMemory.customerId, identity.customerId))
+    const send = vi.fn(),
+      env = environment(undefined, { send } as unknown as Queue)
+    await handleScheduled(env)
+    const job = send.mock.calls
+      .map(([value]) => value)
+      .find((value) => value.type === 'customer.memory' && value.customerId === identity.customerId)
+    vi.stubGlobal('fetch', async () => {
+      await setMemberChannelAccess(db, { ...config, channelIds: [] })
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'An unauthorized changed summary.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(job)), env)
+    expect(
+      await db
+        .select()
+        .from(customerMemory)
+        .where(eq(customerMemory.customerId, identity.customerId)),
+    ).toMatchObject([{ summary: 'Customer prefers concise replies.' }])
+    await updateAiMemberConfig(db, { ...config, memoryEnabled: false })
+    await setMemberChannelAccess(db, { ...config, channelIds: [f.channelId] })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    send.mockClear()
+    await handleScheduled(env)
+    expect(
+      send.mock.calls.filter(
+        ([value]) => value.type === 'customer.memory' && value.customerId === identity.customerId,
+      ),
+    ).toHaveLength(0)
+    expect(
+      await db
+        .select()
+        .from(customerMemory)
+        .where(eq(customerMemory.customerId, identity.customerId)),
+    ).toMatchObject([{ summary: 'Customer prefers concise replies.' }])
+  })
+  it('uses authorized customer memory for continuity and cancels an answer when that memory is cleared', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, memoryEnabled: true, replyWaitEnabled: false })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveContextInput(db, f, 'Hello again.')
+    const [identity] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+        ),
+      )
+    const [owner] = await db
+      .select()
+      .from(member)
+      .where(and(eq(member.workspaceId, f.workspaceId), eq(member.type, 'HUMAN')))
+    await setMemberChannelAccess(db, { ...config, memberId: owner.id, channelIds: [f.channelId] })
+    await db
+      .update(customerMemory)
+      .set({ summary: 'Customer prefers concise replies.', sourceChannelIds: [f.channelId] })
+      .where(eq(customerMemory.customerId, identity.customerId))
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const outbound = vi.fn(),
+      aiQueue = vi.fn()
+    vi.stubGlobal('fetch', async (_url: unknown, init?: RequestInit) => {
+      expect(String(init?.body)).toContain('Customer prefers concise replies.')
+      expect(String(init?.body)).toContain('not company knowledge')
+      const profile = await getCustomerProfile(db, {
+        workspaceId: f.workspaceId,
+        userId: f.ownerId,
+        conversationId: received.conversationId,
+      })
+      await clearCustomerMemory(db, {
+        workspaceId: f.workspaceId,
+        userId: f.ownerId,
+        conversationId: received.conversationId,
+        expectedCustomerId: identity.customerId,
+        expectedRevision: profile.memory.revision,
+      })
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Hello, I will keep this brief.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+      {
+        ...environment({ send: outbound } as unknown as Queue),
+        AI_QUEUE: { send: aiQueue } as unknown as Queue,
+      },
+    )
+    expect(outbound).not.toHaveBeenCalled()
+    expect(aiQueue).toHaveBeenCalledOnce()
+    expect(
+      await db
+        .select({ state: aiResponseRun.state, reason: aiResponseRun.cancellationReason })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, assigned.aiResponseRunId ?? crypto.randomUUID())),
+    ).toEqual([{ state: 'CANCELLED', reason: 'CUSTOMER_MEMORY_CHANGED' }])
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        ),
+    ).toHaveLength(0)
+  })
+  it('summarizes silent customer communication without sending and deduplicates maintenance delivery', async () => {
+    const f = await createFixture(db)
+    const input = await receiveContextInput(db, f, 'I prefer short explanations.')
+    const [identity] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${input.conversationId})`,
+        ),
+      )
+    await db
+      .update(customerMemory)
+      .set({ latestActivityAt: new Date(Date.now() - 11 * 60_000) })
+      .where(eq(customerMemory.customerId, identity.customerId))
+    const send = vi.fn()
+    const env = environment(undefined, { send } as unknown as Queue)
+    await handleScheduled(env)
+    expect(
+      send.mock.calls.filter(
+        ([job]) => job.type === 'customer.memory' && job.customerId === identity.customerId,
+      ),
+    ).toHaveLength(0)
+    await updateAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      memoryEnabled: true,
+    })
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      actingUserId: f.ownerId,
+      providerConfigured: true,
+    })
+    await handleScheduled(env)
+    const jobs = send.mock.calls
+      .map(([job]) => job)
+      .filter((job) => job.type === 'customer.memory' && job.customerId === identity.customerId)
+    expect(jobs).toHaveLength(1)
+    const provider = vi.fn(async (_url: unknown, init?: RequestInit) => {
+      expect(String(init?.body)).toContain('I prefer short explanations.')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Customer prefers short explanations.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(jobs[0])), env)
+    await handleMaintenanceBatch(batch('maintenance', queueMessage(jobs[0])), env)
+    expect(provider).toHaveBeenCalledTimes(1)
+    expect(
+      await db
+        .select()
+        .from(customerMemory)
+        .where(eq(customerMemory.customerId, identity.customerId)),
+    ).toMatchObject([{ summary: 'Customer prefers short explanations.', pendingOperationId: null }])
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(1)
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(eq(message.conversationId, input.conversationId), eq(message.direction, 'OUTBOUND')),
+        ),
+    ).toHaveLength(0)
+  })
 
   it('reclassifies an edited semantic condition without reusing its previous cached decision', async () => {
     const f = await createFixture(db)

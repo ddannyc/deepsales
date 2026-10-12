@@ -1,5 +1,7 @@
 import { sql } from 'drizzle-orm'
 import {
+  bigint,
+  bigserial,
   boolean,
   check,
   foreignKey,
@@ -149,6 +151,7 @@ export const aiResponseRunState = pgEnum('ai_response_run_state', [
 export const aiResponseCancellationReason = pgEnum('ai_response_cancellation_reason', [
   'OWNERSHIP_CHANGED',
   'NEW_CUSTOMER_MESSAGE',
+  'CUSTOMER_MEMORY_CHANGED',
 ])
 
 export const workspace = pgTable('workspace', {
@@ -368,6 +371,12 @@ export const channelIdentity = pgTable(
       .notNull()
       .references(() => channel.id, { onDelete: 'cascade' }),
     externalUserId: text('external_user_id').notNull(),
+    memoryBoundarySequence: bigint('memory_boundary_sequence', { mode: 'number' })
+      .default(0)
+      .notNull(),
+    memoryBoundaryAt: timestamp('memory_boundary_at', { withTimezone: true })
+      .default(sql`'1970-01-01'::timestamptz`)
+      .notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
@@ -786,6 +795,12 @@ export const aiResponseRun = pgTable(
       onDelete: 'set null',
     }),
     configSnapshot: jsonb('config_snapshot').$type<AiMemberRuntimeSnapshot>(),
+    customerMemoryInput: jsonb('customer_memory_input').$type<{
+      customerId: string
+      revision: number
+      summary: string
+      sourceChannelIds: string[]
+    }>(),
     advertisingContext: jsonb('advertising_context').$type<AdvertisingContext>(),
     contextMessageIds: uuid('context_message_ids').array(),
     outputMessageId: uuid('output_message_id').references(() => message.id, {
@@ -998,6 +1013,7 @@ export type AiMemberRuntimeSnapshot = {
   automaticLanguageEnabled?: boolean
   timeZone?: string
   naturalToneEnabled?: boolean
+  memoryEnabled?: boolean
   replyWaitEnabled?: boolean
   instructions: string
   responseLanguage: string
@@ -1066,6 +1082,7 @@ export const aiMemberConfig = pgTable('ai_member_config', {
   automaticLanguageEnabled: boolean('automatic_language_enabled').default(false).notNull(),
   timeZone: text('time_zone').default('UTC').notNull(),
   naturalToneEnabled: boolean('natural_tone_enabled').default(false).notNull(),
+  memoryEnabled: boolean('memory_enabled').default(false).notNull(),
   replyWaitEnabled: boolean('reply_wait_enabled').default(true).notNull(),
   memberId: uuid('member_id')
     .primaryKey()
@@ -1101,6 +1118,51 @@ export const aiConfigVersion = pgTable('ai_config_version', {
   snapshot: jsonb().$type<AiMemberRuntimeSnapshot>().notNull(),
   publishedAt: timestamp('published_at', { withTimezone: true }).defaultNow().notNull(),
 })
+
+export const customerMemory = pgTable(
+  'customer_memory',
+  {
+    customerId: uuid('customer_id')
+      .primaryKey()
+      .references(() => customer.id, { onDelete: 'cascade' }),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    summary: text().default('').notNull(),
+    revision: integer().default(0).notNull(),
+    cursor: bigint({ mode: 'number' }).default(0).notNull(),
+    clearedAt: timestamp('cleared_at', { withTimezone: true })
+      .default(sql`'1970-01-01'::timestamptz`)
+      .notNull(),
+    latestActivityAt: timestamp('latest_activity_at', { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    sourceChannelIds: uuid('source_channel_ids').array().default(sql`ARRAY[]::uuid[]`).notNull(),
+    pendingOperationId: uuid('pending_operation_id'),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('customer_memory_due_idx').on(t.latestActivityAt),
+    check('customer_memory_summary_size', sql`char_length(${t.summary}) <= 1000`),
+    check('customer_memory_revision_valid', sql`${t.revision} >= 0 and ${t.cursor} >= 0`),
+  ],
+)
+
+export const customerMemoryCommunication = pgTable(
+  'customer_memory_communication',
+  {
+    sequence: bigserial({ mode: 'number' }).primaryKey(),
+    messageId: uuid('message_id')
+      .notNull()
+      .unique()
+      .references(() => message.id, { onDelete: 'cascade' }),
+    identityId: uuid('identity_id')
+      .notNull()
+      .references(() => channelIdentity.id, { onDelete: 'cascade' }),
+    occurredAt: timestamp('occurred_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [index('customer_memory_communication_identity_idx').on(t.identityId, t.sequence)],
+)
 
 export const aiBudget = pgTable(
   'ai_budget',
@@ -1256,7 +1318,7 @@ export const aiOperation = pgTable(
     index('ai_operation_workspace_period_idx').on(table.workspaceId, table.period),
     check(
       'ai_operation_kind_valid',
-      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION', 'SUGGESTION', 'PERSONA')`,
+      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION', 'SUGGESTION', 'PERSONA', 'CUSTOMER_MEMORY')`,
     ),
     check(
       'ai_operation_state_valid',

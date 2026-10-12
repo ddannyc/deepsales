@@ -16,6 +16,7 @@ import {
   claimFacebookInboundAttachment,
   claimKnowledgeDocument,
   claimOutboundMessage,
+  clearCustomerMemory,
   closeConversation,
   commitAiResponse,
   completeFacebookInboundAttachment,
@@ -66,6 +67,7 @@ import {
   KnowledgeProcessingError,
   listCustomerLinkTargets,
   listCustomerPropertyHistory,
+  listDueCustomerMemoryIds,
   listFacebookChannels,
   listFacebookChannelsPage,
   listFacebookConversations,
@@ -156,6 +158,7 @@ import { aiOperationsRoutes } from './ai-operations'
 import { meteredAiFetch } from './ai-usage'
 import { createAuth } from './auth'
 import type { Bindings } from './bindings'
+import { customerMemoryJobSchema, processCustomerMemoryJob } from './customer-memory'
 import {
   createFacebookAdapter,
   decryptFacebookToken,
@@ -389,6 +392,7 @@ const aiMemberConfigInput = z
     handoffKeywords: z.array(z.string().max(100)).max(100).optional(),
     adLearningEnabled: z.boolean().optional(),
     naturalToneEnabled: z.boolean().optional(),
+    memoryEnabled: z.boolean().optional(),
     replyWaitEnabled: z.boolean().optional(),
     adMappings: z
       .array(z.object({ adId: z.string().max(200), content: z.string().max(4000) }).strict())
@@ -2403,6 +2407,20 @@ app.patch('/api/workspaces/:workspaceId/conversations/:conversationId/customer-p
     return updateCustomerProfile(db, { ...context, ...parsed.data })
   }),
 )
+app.post('/api/workspaces/:workspaceId/conversations/:conversationId/customer-memory/clear', (c) =>
+  customerRequest(c, async (db, context) => {
+    const input = z
+      .object({
+        expectedCustomerId: z.string().uuid(),
+        expectedRevision: z.number().int().nonnegative(),
+      })
+      .strict()
+      .safeParse(await c.req.json().catch(() => null))
+    if (!input.success)
+      throw new CustomerError('INVALID_REQUEST', 'Customer and memory revision required')
+    return clearCustomerMemory(db, { ...context, ...input.data })
+  }),
+)
 
 const propertyDefinitionInput = z
   .object({
@@ -3342,6 +3360,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       continue
     }
     if (claimed.kind === 'CANCELLED') {
+      if (claimed.aiResponseRunId) await enqueueAiResponseJob(env, claimed.aiResponseRunId)
       await publishInboxChange(
         env,
         claimed.workspaceId,
@@ -3639,6 +3658,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           : null,
         timeZone: currentSnapshot.timeZone,
         naturalToneEnabled: currentSnapshot.naturalToneEnabled,
+        customerMemoryInput: claimed.customerMemoryInput,
         instructions: currentSnapshot.instructions,
         responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,
@@ -3753,6 +3773,8 @@ async function publishAiReplyResult(
     await publishInboxChange(env, result.workspaceId, result.message.id, 'message.changed')
     for (const part of result.messages) await enqueueOutboundMessage(env, part.id)
   }
+  if (result.kind === 'CANCELLED' && result.aiResponseRunId)
+    await enqueueAiResponseJob(env, result.aiResponseRunId)
 }
 
 async function completeAiHandoff(
@@ -4415,6 +4437,28 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
 
 export async function handleMaintenanceBatch(batch: MessageBatch<unknown>, env: Bindings) {
   for (const queueMessage of batch.messages) {
+    const memoryJob = customerMemoryJobSchema.safeParse(queueMessage.body)
+    if (memoryJob.success) {
+      try {
+        await processCustomerMemoryJob(
+          env,
+          memoryJob.data.customerId,
+          memoryJob.data.revision,
+          withDatabase,
+        )
+        queueMessage.ack()
+      } catch (error) {
+        if (error instanceof AiUsageError && error.code === 'QUOTA_EXHAUSTED') queueMessage.ack()
+        else
+          queueMessage.retry({
+            delaySeconds:
+              error instanceof AiUsageError && error.code === 'RETRY_LATER'
+                ? Math.max(1, Math.ceil(error.retryAfterMs / 1000))
+                : 30,
+          })
+      }
+      continue
+    }
     const job = maintenanceRoutingJobSchema.safeParse(queueMessage.body)
     if (!job.success) {
       queueMessage.ack()
@@ -4495,6 +4539,9 @@ export async function handleScheduled(env: Bindings) {
     }
 
     if (env.MAINTENANCE_QUEUE) {
+      const memoryCustomerIds = await withDatabase(env, (db) => listDueCustomerMemoryIds(db))
+      for (const input of memoryCustomerIds)
+        await env.MAINTENANCE_QUEUE.send({ v: 1, type: 'customer.memory', ...input })
       await enqueueMaintenanceJobs(
         env,
         await withDatabase(env, (db) => listQueuedConversationIds(db)),

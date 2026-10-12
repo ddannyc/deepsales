@@ -313,6 +313,7 @@ type AiMemberRuntimeSnapshot = {
   automaticLanguageEnabled?: boolean
   timeZone?: string
   naturalToneEnabled?: boolean
+  memoryEnabled?: boolean
   replyWaitEnabled?: boolean
   adLearningEnabled?: boolean
   adMappings?: { adId: string; content: string }[]
@@ -332,6 +333,7 @@ type AiMemberConfig = {
   automaticLanguageEnabled: boolean
   timeZone: string
   naturalToneEnabled: boolean
+  memoryEnabled: boolean
   replyWaitEnabled: boolean
   adLearningEnabled: boolean
   adMappings: { adId: string; content: string }[]
@@ -366,6 +368,7 @@ type AiMemberDraft = Pick<
   | 'adLearningEnabled'
   | 'adMappings'
   | 'naturalToneEnabled'
+  | 'memoryEnabled'
   | 'replyWaitEnabled'
   | 'automaticLanguageEnabled'
   | 'timeZone'
@@ -4359,6 +4362,28 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
             }
           />
           <Separator />
+          <section aria-label="客户长期摘要" className="ai-config-section">
+            <h2>客户长期摘要</h2>
+            <div className="switch-field">
+              <span id="ai-memory-label">使用客户长期摘要</span>
+              <Switch
+                aria-labelledby="ai-memory-label"
+                checked={draft.memoryEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) =>
+                  setDraft((current) =>
+                    current ? { ...current, memoryEnabled: checked } : current,
+                  )
+                }
+              />
+            </div>
+            <p className="field-description">
+              默认关闭，保存草稿并发布后生效。启用后在客户通信沉默 10
+              分钟后更新摘要，计入工作区用量。
+              关闭不删除既存摘要；管理员可在客户资料中主动清除。只有拥有全部贡献渠道权限的成员能读取共享摘要，公司事实仍须依据知识库。
+            </p>
+          </section>
+          <Separator />
           <section aria-labelledby="ai-style-title" className="ai-config-section">
             <div className="section-heading">
               <div>
@@ -4626,6 +4651,10 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                   <dd>{config.publishedSnapshot.naturalToneEnabled ? '启用' : '停用'}</dd>
                 </div>
                 <div>
+                  <dt>客户长期摘要</dt>
+                  <dd>{config.publishedSnapshot.memoryEnabled ? '启用' : '停用'}</dd>
+                </div>
+                <div>
                   <dt>拆分长回复</dt>
                   <dd>{config.publishedSnapshot.splitRepliesEnabled ? '启用' : '停用'}</dd>
                 </div>
@@ -4687,6 +4716,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.adLearningEnabled ?? false,
       left.adMappings ?? [],
       left.naturalToneEnabled ?? false,
+      left.memoryEnabled ?? false,
       left.replyWaitEnabled ?? true,
       left.automaticLanguageEnabled ?? false,
       left.timeZone ?? 'UTC',
@@ -4705,6 +4735,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       right.adLearningEnabled ?? false,
       right.adMappings ?? [],
       right.naturalToneEnabled ?? false,
+      right.memoryEnabled ?? false,
       right.replyWaitEnabled ?? true,
       right.automaticLanguageEnabled ?? false,
       right.timeZone ?? 'UTC',
@@ -4719,6 +4750,7 @@ function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
     instructions: config.instructions,
     stopRules: config.stopRules ?? emptyStopRules,
     naturalToneEnabled: config.naturalToneEnabled ?? false,
+    memoryEnabled: config.memoryEnabled ?? false,
     replyWaitEnabled: config.replyWaitEnabled ?? true,
     automaticLanguageEnabled: config.automaticLanguageEnabled ?? false,
     timeZone: config.timeZone ?? 'UTC',

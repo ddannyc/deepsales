@@ -1,15 +1,16 @@
 import { and, desc, eq, isNull, or, sql } from 'drizzle-orm'
+import { invalidateCustomerMemory, readCustomerMemory } from './customer-memory'
 import type { Database } from './database'
 import {
   channel,
   channelIdentity,
   conversation,
   customer,
-  customerTag,
-  customerTagDefinition,
   customerPropertyDefinition,
   customerPropertyHistory,
   customerPropertyValue,
+  customerTag,
+  customerTagDefinition,
   member,
   memberChannelAccess,
   workspace,
@@ -162,6 +163,11 @@ export async function getCustomerProfile(db: Database, input: CustomerContext) {
       )
     return {
       customer: profile,
+      memory: await readCustomerMemory(tx, {
+        workspaceId: input.workspaceId,
+        customerId: found.identity.customerId,
+        memberId: found.viewer.id,
+      }),
       definitions,
       values,
       ...historyPage,
@@ -333,11 +339,50 @@ export async function changeCustomerIdentity(
         .values({ workspaceId: input.workspaceId })
         .returning({ id: customer.id, displayName: customer.displayName })
     }
+    await invalidateCustomerMemory(tx, {
+      workspaceId: input.workspaceId,
+      customerId: identity.customerId,
+      clear: true,
+    })
+    await invalidateCustomerMemory(tx, {
+      workspaceId: input.workspaceId,
+      customerId: target.id,
+      clear: false,
+    })
     await tx
       .update(channelIdentity)
       .set({ customerId: target.id, updatedAt: new Date() })
       .where(eq(channelIdentity.id, identity.id))
     return { customerId: target.id, identityId: identity.id }
+  })
+}
+
+export async function clearCustomerMemory(
+  db: Database,
+  input: CustomerContext & { expectedCustomerId: string; expectedRevision: number },
+) {
+  return db.transaction(async (tx) => {
+    const found = await access(tx, input)
+    requireManager(found.viewer)
+    if (found.identity.customerId !== input.expectedCustomerId)
+      throw new CustomerError('CONFLICT', 'Identity changed')
+    const memory = await readCustomerMemory(tx, {
+      workspaceId: input.workspaceId,
+      customerId: found.identity.customerId,
+      memberId: found.viewer.id,
+    })
+    if (!memory.available)
+      throw new CustomerError('FORBIDDEN', 'Memory includes a restricted channel')
+    if (memory.revision !== input.expectedRevision)
+      throw new CustomerError('CONFLICT', 'Memory changed; refresh before clearing')
+    const cleared = await invalidateCustomerMemory(tx, {
+      workspaceId: input.workspaceId,
+      customerId: found.identity.customerId,
+      clear: true,
+      expectedRevision: input.expectedRevision,
+    })
+    if (!cleared) throw new CustomerError('CONFLICT', 'Memory changed; refresh before clearing')
+    return { cleared: true }
   })
 }
 

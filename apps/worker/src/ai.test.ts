@@ -1,16 +1,49 @@
-import { describe, expect, it, vi } from 'vitest'
 import { EMPTY_AI_STOP_RULES, isAiStopPeriod, normalizeAiStopRules } from '@deepsales/db'
+import { describe, expect, it, vi } from 'vitest'
 import {
   ALIBABA_LLM_PROVIDER,
-  DEFAULT_LLM_MODEL,
   AlibabaLlmProvider,
-  applyHandoffPolicy,
   aiDecisionSchema,
+  applyHandoffPolicy,
   buildAiPrompt,
+  DEFAULT_LLM_MODEL,
   detectConfiguredHandoff,
   enforceGrounding,
   isLlmProviderConfigurationUsable,
 } from './ai'
+
+describe('private customer memory output', () => {
+  it('counts Unicode code points and rejects oversized or action-bearing summaries', async () => {
+    let output: Record<string, unknown> = {
+      decision: 'ANSWER',
+      response: '🙂'.repeat(1000),
+      handoffReason: null,
+      containsBusinessFacts: false,
+      usedChunkIds: [],
+    }
+    const provider = new AlibabaLlmProvider(
+      { apiKey: 'test', baseUrl: 'http://ai.test/v1' },
+      async () => Response.json({ choices: [{ message: { content: JSON.stringify(output) } }] }),
+    )
+    const input = {
+      purpose: 'MEMORY' as const,
+      instructions: '',
+      responseLanguage: 'English',
+      history: [],
+      messages: [],
+      knowledgeChunks: [],
+    }
+    expect((await provider.generateResponse(input)).response).toBe('🙂'.repeat(1000))
+    output = { ...output, response: 'a'.repeat(1001) }
+    await expect(provider.generateResponse(input)).rejects.toThrow()
+    output = {
+      ...output,
+      response: 'A neutral preference.',
+      mediaAssetId: '95dc1447-5f62-4d77-92b3-6a04e6eb8388',
+    }
+    await expect(provider.generateResponse(input)).rejects.toThrow()
+  })
+})
 
 describe('weekly stop periods', () => {
   it.each([

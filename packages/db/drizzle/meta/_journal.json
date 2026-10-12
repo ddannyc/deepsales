@@ -288,6 +288,27 @@
       "when": 1791806492382,
       "tag": "0040_batch_tests",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1791822469876,
+      "tag": "0041_customer_memory",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1791822819471,
+      "tag": "0042_memory_identity_boundaries",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1791823194159,
+      "tag": "0043_memory_response_freshness",
+      "breakpoints": true
     }
   ]
 }

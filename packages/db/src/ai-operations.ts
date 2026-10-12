@@ -102,7 +102,14 @@ export async function reserveAiOperation(
   input: {
     id: string
     workspaceId: string
-    kind: 'LIVE_REPLY' | 'TEST' | 'KNOWLEDGE_INDEX' | 'TRANSLATION' | 'SUGGESTION' | 'PERSONA'
+    kind:
+      | 'LIVE_REPLY'
+      | 'TEST'
+      | 'KNOWLEDGE_INDEX'
+      | 'TRANSLATION'
+      | 'SUGGESTION'
+      | 'PERSONA'
+      | 'CUSTOMER_MEMORY'
     memberId?: string
     configVersionId?: string | null
     now?: Date
@@ -411,6 +418,7 @@ export async function resolveTestConfiguration(
       adLearningEnabled: config.adLearningEnabled,
       adMappings: config.adMappings,
       naturalToneEnabled: config.naturalToneEnabled,
+      memoryEnabled: config.memoryEnabled,
       replyWaitEnabled: config.replyWaitEnabled,
     }
   if (input.source === 'PUBLISHED') {
@@ -920,7 +928,13 @@ export async function getAiDiagnostics(db: Database, input: Identity & { id: str
       ),
     )
   return {
-    run: run?.run ?? null,
+    run: run
+      ? {
+          ...run.run,
+          customerMemoryInput: undefined,
+          customerMemoryRevision: run.run.customerMemoryInput?.revision ?? null,
+        }
+      : null,
     operation: operation
       ? {
           id: operation.id,

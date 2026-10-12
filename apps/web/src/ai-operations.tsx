@@ -49,6 +49,7 @@ type Diagnostics = {
     | (Run & {
         configSnapshot: Record<string, unknown> | null
         advertisingContext?: { status: string; adId?: string; content?: string } | null
+        customerMemoryRevision?: number | null
       })
     | null
   operation: {
@@ -110,6 +111,8 @@ const labels: Record<string, string> = {
   TRANSLATION: '人工翻译',
   SUGGESTION: '回复建议',
   PERSONA: '人设草稿',
+  CUSTOMER_MEMORY: '客户长期摘要',
+  CUSTOMER_MEMORY_CHANGED: '长期摘要或其权限已变化，重新生成',
   HUMAN: '人工',
   AI: 'AI',
   KNOWLEDGE: '知识问题',
@@ -611,6 +614,9 @@ export function AiOperations({
                   '草稿或历史记录无版本'}
               </p>
               {diagnostics.run?.failureCode && <p>{label(diagnostics.run.failureCode)}</p>}
+              {diagnostics.run?.customerMemoryRevision != null && (
+                <p>长期摘要输入修订：{diagnostics.run.customerMemoryRevision}</p>
+              )}
               {diagnostics.operation?.failureCode && (
                 <p>{label(diagnostics.operation.failureCode)}</p>
               )}
@@ -816,6 +822,10 @@ function SnapshotPreview({ snapshot }: { snapshot: Record<string, unknown> | nul
       <div>
         <dt>自然语气</dt>
         <dd>{snapshot.naturalToneEnabled ? '启用' : '停用'}</dd>
+      </div>
+      <div>
+        <dt>客户长期摘要</dt>
+        <dd>{snapshot.memoryEnabled ? '启用' : '停用'}</dd>
       </div>
       <div>
         <dt>拆分长回复</dt>

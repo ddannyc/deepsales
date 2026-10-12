@@ -1,15 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { Button } from './components/ui/button'
-import { Input } from './components/ui/input'
-import { Textarea } from './components/ui/textarea'
-import {
-  Sheet,
-  SheetClose,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from './components/ui/sheet'
 import {
   Dialog,
   DialogContent,
@@ -18,6 +8,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from './components/ui/dialog'
+import { Input } from './components/ui/input'
+import {
+  Sheet,
+  SheetClose,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from './components/ui/sheet'
+import { Textarea } from './components/ui/textarea'
 
 type Definition = {
   id: string
@@ -30,6 +30,7 @@ type Definition = {
 }
 type Tag = { id: string; name: string; level: 'CUSTOMER' | 'CONVERSATION' }
 type Profile = {
+  memory: { available: boolean; summary: string; revision: number; state: string }
   customer: {
     id: string
     displayName: string | null
@@ -287,6 +288,7 @@ function CustomerFacts({
   } | null>(null)
   const [targets, setTargets] = useState<{ id: string; displayName: string | null }[]>([])
   const [targetId, setTargetId] = useState('')
+  const [clearingMemory, setClearingMemory] = useState(false)
   const [targetCursor, setTargetCursor] = useState<string | null>(null)
   const [link, setLink] = useState<{
     identityId: string
@@ -385,6 +387,36 @@ function CustomerFacts({
           >
             仅查看此客户的对话
           </Button>
+          <section aria-label="客户长期摘要" className="customer-section">
+            <h3>客户长期摘要</h3>
+            <p>独立于属性和当前会话；已关联身份共享，保留至管理员主动清除。</p>
+            <p>
+              {profile.memory?.available === false
+                ? '摘要包含无权限的贡献渠道，当前不可读取。'
+                : profile.memory?.summary || '暂无长期摘要。'}
+            </p>
+            {profile.memory &&
+              ['FAILED', 'UNKNOWN', 'STARTED', 'RESERVED'].includes(profile.memory.state) && (
+                <p role="status">
+                  {profile.memory.state === 'UNKNOWN'
+                    ? '更新结果不明，已暂停。'
+                    : profile.memory.state === 'FAILED'
+                      ? '最近更新失败，既存摘要已保留。'
+                      : '摘要更新处理中。'}
+                </p>
+              )}
+            {manager && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={busy || profile.memory?.available === false}
+                onClick={() => setClearingMemory(true)}
+              >
+                清除长期摘要
+              </Button>
+            )}
+          </section>
           <form
             key={`${profile.customer.id}:${profile.customer.profileRevision}`}
             onSubmit={(event) => {
@@ -975,6 +1007,49 @@ function CustomerFacts({
         </DialogContent>
       </Dialog>
       <Dialog
+        open={clearingMemory}
+        onOpenChange={(open) => {
+          if (!busy) setClearingMemory(open)
+        }}
+      >
+        <DialogContent className="customer-facts-dialog">
+          <DialogHeader>
+            <DialogTitle>清除长期摘要？</DialogTitle>
+            <DialogDescription>
+              清除会使旧摘要和更新任务失效。原始消息保留，旧历史不会自动重建摘要；之后的新沟通可形成新记忆。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setClearingMemory(false)}
+            >
+              保留摘要
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={busy || !profile}
+              onClick={() =>
+                void action(async () => {
+                  if (!profile) return
+                  await save('/customer-memory/clear', 'POST', {
+                    expectedCustomerId: profile.customer.id,
+                    expectedRevision: profile.memory.revision,
+                  })
+                  setClearingMemory(false)
+                  setStatus('长期摘要已清除；旧历史不会自动重建。')
+                })
+              }
+            >
+              确认清除摘要
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
         open={link !== null}
         onOpenChange={(open) => {
           if (!open && !busy) setLink(null)
@@ -989,6 +1064,7 @@ function CustomerFacts({
                 ? '将共享目标客户资料、客户属性和标签。'
                 : '将创建独立客户档案，停止共享现有客户资料、属性和标签。'}
               消息历史、会话负责人及发送资格保持原值。
+              原客户的共享摘要将清除，清除前历史不会自动重建；关联目标的既存摘要保留。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -46,6 +46,7 @@ export type AiMemberConfig = {
   automaticLanguageEnabled: boolean
   timeZone: string
   naturalToneEnabled: boolean
+  memoryEnabled: boolean
   replyWaitEnabled: boolean
   memberId: string
   memberDisplayName: string | null
@@ -73,6 +74,7 @@ export type UpdateAiMemberConfigInput = {
   automaticLanguageEnabled?: boolean
   timeZone?: string
   naturalToneEnabled?: boolean
+  memoryEnabled?: boolean
   replyWaitEnabled?: boolean
   workspaceId: string
   memberId: string
@@ -138,6 +140,7 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
         adLearningEnabled: draft.adLearningEnabled ?? false,
         adMappings: draft.adMappings ?? [],
         naturalToneEnabled: draft.naturalToneEnabled ?? false,
+        memoryEnabled: draft.memoryEnabled ?? false,
         replyWaitEnabled: draft.replyWaitEnabled ?? true,
       })
     }
@@ -219,6 +222,7 @@ export async function publishAiMemberConfig(
       adLearningEnabled: config.adLearningEnabled,
       adMappings: config.adMappings,
       naturalToneEnabled: config.naturalToneEnabled,
+      memoryEnabled: config.memoryEnabled,
       replyWaitEnabled: config.replyWaitEnabled,
     }
     const [version] = await tx
@@ -296,6 +300,7 @@ async function selectAiMemberConfig(
       adLearningEnabled: aiMemberConfig.adLearningEnabled,
       adMappings: aiMemberConfig.adMappings,
       naturalToneEnabled: aiMemberConfig.naturalToneEnabled,
+      memoryEnabled: aiMemberConfig.memoryEnabled,
       replyWaitEnabled: aiMemberConfig.replyWaitEnabled,
       publishedSnapshot: aiMemberConfig.publishedSnapshot,
       publishedAt: aiMemberConfig.publishedAt,
@@ -327,6 +332,7 @@ async function selectAiMemberConfig(
     adLearningEnabled: row.adLearningEnabled ?? false,
     adMappings: row.adMappings ?? [],
     naturalToneEnabled: row.naturalToneEnabled ?? false,
+    memoryEnabled: row.memoryEnabled ?? false,
     replyWaitEnabled: row.replyWaitEnabled ?? true,
     publishedSnapshot: row.publishedSnapshot ?? null,
     publishedAt: row.publishedAt ?? null,
@@ -444,6 +450,7 @@ export async function restoreAiConfigVersion(
         adLearningEnabled: version.snapshot.adLearningEnabled ?? false,
         adMappings: version.snapshot.adMappings ?? [],
         naturalToneEnabled: version.snapshot.naturalToneEnabled ?? false,
+        memoryEnabled: version.snapshot.memoryEnabled ?? false,
         replyWaitEnabled: version.snapshot.replyWaitEnabled ?? true,
         knowledgeBaseId: base?.id ?? null,
         updatedAt: new Date(),
@@ -454,6 +461,8 @@ export async function restoreAiConfigVersion(
 }
 
 function normalizeDraft(input: UpdateAiMemberConfigInput) {
+  if (input.memoryEnabled !== undefined && typeof input.memoryEnabled !== 'boolean')
+    throw new AiMemberError('INVALID_REQUEST', 'Invalid customer memory setting')
   let stopRules: AiStopRules | undefined
   if (input.stopRules !== undefined) {
     try {
@@ -487,6 +496,7 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
     handoffKeywords,
     adLearningEnabled: input.adLearningEnabled,
     naturalToneEnabled: input.naturalToneEnabled,
+    memoryEnabled: input.memoryEnabled,
     replyWaitEnabled: input.replyWaitEnabled,
     adMappings: input.adMappings === undefined ? undefined : normalizeAdMappings(input.adMappings),
   }
@@ -537,6 +547,7 @@ function defaultConfig(memberId: string) {
     adLearningEnabled: false,
     adMappings: [],
     naturalToneEnabled: false,
+    memoryEnabled: false,
     replyWaitEnabled: true,
     publishedSnapshot: null,
     publishedAt: null,

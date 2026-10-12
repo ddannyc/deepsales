@@ -27,6 +27,7 @@ const e2eOwnerKeys = [
   'ai-bench',
   'ai-persona',
   'ai-batch',
+  'customer-memory',
   'lifecycle',
   'facebook',
   'inbox',

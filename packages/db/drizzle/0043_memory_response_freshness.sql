@@ -1,0 +1,1 @@
+ALTER TYPE "public"."ai_response_cancellation_reason" ADD VALUE 'CUSTOMER_MEMORY_CHANGED';
