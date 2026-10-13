@@ -31,6 +31,12 @@ export async function executeAiTest(
   const workspaceId = operation.workspaceId
   const snapshot = aiMemberRuntimeSnapshotSchema.parse(operation.snapshot)
   const testContext = (operation.output as { testContext?: AiTestContext } | null)?.testContext
+  const propertyRules =
+    (
+      operation.output as {
+        propertyRules?: import('@deepsales/db').AiPropertyCollection['rules']
+      } | null
+    )?.propertyRules ?? []
   const history = (testContext?.history ?? []).map((item) => ({
     ...item,
     createdAt: new Date(item.createdAt),
@@ -171,6 +177,7 @@ export async function executeAiTest(
     messages: [{ id: input.id, text: input.text }],
     history,
     simulatedCustomer: testContext?.customer,
+    propertyRules,
     establishedLanguage: snapshot.automaticLanguageEnabled
       ? testContext?.customer.language || undefined
       : undefined,

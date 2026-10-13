@@ -1,12 +1,19 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
 import { assertAiHandoffReferences, readEnabledAiHandoffRules } from './ai-handoff-rules'
 import { AiMemberError, assertAiManager, getAiMemberConfig } from './ai-members'
+import {
+  type AiCollectedProperty,
+  readAiTestPropertyRules,
+  sameAiPropertyRules,
+  validateAiCollectedProperties,
+} from './ai-property-rules'
 import { type AiConversationContextMessage, normalizeAiReplyLanguage } from './ai-responses'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES } from './ai-stop'
 import type { Database } from './database'
 import { assertInboxConversationAccess } from './inbox'
 import {
   type AiMemberRuntimeSnapshot,
+  type AiPropertyCollection,
   type AiTestCustomer,
   aiBudget,
   aiConfigVersion,
@@ -116,6 +123,7 @@ export async function reserveAiOperation(
     text?: string
     snapshot?: AiMemberRuntimeSnapshot
     testContext?: AiTestContext
+    propertyRules?: AiPropertyCollection['rules']
     handoffContext?: {
       rules: Awaited<ReturnType<typeof readEnabledAiHandoffRules>>
       facts: { properties: { definitionId: string; value: string | number }[]; tags: string[] }
@@ -192,7 +200,11 @@ export async function reserveAiOperation(
         input: input.text,
         snapshot: input.snapshot,
         output: input.handoffContext
-          ? { handoffContext: input.handoffContext, testContext: input.testContext }
+          ? {
+              handoffContext: input.handoffContext,
+              testContext: input.testContext,
+              propertyRules: input.propertyRules,
+            }
           : undefined,
         createdAt: now,
         updatedAt: now,
@@ -729,6 +741,7 @@ export async function createAiTest(
       text: input.text.trim(),
       snapshot,
       handoffContext: { rules, facts },
+      propertyRules: await readAiTestPropertyRules(tx, input.workspaceId, input.memberId),
       testContext,
     })
     if (session && !session.operationIds.includes(operation.id)) {
@@ -749,6 +762,26 @@ export async function recordAiTestResult(
   await db.transaction(async (tx) => {
     const [record] = await tx.select().from(aiOperation).where(eq(aiOperation.id, input.id))
     const context = (record?.output as { testContext?: AiTestContext } | null)?.testContext
+    const propertyRules =
+      (record?.output as { propertyRules?: AiPropertyCollection['rules'] } | null)?.propertyRules ??
+      []
+    const collected =
+      (input.output as { decision?: { collectedProperties?: AiCollectedProperty[] } } | null)
+        ?.decision?.collectedProperties ?? []
+    validateAiCollectedProperties(propertyRules, collected)
+    if (record?.memberId) {
+      await tx.execute(sql`select id from ${workspace} where id = ${record.workspaceId} for share`)
+      if (
+        !sameAiPropertyRules(
+          { customerId: '', rules: propertyRules },
+          {
+            customerId: '',
+            rules: await readAiTestPropertyRules(tx, record.workspaceId, record.memberId),
+          },
+        )
+      )
+        throw new AiMemberError('INVALID_CONFIGURATION')
+    }
     if (context && record?.memberId) {
       await tx.execute(sql`select id from ${workspace} where id = ${record.workspaceId} for share`)
       const [session] = await tx
@@ -796,7 +829,11 @@ export async function recordAiTestResult(
     const updated = await tx
       .update(aiOperation)
       .set({
-        output: context ? { ...(input.output as object), testContext: context } : input.output,
+        output: {
+          ...(input.output as object),
+          ...(context ? { testContext: context } : {}),
+          propertyRules,
+        },
         chunkIds: input.chunkIds,
         state: 'COMPLETED',
         updatedAt: new Date(),
@@ -815,6 +852,23 @@ export async function recordAiTestResult(
           customer: sql`jsonb_set(${aiTestSession.customer}, '{language}', ${JSON.stringify(selection.language)}::jsonb)`,
         })
         .where(eq(aiTestSession.id, context.sessionId))
+    if (updated.length && context && collected.length) {
+      const [session] = await tx
+        .select()
+        .from(aiTestSession)
+        .where(eq(aiTestSession.id, context.sessionId))
+      const properties = [
+        ...session.customer.properties.filter(
+          (p) => !collected.some((v) => v.definitionId === p.definitionId),
+        ),
+        ...collected,
+      ]
+      await validateTestCustomer(tx, record?.workspaceId ?? '', { ...session.customer, properties })
+      await tx
+        .update(aiTestSession)
+        .set({ customer: { ...session.customer, properties } })
+        .where(eq(aiTestSession.id, session.id))
+    }
   })
 }
 

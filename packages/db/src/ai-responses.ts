@@ -5,6 +5,12 @@ import {
   readEnabledAiHandoffRules,
 } from './ai-handoff-rules'
 import {
+  type AiCollectedProperty,
+  applyAiCollectedProperties,
+  readAiPropertyCollection,
+  sameAiPropertyRules,
+} from './ai-property-rules'
+import {
   assertAiStopReferences,
   EMPTY_AI_STOP_RULES,
   isAiStopPeriod,
@@ -15,6 +21,7 @@ import { readCustomerMemory } from './customer-memory'
 import type { Database } from './database'
 import {
   type AiMemberRuntimeSnapshot,
+  type AiPropertyCollection,
   aiMemberConfig,
   aiResponseRun,
   channel,
@@ -53,6 +60,7 @@ export type AiResponseInputMessage = {
 }
 
 export type AiResponseRunClaim = {
+  propertyCollection: AiPropertyCollection
   customerMemoryInput?: {
     customerId: string
     revision: number
@@ -81,7 +89,7 @@ export type AiResponseRunClaimResult =
       kind: 'CANCELLED'
       workspaceId: string
       conversationId: string
-      cancellationReason: 'OWNERSHIP_CHANGED' | 'NEW_CUSTOMER_MESSAGE' | 'CUSTOMER_MEMORY_CHANGED'
+      cancellationReason: AiResponseCancellationReason
       aiResponseRunId?: string | null
     }
   | null
@@ -118,6 +126,7 @@ export type AiResponseCancellationReason =
   | 'OWNERSHIP_CHANGED'
   | 'NEW_CUSTOMER_MESSAGE'
   | 'CUSTOMER_MEMORY_CHANGED'
+  | 'PROPERTY_COLLECTION_CHANGED'
 
 export async function cancelActiveAiResponseRuns(
   tx: Transaction,
@@ -191,7 +200,9 @@ export async function claimAiResponseRun(
         configSnapshot: aiResponseRun.configSnapshot,
         contextMessageIds: aiResponseRun.contextMessageIds,
         customerMemoryInput: aiResponseRun.customerMemoryInput,
+        propertyCollection: aiResponseRun.propertyCollection,
         customerId: channelIdentity.customerId,
+        channelId: channelIdentity.channelId,
         workspaceId: conversation.workspaceId,
         conversationStatus: conversation.status,
         assigneeMemberId: conversation.assigneeMemberId,
@@ -406,6 +417,32 @@ export async function claimAiResponseRun(
       }
     }
 
+    const currentCollection = await readAiPropertyCollection(tx, {
+      workspaceId: current.workspaceId,
+      memberId: current.memberId,
+      customerId: current.customerId,
+      conversationId: current.conversationId,
+      channelId: current.channelId,
+    })
+    if (
+      current.propertyCollection &&
+      !sameAiPropertyRules(current.propertyCollection, currentCollection)
+    ) {
+      await cancelRun(tx, current.id, 'PROPERTY_COLLECTION_CHANGED', now)
+      const aiResponseRunId = await ensureAiResponseRun(tx, {
+        conversationId: current.conversationId,
+        memberId: current.memberId,
+        now,
+      })
+      return {
+        kind: 'CANCELLED',
+        workspaceId: current.workspaceId,
+        conversationId: current.conversationId,
+        cancellationReason: 'PROPERTY_COLLECTION_CHANGED',
+        aiResponseRunId,
+      }
+    }
+    const propertyCollection = current.propertyCollection ?? currentCollection
     const memory =
       snapshot?.memoryEnabled && config?.publishedSnapshot?.memoryEnabled
         ? await readCustomerMemory(tx, {
@@ -446,10 +483,11 @@ export async function claimAiResponseRun(
         : null)
     await tx
       .update(aiResponseRun)
-      .set({ customerMemoryInput })
+      .set({ customerMemoryInput, propertyCollection })
       .where(eq(aiResponseRun.id, current.id))
     return {
       kind: 'CLAIMED' as const,
+      propertyCollection,
       customerMemoryInput,
       state: 'GENERATING' as const,
       id: current.id,
@@ -632,6 +670,7 @@ export async function commitAiResponse(
     now?: Date
     mediaAssetId?: string | null
     languageSelection?: { language: string; explicitSwitch: boolean } | null
+    collectedProperties?: AiCollectedProperty[]
   },
 ): Promise<CommitAiResponseResult> {
   let text = input.text.trim()
@@ -688,6 +727,7 @@ export async function commitAiResponse(
         configSnapshot: aiResponseRun.configSnapshot,
         retrievedChunkIds: aiResponseRun.retrievedChunkIds,
         customerMemoryInput: aiResponseRun.customerMemoryInput,
+        propertyCollection: aiResponseRun.propertyCollection,
       })
       .from(aiResponseRun)
       .where(eq(aiResponseRun.id, input.runId))
@@ -943,6 +983,34 @@ export async function commitAiResponse(
         workspaceId: current.workspaceId,
         conversationId: current.id,
       }
+    }
+    if (!stopReason && !input.stopCheckOnly) {
+      const context = {
+        workspaceId: current.workspaceId,
+        memberId: run.memberId,
+        customerId: current.customerId,
+        conversationId: current.id,
+        channelId: current.channelId,
+      }
+      const latest = await readAiPropertyCollection(tx, context)
+      if (run.propertyCollection && !sameAiPropertyRules(run.propertyCollection, latest)) {
+        await cancelRun(tx, run.id, 'PROPERTY_COLLECTION_CHANGED', now)
+        const fresh = await ensureAiResponseRun(tx, {
+          conversationId: current.id,
+          memberId: run.memberId,
+          now,
+        })
+        return {
+          kind: 'CANCELLED',
+          cancellationReason: 'PROPERTY_COLLECTION_CHANGED',
+          aiResponseRunId: fresh,
+        }
+      }
+      await applyAiCollectedProperties(tx, {
+        ...context,
+        collection: run.propertyCollection ?? { customerId: current.customerId, rules: [] },
+        values: input.collectedProperties ?? [],
+      })
     }
     const points = Array.from(text)
     const texts =

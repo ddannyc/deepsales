@@ -85,6 +85,7 @@ import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 import { AiHandoffSettings } from './ai-handoff-settings'
 import { AiOperations } from './ai-operations'
+import { AiPropertySettings } from './ai-property-settings'
 import { AiSetupGuide } from './ai-setup-guide'
 import { type AiStopRules, AiStopSettings, emptyStopRules } from './ai-stop-settings'
 import { CustomerSidebar } from './customer-sidebar'
@@ -4692,6 +4693,11 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
           </section>
         </aside>
       </div>
+      <AiPropertySettings
+        key={`${workspace.id}:${memberId}`}
+        workspaceId={workspace.id}
+        memberId={memberId}
+      />
       <AiOperations
         workspaceId={workspace.id}
         memberId={memberId}

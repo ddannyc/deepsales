@@ -13,6 +13,70 @@ import {
 } from './ai'
 
 describe('private customer memory output', () => {
+  it('accepts only authorized typed property collection without extra provider calls', async () => {
+    const id = crypto.randomUUID()
+    const rule = {
+      id: crypto.randomUUID(),
+      revision: 1,
+      definitionId: id,
+      definitionRevision: 0,
+      name: 'Contact',
+      level: 'CUSTOMER' as const,
+      type: 'OPTION' as const,
+      options: ['email', 'phone'],
+      maxLength: 80,
+      instructions: 'Collect explicit preference.',
+      valueRevision: 0,
+    }
+    let properties: unknown = [{ definitionId: id, value: 'email' }]
+    const fetcher = vi.fn(async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Thank you.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                collectedProperties: properties,
+              }),
+            },
+          },
+        ],
+      }),
+    )
+    const provider = new AlibabaLlmProvider(
+      { apiKey: 'test', baseUrl: 'http://ai.test/v1' },
+      fetcher,
+    )
+    const input = {
+      instructions: '',
+      responseLanguage: 'English',
+      history: [],
+      messages: [{ id: crypto.randomUUID(), text: 'I prefer email.' }],
+      knowledgeChunks: [],
+      propertyRules: [rule],
+    }
+    expect(await provider.generateResponse(input)).toMatchObject({
+      collectedProperties: [{ definitionId: id, value: 'email' }],
+    })
+    expect(fetcher).toHaveBeenCalledOnce()
+    for (const invalid of [
+      [{ definitionId: crypto.randomUUID(), value: 'email' }],
+      [{ definitionId: id, value: 'invalid option' }],
+      [{ definitionId: id, value: 2 }],
+      [
+        { definitionId: id, value: 'email' },
+        { definitionId: id, value: 'phone' },
+      ],
+      [{ definitionId: id, value: 'email', customerId: crypto.randomUUID() }],
+    ]) {
+      properties = invalid
+      await expect(provider.generateResponse(input)).rejects.toThrow()
+    }
+  })
   it('counts Unicode code points and rejects oversized or action-bearing summaries', async () => {
     let output: Record<string, unknown> = {
       decision: 'ANSWER',

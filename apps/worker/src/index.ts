@@ -3659,6 +3659,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         timeZone: currentSnapshot.timeZone,
         naturalToneEnabled: currentSnapshot.naturalToneEnabled,
         customerMemoryInput: claimed.customerMemoryInput,
+        propertyRules: claimed.propertyCollection.rules,
         instructions: currentSnapshot.instructions,
         responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,
@@ -3703,6 +3704,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         languageSelection: currentSnapshot.automaticLanguageEnabled
           ? decision.languageSelection
           : undefined,
+        collectedProperties: decision.collectedProperties,
       })
       await withDatabase(env, (db) =>
         finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),

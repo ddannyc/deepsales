@@ -7,6 +7,7 @@ import {
   recordAiTestResult,
   resolveTestConfiguration,
 } from './ai-operations'
+import { readAiTestPropertyRules } from './ai-property-rules'
 import type { Database } from './database'
 import {
   aiOperation,
@@ -282,6 +283,7 @@ export async function claimAiTestBatchItem(
     })
     if (previous?.state === 'FAILED') {
       const output = {
+        propertyRules: await readAiTestPropertyRules(tx, input.workspaceId, input.memberId),
         handoffContext: {
           rules: await readEnabledAiHandoffRules(tx, input.workspaceId, input.memberId),
           facts: { properties: [], tags: [] },

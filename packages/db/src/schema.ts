@@ -152,6 +152,7 @@ export const aiResponseCancellationReason = pgEnum('ai_response_cancellation_rea
   'OWNERSHIP_CHANGED',
   'NEW_CUSTOMER_MESSAGE',
   'CUSTOMER_MEMORY_CHANGED',
+  'PROPERTY_COLLECTION_CHANGED',
 ])
 
 export const workspace = pgTable('workspace', {
@@ -593,6 +594,42 @@ export const customerPropertyHistory = pgTable(
   (t) => [index('customer_property_history_value_idx').on(t.valueId, t.createdAt)],
 )
 
+export type AiPropertyCollection = {
+  customerId: string
+  rules: {
+    id: string
+    revision: number
+    definitionId: string
+    definitionRevision: number
+    name: string
+    level: 'CUSTOMER' | 'CONVERSATION'
+    type: 'TEXT' | 'NUMBER' | 'OPTION'
+    options: string[]
+    maxLength: number
+    instructions: string
+    valueRevision: number
+  }[]
+}
+export const aiPropertyRule = pgTable(
+  'ai_property_rule',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    definitionId: uuid('definition_id')
+      .notNull()
+      .references(() => customerPropertyDefinition.id),
+    instructions: text().notNull(),
+    enabled: boolean().default(true).notNull(),
+    revision: integer().default(1).notNull(),
+  },
+  (t) => [uniqueIndex('ai_property_rule_member_definition_idx').on(t.memberId, t.definitionId)],
+)
+
 export const customerTagDefinition = pgTable(
   'customer_tag_definition',
   {
@@ -801,6 +838,7 @@ export const aiResponseRun = pgTable(
       summary: string
       sourceChannelIds: string[]
     }>(),
+    propertyCollection: jsonb('property_collection').$type<AiPropertyCollection>(),
     advertisingContext: jsonb('advertising_context').$type<AdvertisingContext>(),
     contextMessageIds: uuid('context_message_ids').array(),
     outputMessageId: uuid('output_message_id').references(() => message.id, {

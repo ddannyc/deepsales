@@ -519,7 +519,10 @@ function validateDefinition(input: PropertyDefinitionInput) {
   )
     throw new CustomerError('INVALID_REQUEST', 'Invalid property definition')
 }
-function validateValue(definition: PropertyDefinitionInput, value: string | number | null) {
+export function validatePropertyValue(
+  definition: Pick<PropertyDefinitionInput, 'type' | 'options' | 'maxLength'>,
+  value: string | number | null,
+) {
   if (value === null) return
   if (
     definition.type === 'NUMBER'
@@ -588,7 +591,7 @@ export async function savePropertyDefinition(
       .select({ value: customerPropertyValue.value })
       .from(customerPropertyValue)
       .where(eq(customerPropertyValue.definitionId, old.id))
-    for (const v of existing) validateValue(input, v.value)
+    for (const v of existing) validatePropertyValue(input, v.value)
     const [definition] = await tx
       .update(customerPropertyDefinition)
       .set({
@@ -666,7 +669,7 @@ export async function setCustomerProperty(
         ),
       )
     if (!definition) throw new CustomerError('NOT_FOUND', 'Property not found')
-    validateValue(definition, input.value)
+    validatePropertyValue(definition, input.value)
     if (
       !Number.isInteger(input.expectedRevision) ||
       input.expectedRevision < 0 ||

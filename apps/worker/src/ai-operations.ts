@@ -13,6 +13,7 @@ import {
   createPersonaOperation,
   type Database,
   deleteAiHandoffRule,
+  deleteAiPropertyRule,
   deleteAiQuestionSet,
   failAiBatchItem,
   finishAiOperation,
@@ -24,6 +25,7 @@ import {
   listAiConfigVersions,
   listAiDiagnostics,
   listAiHandoffRules,
+  listAiPropertyRules,
   listAiQuestionSets,
   listAiTestBatches,
   readAiTestBatch,
@@ -33,6 +35,7 @@ import {
   restoreAiConfigVersion,
   saveAiBudget,
   saveAiHandoffRule,
+  saveAiPropertyRule,
   saveAiQuestionSet,
 } from '@deepsales/db'
 import { Hono } from 'hono'
@@ -105,6 +108,31 @@ export function aiOperationsRoutes(
           )
         if (!uuid.safeParse(resource).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
+        if (action === 'property-rules') {
+          if (c.req.method === 'GET')
+            return c.json({ rules: await listAiPropertyRules(db, memberInput) })
+          if (c.req.method === 'DELETE') {
+            const input = z
+              .object({ id: uuid, revision: z.number().int().positive() })
+              .strict()
+              .parse(body)
+            await deleteAiPropertyRule(db, { ...memberInput, ...input })
+            return c.json({ ok: true })
+          }
+          if (c.req.method === 'POST') {
+            const input = z
+              .object({
+                id: uuid,
+                definitionId: uuid,
+                instructions: z.string().trim().min(1).max(2000),
+                enabled: z.boolean(),
+                revision: z.number().int().positive().optional(),
+              })
+              .strict()
+              .parse(body)
+            return c.json({ rule: await saveAiPropertyRule(db, { ...memberInput, ...input }) }, 201)
+          }
+        }
         if (action === 'question-sets') {
           if (c.req.method === 'GET')
             return c.json({ sets: await listAiQuestionSets(db, memberInput) })

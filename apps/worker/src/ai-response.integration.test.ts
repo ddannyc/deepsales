@@ -35,6 +35,8 @@ import {
   retryAiResponseRun,
   saveAiBudget,
   saveAiHandoffRule,
+  saveAiPropertyRule,
+  setCustomerProperty,
   setMemberChannelAccess,
   takeOverConversation,
   transferConversation,
@@ -70,6 +72,305 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('collects properties through the live Worker reply and reuses the single paid operation', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, replyWaitEnabled: false })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Preferred contact',
+        level: 'CUSTOMER',
+        type: 'TEXT',
+      })
+      .returning()
+    await saveAiPropertyRule(db, {
+      ...config,
+      id: crypto.randomUUID(),
+      definitionId: definition.id,
+      instructions: 'Collect explicitly stated preference.',
+      enabled: true,
+    })
+    const received = await receiveContextInput(db, f, 'I prefer email.')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const fetcher = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith('/embeddings'))
+        return Response.json({ data: [{ index: 0, embedding: vector() }] })
+      expect(String(init?.body)).toContain('Preferred contact')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Thanks for sharing.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                collectedProperties: [{ definitionId: definition.id, value: 'email' }],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const outbound = vi.fn()
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+      environment({ send: outbound } as unknown as Queue),
+    )
+    const profile = await getCustomerProfile(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: received.conversationId,
+    })
+    expect(profile.values).toMatchObject([{ value: 'email', sourceMemberId: f.aiMemberId }])
+    expect(outbound).toHaveBeenCalledOnce()
+    expect(
+      fetcher.mock.calls.filter(([url]) => String(url).endsWith('/chat/completions')),
+    ).toHaveLength(1)
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(1)
+  })
+  it.each(['manual', 'rule', 'definition', 'input', 'revoke', 'takeover'] as const)(
+    'prevents stale property collection after %s changes during generation',
+    async (change) => {
+      const f = await createFixture(db)
+      const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+      await updateAiMemberConfig(db, { ...config, replyWaitEnabled: false })
+      await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+      const received = await receiveContextInput(db, f, 'I prefer email.')
+      const [definition] = await db
+        .insert(customerPropertyDefinition)
+        .values({
+          workspaceId: f.workspaceId,
+          name: 'Preferred contact',
+          level: 'CUSTOMER',
+          type: 'TEXT',
+        })
+        .returning()
+      const ruleId = crypto.randomUUID()
+      await saveAiPropertyRule(db, {
+        ...config,
+        id: ruleId,
+        definitionId: definition.id,
+        instructions: 'Collect explicit preference.',
+        enabled: true,
+      })
+      const [identity] = await db
+        .select()
+        .from(channelIdentity)
+        .where(
+          eq(
+            channelIdentity.id,
+            sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+          ),
+        )
+      const assigned = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: received.conversationId,
+      })
+      if (!assigned.aiResponseRunId) throw new Error('Missing run')
+      await claimAiResponseRun(db, { runId: assigned.aiResponseRunId })
+      if (change === 'manual')
+        await setCustomerProperty(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+          expectedCustomerId: identity.customerId,
+          expectedRevision: 0,
+          definitionId: definition.id,
+          value: 'phone',
+          allowAutomaticUpdate: true,
+        })
+      if (change === 'rule')
+        await saveAiPropertyRule(db, {
+          ...config,
+          id: ruleId,
+          definitionId: definition.id,
+          instructions: 'Collect explicit preference.',
+          enabled: false,
+          revision: 1,
+        })
+      if (change === 'definition')
+        await db
+          .update(customerPropertyDefinition)
+          .set({ revision: 1, maxLength: 2 })
+          .where(eq(customerPropertyDefinition.id, definition.id))
+      if (change === 'input') await receiveContextInput(db, f, 'I now prefer phone.')
+      if (change === 'revoke') await setMemberChannelAccess(db, { ...config, channelIds: [] })
+      if (change === 'takeover')
+        await takeOverConversation(db, {
+          workspaceId: f.workspaceId,
+          conversationId: received.conversationId,
+          actingUserId: f.ownerId,
+        })
+      const result = await commitAiResponse(db, {
+        runId: assigned.aiResponseRunId,
+        text: 'Thank you.',
+        collectedProperties: [{ definitionId: definition.id, value: 'email' }],
+      })
+      if (change === 'manual') expect(result).toMatchObject({ kind: 'COMMITTED' })
+      else expect(result?.kind === 'COMMITTED').toBe(false)
+      const profile = await getCustomerProfile(db, {
+        workspaceId: f.workspaceId,
+        userId: f.ownerId,
+        conversationId: received.conversationId,
+      })
+      expect(profile.values).toEqual(
+        change === 'manual'
+          ? [expect.objectContaining({ value: 'phone', allowAutomaticUpdate: true })]
+          : [],
+      )
+    },
+  )
+  it('collects customer and conversation properties with AI provenance while protecting human values', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, replyWaitEnabled: false })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveContextInput(db, f, 'I prefer email and need two items.')
+    const definitions = await db
+      .insert(customerPropertyDefinition)
+      .values([
+        { workspaceId: f.workspaceId, name: 'Contact preference', level: 'CUSTOMER', type: 'TEXT' },
+        { workspaceId: f.workspaceId, name: 'Quantity', level: 'CONVERSATION', type: 'NUMBER' },
+        { workspaceId: f.workspaceId, name: 'Protected note', level: 'CUSTOMER', type: 'TEXT' },
+      ])
+      .returning()
+    for (const d of definitions)
+      await saveAiPropertyRule(db, {
+        ...config,
+        id: crypto.randomUUID(),
+        definitionId: d.id,
+        instructions: 'Collect only stated facts.',
+        enabled: true,
+      })
+    const [identity] = await db
+      .select()
+      .from(channelIdentity)
+      .where(
+        eq(
+          channelIdentity.id,
+          sql`(select channel_identity_id from conversation where id = ${received.conversationId})`,
+        ),
+      )
+    await setCustomerProperty(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: received.conversationId,
+      expectedCustomerId: identity.customerId,
+      expectedRevision: 0,
+      definitionId: definitions[2].id,
+      value: 'Human note.',
+      allowAutomaticUpdate: false,
+    })
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!assigned.aiResponseRunId) throw new Error('Missing run')
+    const claimed = await claimAiResponseRun(db, { runId: assigned.aiResponseRunId })
+    expect(claimed).toMatchObject({
+      kind: 'CLAIMED',
+      propertyCollection: { rules: expect.any(Array) },
+    })
+    const result = await commitAiResponse(db, {
+      runId: assigned.aiResponseRunId,
+      text: 'Thanks for sharing.',
+      collectedProperties: [
+        { definitionId: definitions[0].id, value: 'email' },
+        { definitionId: definitions[1].id, value: 2 },
+        { definitionId: definitions[2].id, value: 'Overwrite attempt.' },
+      ],
+    })
+    expect(result).toMatchObject({ kind: 'COMMITTED' })
+    const profile = await getCustomerProfile(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: received.conversationId,
+    })
+    expect(profile.values).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          definitionId: definitions[0].id,
+          value: 'email',
+          sourceMemberId: f.aiMemberId,
+        }),
+        expect.objectContaining({
+          definitionId: definitions[1].id,
+          value: 2,
+          conversationId: received.conversationId,
+        }),
+        expect.objectContaining({
+          definitionId: definitions[2].id,
+          value: 'Human note.',
+          allowAutomaticUpdate: false,
+        }),
+      ]),
+    )
+    expect(profile.history).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          definitionName: 'Contact preference',
+          value: 'email',
+          sourceName: 'Support AI',
+        }),
+      ]),
+    )
+    await setCustomerProperty(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: received.conversationId,
+      expectedCustomerId: identity.customerId,
+      expectedRevision: 1,
+      definitionId: definitions[2].id,
+      value: 'Human note.',
+      allowAutomaticUpdate: true,
+    })
+    await receiveContextInput(db, f, 'Please update the permitted note.')
+    const [next] = await db
+      .select()
+      .from(aiResponseRun)
+      .where(
+        and(
+          eq(aiResponseRun.conversationId, received.conversationId),
+          eq(aiResponseRun.state, 'QUEUED'),
+        ),
+      )
+    if (!next) throw new Error('Missing next run')
+    await claimAiResponseRun(db, { runId: next.id })
+    await commitAiResponse(db, {
+      runId: next.id,
+      text: 'Updated.',
+      collectedProperties: [{ definitionId: definitions[2].id, value: 'Permitted updated note.' }],
+    })
+    expect(
+      (
+        await getCustomerProfile(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+        })
+      ).values,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          definitionId: definitions[2].id,
+          value: 'Permitted updated note.',
+          revision: 3,
+          sourceMemberId: f.aiMemberId,
+        }),
+      ]),
+    )
+  })
   it('serializes clearing memory with a SENT communication without deadlocking', async () => {
     const f = await createFixture(db)
     const received = await receiveContextInput(db, f, 'Please keep this brief.')

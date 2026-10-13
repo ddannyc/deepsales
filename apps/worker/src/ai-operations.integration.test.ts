@@ -25,7 +25,7 @@ import {
   updateAiMemberConfig,
   workspaceUserAccess,
 } from '@deepsales/db'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -61,6 +61,138 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('collects test properties only into the isolated simulated customer', async () => {
+    const f = await fixture()
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Preferred contact',
+        level: 'CUSTOMER',
+        type: 'TEXT',
+      })
+      .returning()
+    expect(
+      (
+        await f.call(`/${f.aiId}/property-rules`, 'POST', {
+          id: crypto.randomUUID(),
+          definitionId: definition.id,
+          instructions: 'Collect stated preference.',
+          enabled: true,
+        })
+      ).status,
+    ).toBe(201)
+    const sessionId = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/sessions`, 'POST', {
+          id: sessionId,
+          source: 'DRAFT',
+          customer: { properties: [], tags: [], source: '', language: '', memory: '' },
+        })
+      ).status,
+    ).toBe(201)
+    const fetcher = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      expect(String(init?.body)).toContain('Preferred contact')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Thank you.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                collectedProperties: [{ definitionId: definition.id, value: 'email' }],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const result = await f.call(`/${f.aiId}/test`, 'POST', {
+      id: crypto.randomUUID(),
+      source: 'DRAFT',
+      sessionId,
+      generation: 1,
+      text: 'I prefer email.',
+    })
+    expect(result.status).toBe(200)
+    expect(await (await f.call(`/${f.aiId}/sessions/${sessionId}`)).json()).toMatchObject({
+      session: { customer: { properties: [{ definitionId: definition.id, value: 'email' }] } },
+    })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(
+      (
+        await db.execute(
+          sql`select count(*)::int as count from customer_property_value where definition_id = ${definition.id}`,
+        )
+      ).rows,
+    ).toEqual([{ count: 0 }])
+  })
+  it('saves immediate typed property collection rules and rejects foreign or stale definitions', async () => {
+    const f = await fixture()
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Preferred contact',
+        level: 'CUSTOMER',
+        type: 'TEXT',
+        maxLength: 80,
+      })
+      .returning()
+    const id = crypto.randomUUID()
+    const saved = await f.call(`/${f.aiId}/property-rules`, 'POST', {
+      id,
+      definitionId: definition.id,
+      instructions: 'Collect the preferred contact method only when stated.',
+      enabled: true,
+    })
+    expect(saved.status).toBe(201)
+    expect(await (await f.call(`/${f.aiId}/property-rules`)).json()).toMatchObject({
+      rules: [{ id, enabled: true, revision: 1 }],
+    })
+    expect(
+      (
+        await f.call(`/${f.aiId}/property-rules`, 'POST', {
+          id,
+          definitionId: definition.id,
+          instructions: 'Changed.',
+          enabled: false,
+          revision: 0,
+        })
+      ).status,
+    ).toBe(400)
+    expect(
+      (
+        await f.call(`/${f.aiId}/property-rules`, 'POST', {
+          id,
+          definitionId: definition.id,
+          instructions: 'Changed.',
+          enabled: false,
+          revision: 1,
+        })
+      ).status,
+    ).toBe(201)
+    const other = await fixture()
+    expect(
+      (
+        await other.call(`/${other.aiId}/property-rules`, 'POST', {
+          id: crypto.randomUUID(),
+          definitionId: definition.id,
+          instructions: 'Collect.',
+          enabled: true,
+        })
+      ).status,
+    ).toBe(400)
+    expect((await f.call(`/${f.aiId}/property-rules`, 'DELETE', { id, revision: 2 })).status).toBe(
+      200,
+    )
+    expect(await (await f.call(`/${f.aiId}/property-rules`)).json()).toEqual({ rules: [] })
+  })
   it('keeps customer memory disabled by default and enables it only after explicit publication', async () => {
     const f = await fixture()
     expect(
@@ -284,6 +416,21 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   })
   it('recovers a failed question independently without charging again and pauses unknown results', async () => {
     const f = await fixture()
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Contact preference',
+        type: 'TEXT',
+        level: 'CUSTOMER',
+      })
+      .returning()
+    await f.call(`/${f.aiId}/property-rules`, 'POST', {
+      id: crypto.randomUUID(),
+      definitionId: definition.id,
+      instructions: 'Collect stated preference.',
+      enabled: true,
+    })
     const setId = crypto.randomUUID(),
       id = crypto.randomUUID()
     await f.call(`/${f.aiId}/question-sets`, 'POST', {
