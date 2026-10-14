@@ -16,6 +16,7 @@ import {
   validateAiVariableInput,
 } from '@deepsales/db'
 import { z } from 'zod'
+import { aiSkillSchema } from './ai-skills'
 
 export const ALIBABA_EMBEDDING_PROVIDER = 'alibaba'
 export const DEFAULT_EMBEDDING_MODEL = 'qwen3.7-text-embedding'
@@ -407,6 +408,7 @@ export const aiMemberRuntimeSnapshotSchema = z.object({
   automaticLanguageEnabled: z.boolean().default(false),
   timeZone: aiTimeZoneSchema.default('UTC'),
   instructions: z.string(),
+  skills: z.array(aiSkillSchema).max(20).default([]),
   responseLanguage: z.string(),
   knowledgeBaseId: z.string().uuid(),
   handoffOnCustomerRequest: z.boolean(),
