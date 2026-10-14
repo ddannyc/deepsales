@@ -8,6 +8,7 @@ import {
   resolveTestConfiguration,
 } from './ai-operations'
 import { readAiTestPropertyRules } from './ai-property-rules'
+import { readAiTestTagRules } from './ai-tag-rules'
 import type { Database } from './database'
 import {
   aiOperation,
@@ -284,6 +285,9 @@ export async function claimAiTestBatchItem(
     if (previous?.state === 'FAILED') {
       const output = {
         propertyRules: await readAiTestPropertyRules(tx, input.workspaceId, input.memberId),
+        tagRules: batch.snapshot.tagsEnabled
+          ? await readAiTestTagRules(tx, input.workspaceId, input.memberId)
+          : [],
         handoffContext: {
           rules: await readEnabledAiHandoffRules(tx, input.workspaceId, input.memberId),
           facts: { properties: [], tags: [] },
