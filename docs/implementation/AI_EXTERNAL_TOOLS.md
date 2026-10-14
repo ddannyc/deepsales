@@ -111,3 +111,15 @@ Validation uses real local PostgreSQL and Worker routes/queues with fake AI,
 channel and external fetch adapters, plus Playwright configuration/insertion/debug
 flows. No real third-party API, paid provider request, production migration,
 deployment or external send was performed for this implementation.
+
+Retry deadlines are validated at both the HTTP adapter and durable receipt boundary.
+Malformed, negative, fractional, non-finite or unrepresentable delays terminate the
+known failed action with `EXTERNAL_RETRY_AFTER_INVALID`; they do not roll back its
+receipt or become an earlier retry. Model-provider attempts use the same deadline
+validation and persist `INVALID_RETRY_AFTER` on their operation.
+
+Queue retries wake at most 43,200 seconds later, a conservative application window.
+PostgreSQL retains the complete valid provider deadline, and every early wake must
+pass the existing claim guard before dispatch. This window is below Cloudflare's
+current [24-hour queue delay limit](https://developers.cloudflare.com/queues/platform/limits/);
+it does not shorten the provider's requested backoff.

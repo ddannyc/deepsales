@@ -213,7 +213,7 @@ import {
 import { MAX_FACEBOOK_WEBHOOK_BODY_BYTES } from './limits'
 import { MAX_MEDIA_BYTES, validateMediaFile } from './media-files'
 import { createObjectStorage } from './object-storage'
-import { createJobQueue, type JobQueue } from './queue'
+import { createJobQueue, queueRetryDelay, type JobQueue } from './queue'
 import { publishRealtime, WorkspaceRealtime } from './realtime'
 import { aiResponseJobSchema, maintenanceRoutingJobSchema } from './routing'
 
@@ -3389,7 +3389,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       continue
     }
     if (claimed.kind === 'DELAYED') {
-      queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(claimed.retryAfterMs / 1_000)) })
+      queueMessage.retry({ delaySeconds: queueRetryDelay(claimed.retryAfterMs) })
       continue
     }
     if (claimed.kind === 'CANCELLED') {
@@ -4097,7 +4097,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
     } catch (error) {
       if (error instanceof AiUsageError && error.code === 'RETRY_LATER') {
         await withDatabase(env, (db) => retryAiResponseRun(db, { runId: claimed.id }))
-        queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(error.retryAfterMs / 1_000)) })
+        queueMessage.retry({ delaySeconds: queueRetryDelay(error.retryAfterMs) })
         continue
       }
       if (error instanceof AiUsageError) {
@@ -4373,7 +4373,7 @@ async function handleKnowledgeDocument(
           revision: claimed.revision,
         }),
       )
-      queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(error.retryAfterMs / 1_000)) })
+      queueMessage.retry({ delaySeconds: queueRetryDelay(error.retryAfterMs) })
       return
     }
     const retryable =
@@ -4687,7 +4687,7 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
       )
     } catch (error) {
       if (error instanceof ReplyError && error.code === 'RETRY_LATER')
-        queueMessage.retry({ delaySeconds: Math.max(1, Math.ceil(error.retryAfterMs / 1000)) })
+        queueMessage.retry({ delaySeconds: queueRetryDelay(error.retryAfterMs) })
       else queueMessage.retry()
       continue
     }
@@ -4949,7 +4949,7 @@ export async function handleMaintenanceBatch(batch: MessageBatch<unknown>, env: 
           queueMessage.retry({
             delaySeconds:
               error instanceof AiUsageError && error.code === 'RETRY_LATER'
-                ? Math.max(1, Math.ceil(error.retryAfterMs / 1000))
+                ? queueRetryDelay(error.retryAfterMs)
                 : 30,
           })
       }

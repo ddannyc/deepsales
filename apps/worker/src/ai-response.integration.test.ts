@@ -4189,7 +4189,8 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
       await db
         .select({ reason: conversationAssignment.reason })
         .from(conversationAssignment)
-        .where(eq(conversationAssignment.conversationId, received.conversationId)),
+        .where(eq(conversationAssignment.conversationId, received.conversationId))
+        .orderBy(conversationAssignment.createdAt),
     ).toEqual([{ reason: 'AUTO_ROUTE' }, { reason: 'AI_HANDOFF' }])
   })
 

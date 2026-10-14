@@ -15,6 +15,29 @@ const definition = {
   effect: 'READ' as const,
 }
 describe('external HTTPS tool boundary', () => {
+  it.each([
+    '9000000000000',
+    '1000000000000000',
+    '-1',
+    '1.5',
+    '1e4',
+    'NaN',
+    'Infinity',
+    'not-a-date',
+    'Fri, 32 Oct 2026 10:00:00 GMT',
+  ])(
+    'terminates an invalid retry deadline without admitting an earlier retry (%s)',
+    async (header) => {
+      await expect(
+        callExternalTool(
+          buildExternalRequest(definition, { record: 'abc' }, [origin]),
+          definition.output,
+          null,
+          async () => new Response(null, { status: 429, headers: { 'Retry-After': header } }),
+        ),
+      ).rejects.toMatchObject({ code: 'EXTERNAL_RETRY_AFTER_INVALID', retryable: false })
+    },
+  )
   it('classifies only transient responses for safe read retry and preserves longer provider delay', async () => {
     const request = buildExternalRequest(definition, { record: 'abc' }, [origin])
     await expect(
