@@ -18,6 +18,8 @@ import {
   matchesAiStopCondition,
 } from './ai-stop'
 import { applyAiTags, readAiTagCollection, sameAiTagRules } from './ai-tag-rules'
+import { readAiVariableInput, sameAiVariableSources } from './ai-variable-values'
+import type { AiVariableInput } from './ai-variables'
 import { ensureAiResponseRun } from './assignments'
 import { readCustomerMemory } from './customer-memory'
 import type { Database } from './database'
@@ -66,6 +68,7 @@ export type AiResponseRunClaim = {
   followUp: { id: string; ruleId: string; instructions: string } | null
   propertyCollection: AiPropertyCollection
   tagCollection: AiTagCollection
+  variableInput: AiVariableInput
   customerMemoryInput?: {
     customerId: string
     revision: number
@@ -207,6 +210,7 @@ export async function claimAiResponseRun(
         customerMemoryInput: aiResponseRun.customerMemoryInput,
         propertyCollection: aiResponseRun.propertyCollection,
         tagCollection: aiResponseRun.tagCollection,
+        variableInput: aiResponseRun.variableInput,
         customerId: channelIdentity.customerId,
         channelId: channelIdentity.channelId,
         workspaceId: conversation.workspaceId,
@@ -529,15 +533,45 @@ export async function claimAiResponseRun(
             sourceChannelIds: memory.sourceChannelIds,
           }
         : null)
+    const variableContext = [
+      ...history.map((item) => item.text),
+      ...inputMessages.map((item) => item.text ?? ''),
+    ].join('\n')
+    const latestVariables = await readAiVariableInput(tx, {
+      workspaceId: current.workspaceId,
+      conversationId: current.conversationId,
+      memberId: current.memberId,
+      instructions: snapshot?.instructions ?? '',
+      timeZone: snapshot?.timeZone ?? 'UTC',
+      context: variableContext,
+      now,
+    })
+    if (current.variableInput && !sameAiVariableSources(current.variableInput, latestVariables)) {
+      await cancelRun(tx, current.id, 'PROPERTY_COLLECTION_CHANGED', now)
+      const fresh = await ensureAiResponseRun(tx, {
+        conversationId: current.conversationId,
+        memberId: current.memberId,
+        now,
+      })
+      return {
+        kind: 'CANCELLED',
+        workspaceId: current.workspaceId,
+        conversationId: current.conversationId,
+        cancellationReason: 'PROPERTY_COLLECTION_CHANGED',
+        aiResponseRunId: fresh,
+      }
+    }
+    const variableInput = current.variableInput ?? latestVariables
     await tx
       .update(aiResponseRun)
-      .set({ customerMemoryInput, propertyCollection, tagCollection })
+      .set({ customerMemoryInput, propertyCollection, tagCollection, variableInput })
       .where(eq(aiResponseRun.id, current.id))
     return {
       kind: 'CLAIMED' as const,
       followUp: proactive.followUp,
       propertyCollection,
       tagCollection,
+      variableInput,
       customerMemoryInput,
       state: 'GENERATING' as const,
       id: current.id,
@@ -788,6 +822,7 @@ export async function commitAiResponse(
         unparsedFallbackText: aiResponseRun.unparsedFallbackText,
         propertyCollection: aiResponseRun.propertyCollection,
         tagCollection: aiResponseRun.tagCollection,
+        variableInput: aiResponseRun.variableInput,
       })
       .from(aiResponseRun)
       .where(eq(aiResponseRun.id, input.runId))
@@ -838,6 +873,30 @@ export async function commitAiResponse(
         })
         .where(eq(aiResponseRun.id, run.id))
       return { kind: 'FOLLOW_UP_CANCELLED' as const }
+    }
+    if (run.variableInput) {
+      const latestVariables = await readAiVariableInput(tx, {
+        workspaceId: current.workspaceId,
+        conversationId: current.id,
+        memberId: run.memberId,
+        instructions: run.configSnapshot?.instructions ?? '',
+        timeZone: run.configSnapshot?.timeZone ?? 'UTC',
+        context: String(run.variableInput.values['conversation.context'] ?? ''),
+        now: new Date(run.variableInput.capturedAt),
+      })
+      if (!sameAiVariableSources(run.variableInput, latestVariables)) {
+        await cancelRun(tx, run.id, 'PROPERTY_COLLECTION_CHANGED', now)
+        const fresh = await ensureAiResponseRun(tx, {
+          conversationId: current.id,
+          memberId: run.memberId,
+          now,
+        })
+        return {
+          kind: 'CANCELLED',
+          cancellationReason: 'PROPERTY_COLLECTION_CHANGED',
+          aiResponseRunId: fresh,
+        }
+      }
     }
     const handoffRules = await readEnabledAiHandoffRules(tx, current.workspaceId, run.memberId)
     if (run.customerMemoryInput) {

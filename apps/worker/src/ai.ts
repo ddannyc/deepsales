@@ -6,6 +6,7 @@ import {
   AiUsageError,
   type AiVariableInput,
   EMPTY_AI_STOP_RULES,
+  instructionVariableKeys,
   normalizeAiReplyLanguage,
   normalizeAiTimeZone,
   validateAiCollectedProperties,
@@ -664,6 +665,11 @@ export class AlibabaLlmProvider implements LlmProvider {
 
 export function buildAiPrompt(input: AiResponseInput) {
   if (input.variableInput) validateAiVariableInput(input.variableInput)
+  const variableKeys = instructionVariableKeys(input.instructions)
+  const variableValues = {
+    ...Object.fromEntries(variableKeys.map((key) => [key, null])),
+    ...input.variableInput?.values,
+  }
   if (input.purpose === 'MEMORY')
     return [
       {
@@ -788,10 +794,10 @@ export function buildAiPrompt(input: AiResponseInput) {
               '</customer_memory>',
             ]
           : []),
-        ...(input.variableInput
+        ...(input.variableInput || variableKeys.length
           ? [
               '<variable_values>',
-              escapePromptData(JSON.stringify(input.variableInput.values)),
+              escapePromptData(JSON.stringify(variableValues)),
               '</variable_values>',
             ]
           : []),

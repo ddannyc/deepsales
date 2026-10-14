@@ -100,6 +100,99 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
       rules: [{ id, revision: 2, enabled: false }],
     })
   })
+  it('resolves test instruction variables only from the simulated customer', async () => {
+    const f = await fixture()
+    await f.configCall({
+      instructions:
+        'Use {{customer.name}} {{customer.language}} {{customer.properties}} {{system.timeZone}}.',
+    })
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Quantity', level: 'CUSTOMER', type: 'NUMBER' })
+      .returning()
+    const sessionId = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/sessions`, 'POST', {
+          id: sessionId,
+          source: 'DRAFT',
+          customer: {
+            properties: [{ definitionId: definition.id, value: 2 }],
+            tags: [],
+            source: '',
+            language: 'en',
+            memory: '',
+          },
+        })
+      ).status,
+    ).toBe(201)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        expect(String(init?.body)).toContain('\\"customer.name\\":null')
+        expect(String(init?.body)).toContain('Quantity')
+        expect(String(init?.body)).not.toContain('customer_id')
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Thank you.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    const id = crypto.randomUUID()
+    const response = await f.call(`/${f.aiId}/test`, 'POST', {
+      id,
+      source: 'DRAFT',
+      sessionId,
+      generation: 1,
+      text: 'Use my simulated preference.',
+    })
+    expect(response.status).toBe(200)
+    const [operation] = await db.select().from(aiOperation).where(eq(aiOperation.id, id))
+    expect(operation.output).toMatchObject({
+      variableInput: {
+        version: 1,
+        values: {
+          'customer.name': null,
+          'customer.language': 'en',
+          'customer.properties': [{ name: 'Quantity', value: 2 }],
+          'system.timeZone': 'UTC',
+        },
+      },
+    })
+    expect(
+      (
+        await db.execute(
+          sql`select count(*)::int as count from customer_property_value where definition_id=${definition.id}`,
+        )
+      ).rows,
+    ).toEqual([{ count: 0 }])
+  })
+  it('exposes a controlled instruction variable catalog and rejects unknown variable names', async () => {
+    const f = await fixture()
+    const response = await f.call(`/${f.aiId}/variables`)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      variables: expect.arrayContaining([
+        { key: 'customer.name', label: '联系人姓名', type: 'text' },
+      ]),
+      positions: ['instructions'],
+      missing: null,
+    })
+    expect((await f.configCall({ instructions: 'Use {{customer.name}}.' })).status).toBe(200)
+    expect((await f.configCall({ instructions: 'Use {{sql.query}}.' })).status).toBe(400)
+    expect((await f.configCall({ instructions: 'Use {{url.host}}.' })).status).toBe(400)
+  })
   it('manages controlled tag rules immediately and rejects foreign definitions', async () => {
     const f = await fixture()
     const [tag] = await db

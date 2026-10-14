@@ -1,4 +1,5 @@
 import {
+  AI_VARIABLES,
   AiMemberError,
   AiUsageError,
   addAiFeedback,
@@ -22,6 +23,7 @@ import {
   getAiAnalytics,
   getAiBudget,
   getAiDiagnostics,
+  getAiMemberConfig,
   getAiSetupStatus,
   KnowledgeError,
   listAiConfigVersions,
@@ -116,6 +118,10 @@ export function aiOperationsRoutes(
           )
         if (!uuid.safeParse(resource).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
+        if (action === 'variables' && c.req.method === 'GET') {
+          await getAiMemberConfig(db, memberInput)
+          return c.json({ variables: AI_VARIABLES, positions: ['instructions'], missing: null })
+        }
         if (action === 'property-rules') {
           if (c.req.method === 'GET')
             return c.json({ rules: await listAiPropertyRules(db, memberInput) })

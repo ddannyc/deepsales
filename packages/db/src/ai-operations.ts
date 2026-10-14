@@ -10,6 +10,8 @@ import {
 import { type AiConversationContextMessage, normalizeAiReplyLanguage } from './ai-responses'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES } from './ai-stop'
 import { readAiTestTagRules } from './ai-tag-rules'
+import { readAiTestVariableInput } from './ai-variable-values'
+import type { AiVariableInput } from './ai-variables'
 import type { Database } from './database'
 import { assertInboxConversationAccess } from './inbox'
 import {
@@ -126,6 +128,7 @@ export async function reserveAiOperation(
     snapshot?: AiMemberRuntimeSnapshot
     testContext?: AiTestContext
     tagRules?: import('./schema').AiTagCollection['rules']
+    variableInput?: AiVariableInput
     propertyRules?: AiPropertyCollection['rules']
     handoffContext?: {
       rules: Awaited<ReturnType<typeof readEnabledAiHandoffRules>>
@@ -207,6 +210,7 @@ export async function reserveAiOperation(
               handoffContext: input.handoffContext,
               testContext: input.testContext,
               propertyRules: input.propertyRules,
+              variableInput: input.variableInput,
               tagRules: input.tagRules,
             }
           : undefined,
@@ -743,6 +747,14 @@ export async function createAiTest(
       id: input.id,
       workspaceId: input.workspaceId,
       kind: 'TEST',
+      variableInput: await readAiTestVariableInput(tx, {
+        workspaceId: input.workspaceId,
+        instructions: snapshot.instructions,
+        timeZone: snapshot.timeZone ?? 'UTC',
+        text: input.text,
+        customer: testContext?.customer,
+        history: testContext?.history,
+      }),
       memberId: input.memberId,
       configVersionId: versionId,
       text: input.text.trim(),
@@ -865,6 +877,8 @@ export async function recordAiTestResult(
           ...(context ? { testContext: context } : {}),
           propertyRules,
           tagRules,
+          variableInput: (record?.output as { variableInput?: AiVariableInput } | null)
+            ?.variableInput,
         },
         chunkIds: input.chunkIds,
         state: 'COMPLETED',
@@ -1023,6 +1037,13 @@ export async function getAiDiagnostics(db: Database, input: Identity & { id: str
       ? {
           ...run.run,
           customerMemoryInput: undefined,
+          variableInput: undefined,
+          variableInputVersion: run.run.variableInput
+            ? {
+                version: run.run.variableInput.version,
+                capturedAt: run.run.variableInput.capturedAt,
+              }
+            : null,
           customerMemoryRevision: run.run.customerMemoryInput?.revision ?? null,
         }
       : null,
