@@ -19,7 +19,7 @@ import {
   setMemberChannelAccess,
   workspaceUserAccess,
 } from '@deepsales/db'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -226,6 +226,30 @@ describe.skipIf(!process.env.DATABASE_URL)('External API tool configuration', ()
     const [operation] = await db.select().from(aiOperation).where(eq(aiOperation.id, f.runId))
     expect(operation.state).toBe('UNKNOWN')
     expect(f.outbound).not.toHaveBeenCalled()
+    await f.receive('Please try again.')
+    const [next] = await db
+      .select()
+      .from(aiResponseRun)
+      .where(
+        and(eq(aiResponseRun.conversationId, f.conversationId), eq(aiResponseRun.state, 'QUEUED')),
+      )
+    if (!next) throw new Error('Missing fresh customer run')
+    await db
+      .update(aiResponseRun)
+      .set({ scheduledFor: new Date(Date.now() - 1000) })
+      .where(eq(aiResponseRun.id, next.id))
+    await handleAiResponseBatch(
+      {
+        queue: 'ai',
+        messages: [
+          { body: { v: 1, type: 'ai.response', runId: next.id }, ack: vi.fn(), retry: vi.fn() },
+        ],
+      } as unknown as MessageBatch<unknown>,
+      f.liveEnv,
+    )
+    expect(external).toHaveBeenCalledOnce()
+    const [blocked] = await db.select().from(aiOperation).where(eq(aiOperation.id, next.id))
+    expect(blocked).toMatchObject({ state: 'UNKNOWN', failureCode: 'EXTERNAL_PREVIOUS_UNKNOWN' })
   })
   it.each(['owner', 'input', 'definition'] as const)(
     'retains a successful write receipt but withholds stale answers after %s changes',

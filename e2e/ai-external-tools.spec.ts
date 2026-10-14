@@ -60,17 +60,15 @@ test('configures credentials and fixed write targets, inserts a tool and debugs 
     await region.getByLabel('操作性质', { exact: true }).click()
     await page.getByRole('option', { name: '写入', exact: true }).click()
     await region
-      .getByLabel('固定参数 JSON（name、location、value）', { exact: true })
+      .getByRole('textbox', { name: '固定参数 JSON（name、location、value）', exact: true })
       .fill('[{"name":"recordId","location":"body","value":"fixed-support-record"}]')
-    await region
-      .getByLabel('固定对象授权策略 JSON', { exact: true })
-      .fill(
-        JSON.stringify({
-          policy: 'FIXED_CONFIG',
-          description: 'Administrator-approved fixed support record.',
-          targets: [{ name: 'recordId', location: 'body' }],
-        }),
-      )
+    await region.getByRole('textbox', { name: '固定对象授权策略 JSON', exact: true }).fill(
+      JSON.stringify({
+        policy: 'FIXED_CONFIG',
+        description: 'Administrator-approved fixed support record.',
+        targets: [{ name: 'recordId', location: 'body' }],
+      }),
+    )
     await region.getByRole('button', { name: '保存外部工具', exact: true }).click()
     await expect(region).toContainText('工具定义已立即生效')
     await region.getByRole('button', { name: '运行沙箱调试', exact: true }).click()
@@ -80,13 +78,15 @@ test('configures credentials and fixed write targets, inserts a tool and debugs 
       'data-slot',
       'badge',
     )
-    await region.getByLabel('模拟输入 JSON', { exact: true }).fill('{"recordId":"other-record"}')
+    await region
+      .getByRole('textbox', { name: '模拟输入 JSON', exact: true })
+      .fill('{"recordId":"other-record"}')
     await region.getByRole('button', { name: '运行沙箱调试', exact: true }).click()
     await expect(region.getByRole('alert')).toContainText('EXTERNAL_ARGUMENTS_INVALID')
     const picker = page.getByRole('combobox', { name: '插入工具', exact: true }).first()
     await picker.click()
     await page.getByRole('option', { name: 'Record status', exact: true }).click()
-    await expect(page.locator('textarea').first()).toHaveValue(/\[\[tool:external:/)
+    await expect(page.getByRole('textbox', { name: /^指令/ })).toHaveValue(/\[\[tool:external:/)
     await region.getByRole('switch', { name: '启用工具', exact: true }).click()
     await region.getByRole('button', { name: '保存外部工具', exact: true }).click()
     await expect(region).toContainText('已停用')

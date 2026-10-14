@@ -97,7 +97,10 @@ export async function callExternalTool(
     return await Promise.race([
       deadline,
       (async () => {
-        const headers: Record<string, string> = { Accept: 'application/json' }
+        const headers: Record<string, string> = {
+          Accept: 'application/json',
+          'Accept-Encoding': 'identity',
+        }
         if (request.body) headers['Content-Type'] = 'application/json'
         if (credential) headers.Authorization = `Bearer ${credential}`
         const response = await fetcher(request.url, {
@@ -114,6 +117,13 @@ export async function callExternalTool(
         if (!response.ok) {
           void response.body?.cancel().catch(() => {})
           throw new ExternalToolError('EXTERNAL_HTTP_ERROR')
+        }
+        if (
+          response.headers.has('content-encoding') &&
+          response.headers.get('content-encoding') !== 'identity'
+        ) {
+          void response.body?.cancel().catch(() => {})
+          throw new ExternalToolError('EXTERNAL_RESPONSE_INVALID')
         }
         if (
           !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '') ||

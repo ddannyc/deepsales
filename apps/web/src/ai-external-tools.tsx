@@ -632,12 +632,19 @@ export function AiExternalTools({
                 disabled={busy}
                 onClick={() => {
                   try {
+                    setDebug(undefined)
                     const values = JSON.parse(debugValues)
                     void request(`external-tools/${tool.id}/debug`, 'POST', {
                       id: crypto.randomUUID(),
                       values,
                     }).then((result) => {
-                      if (result) setDebug(result)
+                      setDebug(
+                        result ?? {
+                          state: 'FAILED',
+                          simulated: true,
+                          failureCode: 'SANDBOX_VALIDATION_FAILED',
+                        },
+                      )
                     })
                   } catch {
                     setError('模拟输入 JSON 无效，输入已保留。')
