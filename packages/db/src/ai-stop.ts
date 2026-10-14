@@ -210,7 +210,13 @@ export function hasAiStopPeriodBetween(rules: AiStopRules, timeZone: string, fro
 // Caller holds the workspace and conversation locks used by fact edits and AI commits.
 export async function readAiConditionFacts(
   tx: Transaction,
-  input: { workspaceId: string; conversationId: string; memberId: string; customerId: string },
+  input: {
+    workspaceId: string
+    conversationId: string
+    memberId: string
+    customerId: string
+    sourceChannelIds?: string[]
+  },
 ) {
   const access = await tx
     .select({ id: channel.id })
@@ -221,6 +227,7 @@ export async function readAiConditionFacts(
         eq(memberChannelAccess.memberId, input.memberId),
         eq(channel.workspaceId, input.workspaceId),
         eq(channel.status, 'ACTIVE'),
+        input.sourceChannelIds ? inArray(channel.id, input.sourceChannelIds) : undefined,
       ),
     )
     .for('share', { of: [memberChannelAccess, channel] })

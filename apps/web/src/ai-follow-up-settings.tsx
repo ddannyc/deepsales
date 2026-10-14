@@ -3,6 +3,7 @@ import { Button } from '#components/ui/button'
 import { Input } from '#components/ui/input'
 import { Switch } from '#components/ui/switch'
 import { Textarea } from '#components/ui/textarea'
+import { StatusBadge } from '#components/ui/status-badge'
 import {
   Select,
   SelectContent,
@@ -320,13 +321,31 @@ export function AiFollowUpSettings({
         <p key={event.id}>
           {data.rules.find((rule) => rule.id === event.ruleId)?.name ?? '已删除规则'} · 会话{' '}
           {event.conversationId.slice(0, 8)} ·{' '}
-          {event.operationState === 'UNKNOWN' || event.deliveryFailureCode === 'AMBIGUOUS_DELIVERY'
-            ? '结果不明，已暂停'
-            : event.deliveryState === 'FAILED'
-              ? '发送失败，详见会话'
-              : event.deliveryState === 'SENT'
-                ? '发送接口已确认成功'
-                : (states[event.state] ?? event.state)}{' '}
+          <StatusBadge
+            tone={
+              event.operationState === 'UNKNOWN' ||
+              event.deliveryFailureCode === 'AMBIGUOUS_DELIVERY'
+                ? 'warning'
+                : event.deliveryState === 'FAILED' || event.state === 'FAILED'
+                  ? 'destructive'
+                  : event.deliveryState === 'SENT'
+                    ? 'success'
+                    : event.state === 'HANDOFF'
+                      ? 'warning'
+                      : ['QUEUED', 'GENERATING', 'COMPLETED'].includes(event.state)
+                        ? 'info'
+                        : 'neutral'
+            }
+          >
+            {event.operationState === 'UNKNOWN' ||
+            event.deliveryFailureCode === 'AMBIGUOUS_DELIVERY'
+              ? '结果不明，已暂停'
+              : event.deliveryState === 'FAILED'
+                ? '发送失败，详见会话'
+                : event.deliveryState === 'SENT'
+                  ? '发送接口已确认成功'
+                  : (states[event.state] ?? event.state)}
+          </StatusBadge>{' '}
           · {new Date(event.triggeredAt).toLocaleString()}
           {event.failureCode
             ? ` · ${{ FOLLOW_UP_INELIGIBLE: '回访资格或锚点已变化', FOLLOW_UP_RULE_CHANGED: '规则已修改或删除', NEW_CUSTOMER_MESSAGE: '客户已发送新消息', AI_PROVIDER_ERROR: '模型服务失败', INVALID_OUTPUT: '模型输出无效', QUOTA_EXHAUSTED: '额度已耗尽' }[event.failureCode] ?? event.failureCode}`
