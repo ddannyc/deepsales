@@ -180,6 +180,7 @@ export function campaignRoutes(withDb: WithDb) {
             ...identity,
             id,
             action: action as 'execute' | 'pause' | 'resume' | 'cancel',
+            expectedVersion: current.campaign.version,
             firstRunAt,
           })
           if (action === 'execute' || action === 'resume') await pumpCampaigns(c.env, withDb)

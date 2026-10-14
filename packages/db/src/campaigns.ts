@@ -261,6 +261,7 @@ export async function changeCampaignState(
   input: Context & {
     id: string
     action: 'execute' | 'pause' | 'resume' | 'cancel'
+    expectedVersion: number
     firstRunAt?: Date
   },
 ) {
@@ -272,6 +273,8 @@ export async function changeCampaignState(
       .for('update')
     if (!plan) throw new InboxError('NOT_FOUND')
     await manager(tx, input, plan.channelId)
+    if (input.action === 'execute' && plan.version !== input.expectedVersion)
+      throw new InboxError('INVALID_REQUEST', 'Campaign draft changed; refresh and retry')
     if (input.action === 'execute' && plan.status !== 'DRAFT') return { campaign: plan }
     if (input.action === 'resume' && plan.status !== 'PAUSED')
       throw new InboxError('INVALID_REQUEST')
