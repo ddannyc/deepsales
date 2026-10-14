@@ -967,6 +967,7 @@ export const aiResponseRun = pgTable(
     unparsedFallbackText: text('unparsed_fallback_text'),
     propertyCollection: jsonb('property_collection').$type<AiPropertyCollection>(),
     tagCollection: jsonb('tag_collection').$type<AiTagCollection>(),
+    variableInput: jsonb('variable_input').$type<import('./ai-variables').AiVariableInput>(),
     advertisingContext: jsonb('advertising_context').$type<AdvertisingContext>(),
     contextMessageIds: uuid('context_message_ids').array(),
     outputMessageId: uuid('output_message_id').references(() => message.id, {
