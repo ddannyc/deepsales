@@ -51,6 +51,7 @@ import {
 import { Hono } from 'hono'
 import { externalToolRoute } from './external-tool-routes'
 import { ExternalToolError } from './external-tools'
+import { readAiExternalCatalog } from '@deepsales/db'
 import { z } from 'zod'
 import {
   AI_PERSONA_SAFETY_SUFFIX,
@@ -127,7 +128,14 @@ export function aiOperationsRoutes(
           await getAiMemberConfig(db, memberInput)
           return c.json({
             variables: AI_VARIABLES,
-            tools: BUILTIN_AI_TOOLS,
+            tools: [
+              ...BUILTIN_AI_TOOLS,
+              ...(await readAiExternalCatalog(db, memberInput)).map((row) => ({
+                id: `external:${row.tool.id}`,
+                label: row.tool.name,
+                description: row.tool.description,
+              })),
+            ],
             positions: ['instructions'],
             missing: null,
           })

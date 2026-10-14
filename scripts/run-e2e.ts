@@ -33,6 +33,7 @@ const e2eOwnerKeys = [
   'ai-tools',
   'ai-skills',
   'ai-follow-ups',
+  'ai-external-tools',
   'campaigns',
   'lifecycle',
   'facebook',
@@ -187,6 +188,7 @@ function workerBindings(baseUrl: string, facebookGraphBaseUrl: string, aiBaseUrl
     EMBEDDING_DIMENSIONS: '1536',
     LLM_PROVIDER: 'alibaba',
     LLM_MODEL: 'qwen3.8-flash',
+    AI_TOOL_ALLOWED_ORIGINS: '["https://tools.example.com"]',
   }
 }
 

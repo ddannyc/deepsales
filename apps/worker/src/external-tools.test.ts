@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { buildExternalRequest, callExternalTool, validateExternalOrigin } from './external-tools'
 import { validateExternalObjectScope } from '../../../packages/db/src/ai-external-contracts'
 import { encryptCredential, decryptCredential } from './credential-crypto'
+import { instructionTools, validateAiToolCalls } from '@deepsales/db'
 
 const origin = 'https://tools.example.com'
 const definition = {
@@ -14,6 +15,14 @@ const definition = {
   effect: 'READ' as const,
 }
 describe('external HTTPS tool boundary', () => {
+  it('recognizes stable external references but never authorizes arbitrary or unreferenced IDs', () => {
+    const id = '11111111-1111-4111-8111-111111111111'
+    expect(instructionTools(`Use [[tool:external:${id}]]`)).toEqual([`external:${id}`])
+    expect(() => instructionTools('[[tool:external:https://tools.example.com]]')).toThrow()
+    expect(() =>
+      validateAiToolCalls('', [{ tool: 'external', arguments: { definitionId: id, values: {} } }]),
+    ).toThrow()
+  })
   it('binds declared write targets to immutable configuration and cannot override them through model values', () => {
     const write = {
       ...definition,
@@ -121,7 +130,7 @@ describe('external HTTPS tool boundary', () => {
   it('keeps the ten-second deadline active after headers and cancels stalled bodies', async () => {
     vi.useFakeTimers()
     try {
-      const cancelled = vi.fn()
+      const cancelled = vi.fn(() => new Promise<void>(() => {}))
       let signal: AbortSignal | null | undefined
       const stream = new ReadableStream<Uint8Array>({ cancel: cancelled })
       const pending = callExternalTool(
@@ -142,4 +151,27 @@ describe('external HTTPS tool boundary', () => {
       vi.useRealTimers()
     }
   })
+  it('does not wait for a non-cooperative injected reader cleanup', async () => {
+    const bytes = new TextEncoder().encode(JSON.stringify({ data: { status: 'ready' } }))
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce({ done: false, value: bytes })
+      .mockResolvedValue({ done: true })
+    const cancel = vi.fn(() => new Promise<void>(() => {}))
+    const response = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      body: { getReader: () => ({ read, cancel, releaseLock: vi.fn() }) },
+    } as unknown as Response
+    expect(
+      await callExternalTool(
+        buildExternalRequest(definition, { record: 'abc' }, [origin]),
+        definition.output,
+        null,
+        async () => response,
+      ),
+    ).toEqual({ status: 'ready' })
+    expect(cancel).toHaveBeenCalled()
+  }, 500)
 })

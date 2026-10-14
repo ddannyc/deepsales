@@ -138,6 +138,7 @@
 		"LLM_PROVIDER": "alibaba",
 		"LLM_MODEL": "qwen3.8-flash",
 		"AI_RETRIEVAL_MAX_DISTANCE": "0.35",
-		"AI_DEBOUNCE_SECONDS": "2"
+		"AI_DEBOUNCE_SECONDS": "2",
+		"AI_TOOL_ALLOWED_ORIGINS": "[]"
 	}
 }

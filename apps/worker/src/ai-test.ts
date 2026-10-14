@@ -1,3 +1,4 @@
+import { readAiExternalCatalog, simulateExternalTestAction } from '@deepsales/db'
 import {
   aiSelectedSkillInstructions,
   recordAiSkillSelection,
@@ -225,6 +226,18 @@ export async function executeAiTest(
     fetcher,
   )
   const responseInput: AiResponseInput = {
+    externalTools: (
+      await readAiExternalCatalog(db, {
+        workspaceId,
+        memberId: operation.memberId ?? '',
+        actingUserId,
+      })
+    ).map((row) => ({
+      id: row.tool.id,
+      name: row.tool.name,
+      description: row.tool.description,
+      inputs: row.tool.inputs,
+    })),
     automaticLanguageEnabled: snapshot.automaticLanguageEnabled,
     timeZone: snapshot.timeZone,
     naturalToneEnabled: snapshot.naturalToneEnabled,
@@ -265,6 +278,7 @@ export async function executeAiTest(
   )
   const calls = 'toolCalls' in result.decision ? (result.decision.toolCalls ?? []) : []
   const terminal = calls.at(-1)?.tool
+  const externalResults: NonNullable<AiResponseInput['externalResults']> = []
   const actions: NonNullable<Parameters<typeof recordAiTestResult>[1]['actions']> = []
   const searches: {
     ordinal: number
@@ -272,6 +286,24 @@ export async function executeAiTest(
     chunks: AiResponseInput['knowledgeChunks']
   }[] = []
   for (const [ordinal, call] of calls.entries()) {
+    if (call.tool === 'external') {
+      if (!operation.memberId) throw new AIOutputError()
+      const action = await simulateExternalTestAction(db, {
+        workspaceId,
+        memberId: operation.memberId,
+        actingUserId,
+        id: operation.id,
+        ordinal,
+        call,
+      })
+      if (!action?.result) return
+      actions.push({ call })
+      externalResults.push({
+        actionId: action.id,
+        values: action.result as Record<string, import('@deepsales/db').ExternalValue>,
+      })
+      continue
+    }
     if (call.tool !== 'search') {
       actions.push({ call })
       continue
@@ -338,7 +370,7 @@ export async function executeAiTest(
     ].slice(0, 6)
   }
   if (
-    calls.some((call) => call.tool === 'search') &&
+    calls.some((call) => call.tool === 'search' || call.tool === 'external') &&
     !['skip', 'handoff', 'send_media'].includes(terminal ?? '')
   ) {
     const finalFetch = meteredAiFetch(
@@ -365,6 +397,7 @@ export async function executeAiTest(
       knowledgeChunks: chunks,
       toolsDisabled: true,
       toolResults: calls.map((call) => ({ tool: call.tool, state: 'SUCCEEDED' })),
+      externalResults,
     })
     for (const search of searches) {
       if (!operation.memberId) throw new AIOutputError()
@@ -385,6 +418,7 @@ export async function executeAiTest(
         chunks.map((chunk) => chunk.id),
         replyConfig,
         chunks,
+        externalResults.map((result) => result.actionId),
       ).decision,
       replyConfig,
     )
@@ -401,6 +435,7 @@ export async function executeAiTest(
     }
   await saveResult({
     id: input.id,
+    actingUserId,
     output: {
       ...result,
       ...(terminal === 'skip' ? { kind: 'SKIPPED' } : {}),

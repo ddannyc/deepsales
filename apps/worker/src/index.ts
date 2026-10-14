@@ -1,5 +1,8 @@
+import { executeExternalToolAction } from './external-tool-actions'
 import {
   AiMemberError,
+  readAiRunExternalCatalog,
+  readExternalResultsForReply,
   AiResponseError,
   AiUsageError,
   AssignmentError,
@@ -3799,6 +3802,14 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         meteredFetch,
       )
       const responseInput: AiResponseInput = {
+        externalTools: (
+          await withDatabase(env, (db) => readAiRunExternalCatalog(db, claimed.id))
+        ).map((row) => ({
+          id: row.tool.id,
+          name: row.tool.name,
+          description: row.tool.description,
+          inputs: row.tool.inputs,
+        })),
         automaticLanguageEnabled: currentSnapshot.automaticLanguageEnabled,
         establishedLanguage: currentSnapshot.automaticLanguageEnabled
           ? claimed.replyLanguage
@@ -3862,6 +3873,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       }
 
       let toolStopped = false
+      let externalResults: AiResponseInput['externalResults'] = []
       const toolResults: { tool: string; state: string }[] = []
       const searches: {
         ordinal: number
@@ -3875,6 +3887,42 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           await publishAiReplyResult(env, claimed, guard)
           toolStopped = true
           break
+        }
+        if (call.tool === 'external') {
+          const action = await executeExternalToolAction((work) => withDatabase(env, work), env, {
+            runId: claimed.id,
+            ordinal,
+            call,
+            handoffEvaluation,
+          })
+          if (action?.state !== 'SUCCEEDED') {
+            toolStopped = true
+            break
+          }
+          const afterDispatch = await commitReply({
+            runId: claimed.id,
+            text: '',
+            stopCheckOnly: true,
+          })
+          if (afterDispatch?.kind !== 'CONTINUE') {
+            await publishAiReplyResult(env, claimed, afterDispatch)
+            toolStopped = true
+            break
+          }
+          const approved = await withDatabase(env, (db) =>
+            readExternalResultsForReply(db, claimed.id),
+          )
+          if (!approved) {
+            await withDatabase(env, (db) => cancelAiToolAuthorizationRun(db, claimed.id))
+            toolStopped = true
+            break
+          }
+          externalResults = approved.map((result) => ({
+            actionId: result.actionId,
+            values: result.values as Record<string, import('@deepsales/db').ExternalValue>,
+          }))
+          toolResults.push({ tool: `external:${call.arguments.definitionId}`, state: action.state })
+          continue
         }
         const executed = await withDatabase(env, (db) =>
           executeAiBuiltinAction(
@@ -3952,7 +4000,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           retrievedChunkIds = retrievedChunks.map((chunk) => chunk.id)
         }
       }
-      if (!toolStopped && searches.length) {
+      if (!toolStopped && (searches.length || externalResults.length)) {
         const finalFetch = meteredAiFetch(
           (work) => withDatabase(env, work),
           {
@@ -3977,6 +4025,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           knowledgeChunks: retrievedChunks,
           toolsDisabled: true,
           toolResults,
+          externalResults,
         })
         for (const search of searches) {
           const current = await withDatabase(env, (db) =>
@@ -4009,6 +4058,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           retrievedChunkIds,
           replyConfig,
           retrievedChunks,
+          externalResults.map((result) => result.actionId),
         )
         policy = applyHandoffPolicy(finalGrounded.decision, replyConfig)
         if (!toolStopped && policy.kind === 'HANDOFF') {
@@ -4036,6 +4086,8 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           : undefined,
         collectedProperties: decision.collectedProperties,
         appendedTags: decision.appendedTags,
+        usedToolActionIds:
+          'usedToolActionIds' in policy.decision ? policy.decision.usedToolActionIds : undefined,
       })
       await withDatabase(env, (db) =>
         finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),

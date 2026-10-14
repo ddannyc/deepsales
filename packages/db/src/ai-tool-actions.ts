@@ -58,7 +58,7 @@ export async function readAiToolSearchChunks(
 type ActionInput = {
   runId: string
   ordinal: number
-  call: AiToolCall
+  call: Exclude<AiToolCall, { tool: 'external' }>
   noticeText?: string
   reply?: Pick<
     Parameters<typeof commitAiResponse>[1],

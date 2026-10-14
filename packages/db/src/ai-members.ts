@@ -3,6 +3,7 @@ import { assertAiHandoffReferences, readEnabledAiHandoffRules } from './ai-hando
 import { type AiSkill, normalizeAiSkills } from './ai-skills'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES, normalizeAiStopRules } from './ai-stop'
 import { instructionTools } from './ai-tools'
+import { assertExternalToolReferences } from './ai-external-actions'
 import { instructionVariableKeys } from './ai-variables'
 import type { Database } from './database'
 import {
@@ -239,6 +240,13 @@ export async function publishAiMemberConfig(
       instructionVariableKeys(config.instructions)
       instructionTools(config.instructions)
       normalizeAiSkills(config.skills)
+      await assertExternalToolReferences(tx, {
+        ...input,
+        instructions: [
+          config.instructions,
+          ...config.skills.map((skill) => skill.instructions),
+        ].join('\n'),
+      })
       await assertAiStopReferences(tx, input.workspaceId, config.stopRules)
       await assertAiHandoffReferences(
         tx,
