@@ -232,7 +232,7 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
   const split = page.getByRole('switch', { name: '拆分长回复' })
   await expect(split).not.toBeChecked()
   await split.click()
-  await page.getByRole('button', { name: '保存草稿' }).click()
+  await saveDraft({ splitRepliesEnabled: true })
   await expect(page.getByRole('button', { name: '发布', exact: true })).toBeEnabled()
   await page.getByRole('button', { name: '发布', exact: true }).click()
   await expect(
@@ -308,7 +308,12 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
     await page.getByRole('button', { name: '添加停止条件组', exact: true }).click()
     await page.getByRole('spinbutton', { name: '条件组 1 回复轮次' }).fill('0')
     await page.getByLabel('停止结束文字（可选）').fill('Conversation complete.')
-    await page.getByRole('button', { name: '保存草稿' }).click()
+    await saveDraft({
+      stopRules: {
+        groups: [[{ kind: 'REPLIES', minimum: 0 }]],
+        endingText: 'Conversation complete.',
+      },
+    })
     await expect(page.getByRole('button', { name: '发布', exact: true })).toBeEnabled()
     await page.getByRole('button', { name: '发布', exact: true }).click()
     await expect(
@@ -335,6 +340,19 @@ test('new inbound input receives a grounded AI reply and reaches SENT', async ({
     await waitSent('Conversation complete.')
   } finally {
     await statePool.end()
+  }
+
+  async function saveDraft(expectedConfig: Record<string, unknown>) {
+    const saved = page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname ===
+          `/api/workspaces/${me.workspace.id}/ai-members/${ai.member.id}/config` &&
+        response.request().method() === 'PATCH',
+    )
+    await page.getByRole('button', { name: '保存草稿' }).click()
+    const response = await saved
+    expect(response.status()).toBe(200)
+    expect(await response.json()).toMatchObject({ config: expectedConfig })
   }
 })
 
