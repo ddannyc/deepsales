@@ -72,6 +72,57 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('skips an unparsed attachment once without changing ownership and accepts the next text input', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, replyWaitEnabled: false })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveUnparsedInput(db, f)
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    const outbound = vi.fn()
+    const queued = queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })
+    await handleAiResponseBatch(
+      batch('ai', queued),
+      environment({ send: outbound } as unknown as Queue),
+    )
+    expect(queued.ack).toHaveBeenCalledOnce()
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(outbound).not.toHaveBeenCalled()
+    expect(
+      await db
+        .select({ state: aiResponseRun.state, failureCode: aiResponseRun.failureCode })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, assigned.aiResponseRunId ?? '')),
+    ).toEqual([{ state: 'SKIPPED', failureCode: 'UNPARSED_INPUT' }])
+    expect(
+      await db
+        .select({
+          owner: conversation.assigneeMemberId,
+          constraint: conversation.routingConstraint,
+          stop: conversation.aiStopState,
+        })
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId)),
+    ).toEqual([{ owner: f.aiMemberId, constraint: null, stop: null }])
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        ),
+    ).toHaveLength(0)
+    const next = await receiveContextInput(db, f, 'Hello again.')
+    expect(next.aiResponseRunId).toBeTruthy()
+  })
   it('collects properties through the live Worker reply and reuses the single paid operation', async () => {
     const f = await createFixture(db)
     const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
@@ -3208,4 +3259,35 @@ function queueMessage(body: unknown) {
 
 function vector() {
   return Array.from({ length: 1_536 }, (_value, index) => (index === 0 ? 1 : 0))
+}
+
+async function receiveUnparsedInput(
+  db: ReturnType<typeof createDatabase>,
+  f: Awaited<ReturnType<typeof createFixture>>,
+) {
+  const at = new Date(Date.now() - 10_000)
+  const received = await processFacebookInbound(db, {
+    ingressId: crypto.randomUUID(),
+    pageId: f.pageId,
+    externalUserId: `customer-${f.ownerId}`,
+    externalMessageId: crypto.randomUUID(),
+    text: null,
+    attachments: [
+      {
+        kind: 'IMAGE',
+        filename: 'sample.png',
+        mimeType: 'image/png',
+        encryptedSourceUrl: 'cipher',
+        urlIv: 'iv',
+        tokenKeyVersion: 'v1',
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    ],
+    providerSentAt: at,
+    receivedAt: at,
+    payloadSha256: 'a'.repeat(64),
+    eventFragment: {},
+  })
+  if (received.kind !== 'created') throw new Error('Missing attachment input')
+  return received
 }

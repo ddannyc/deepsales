@@ -98,6 +98,9 @@ const labels: Record<string, string> = {
   COMPLETED: '已完成',
   HANDOFF: '转人工',
   CANCELLED: '已取消',
+  SKIPPED: '本轮跳过',
+  UNPARSED_INPUT: '附件无法解析，仅跳过本轮',
+  UNPARSED_FALLBACK: '附件无法解析，已使用配置兜底',
   FAILED: '失败',
   UNKNOWN: '结果不明，已暂停',
   PENDING: '发送中',
@@ -827,6 +830,14 @@ function SnapshotPreview({ snapshot }: { snapshot: Record<string, unknown> | nul
       <div>
         <dt>客户长期摘要</dt>
         <dd>{snapshot.memoryEnabled ? '启用' : '停用'}</dd>
+      </div>
+      <div>
+        <dt>无法解析兜底</dt>
+        <dd>
+          {snapshot.unparsedFallbackEnabled
+            ? `启用 · ${Array.isArray(snapshot.unparsedFallbackTexts) ? snapshot.unparsedFallbackTexts.length : 0} 条话术`
+            : '关闭 · 仅跳过本轮'}
+        </dd>
       </div>
       <div>
         <dt>拆分长回复</dt>
