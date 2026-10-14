@@ -45,6 +45,7 @@ import {
   deleteOldFacebookWebhookReceipts,
   deleteReplyTemplate,
   disableFacebookChannel,
+  executeAiBuiltinAction,
   expireFacebookInboundAttachments,
   type FacebookChannelCursor,
   FacebookError,
@@ -68,6 +69,7 @@ import {
   KnowledgeProcessingError,
   listCustomerLinkTargets,
   listCustomerPropertyHistory,
+  listDueAiFollowUpConversations,
   listDueCustomerMemoryIds,
   listFacebookChannels,
   listFacebookChannelsPage,
@@ -82,8 +84,6 @@ import {
   listPendingFacebookInboundAttachmentIds,
   listPendingKnowledgeDocumentIds,
   listQueuedAiResponseRunIds,
-  listDueAiFollowUpConversations,
-  startAiFollowUp,
   listQueuedConversationIds,
   listReplyTemplates,
   listStaleAiResponseRuns,
@@ -119,6 +119,7 @@ import {
   setCustomerProperty,
   setCustomerTag,
   setMemberChannelAccess,
+  startAiFollowUp,
   storeFacebookMediaUpload,
   TRANSLATION_LANGUAGES,
   takeOverConversation,
@@ -3747,7 +3748,19 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           ? (decision.languageSelection?.language ?? currentSnapshot.responseLanguage)
           : currentSnapshot.responseLanguage,
       }
-      const grounded = enforceGrounding(decision, retrievedChunkIds, replyConfig, retrievedChunks)
+      const plannedMedia = decision.toolCalls?.find((call) => call.tool === 'send_media')
+      if (
+        plannedMedia &&
+        decision.mediaAssetId &&
+        decision.mediaAssetId !== plannedMedia.arguments.assetId
+      )
+        throw new AIOutputError()
+      const grounded = enforceGrounding(
+        plannedMedia ? { ...decision, mediaAssetId: plannedMedia.arguments.assetId } : decision,
+        retrievedChunkIds,
+        replyConfig,
+        retrievedChunks,
+      )
       const policy = applyHandoffPolicy(grounded.decision, replyConfig)
       if (policy.kind === 'HANDOFF') {
         await withDatabase(env, (db) =>
@@ -3771,6 +3784,50 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
 
+      let toolStopped = false
+      const toolCalls = 'toolCalls' in policy.decision ? (policy.decision.toolCalls ?? []) : []
+      for (const [ordinal, call] of toolCalls.entries()) {
+        const guard = await commitReply({ runId: claimed.id, text: '', stopCheckOnly: true })
+        if (guard?.kind !== 'CONTINUE') {
+          await publishAiReplyResult(env, claimed, guard)
+          toolStopped = true
+          break
+        }
+        const executed = await withDatabase(env, (db) =>
+          executeAiBuiltinAction(db, {
+            runId: claimed.id,
+            ordinal,
+            call,
+            handoffEvaluation,
+            noticeText: handoffNotice(currentSnapshot.responseLanguage),
+            reply: {
+              text: policy.decision.response,
+              languageSelection: currentSnapshot.automaticLanguageEnabled
+                ? decision.languageSelection
+                : undefined,
+              collectedProperties: decision.collectedProperties,
+              appendedTags: decision.appendedTags,
+            },
+          }),
+        )
+        if ('handoff' in executed && executed.handoff)
+          await publishAiHandoffResult(env, claimed, executed.handoff)
+        if (
+          executed.action.state !== 'SUCCEEDED' ||
+          ['skip', 'handoff', 'send_media'].includes(call.tool)
+        ) {
+          await publishAiReplyResult(env, claimed, executed.result)
+          toolStopped = true
+          break
+        }
+      }
+      if (toolStopped) {
+        await withDatabase(env, (db) =>
+          finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+        )
+        queueMessage.ack()
+        continue
+      }
       const result = await commitReply({
         runId: claimed.id,
         text: policy.decision.response,
@@ -3883,6 +3940,14 @@ async function completeAiHandoff(
       ...input,
     }),
   )
+  return publishAiHandoffResult(env, claimed, result)
+}
+
+async function publishAiHandoffResult(
+  env: Bindings,
+  claimed: { workspaceId: string; conversationId: string },
+  result: Awaited<ReturnType<typeof handoffAiConversation>>,
+) {
   if (!result.changed) {
     await publishInboxChange(
       env,

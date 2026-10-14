@@ -747,12 +747,13 @@ export type CommitAiResponseResult =
   | null
 
 export async function commitAiResponse(
-  db: Database,
+  db: Database | Transaction,
   input: {
     runId: string
     text: string
     unparsedInput?: boolean
     stopCheckOnly?: boolean
+    toolSkip?: boolean
     checkHandoffBeforeStop?: boolean
     handoffEvaluation?: AiHandoffEvaluation
     now?: Date
@@ -765,7 +766,8 @@ export async function commitAiResponse(
   let text = input.text.trim()
   if (
     !input.stopCheckOnly &&
-    ((!text && !input.unparsedInput) || text.length > MAX_AI_RESPONSE_TEXT_LENGTH)
+    ((!text && !input.unparsedInput && !input.toolSkip) ||
+      text.length > MAX_AI_RESPONSE_TEXT_LENGTH)
   ) {
     throw new AiResponseError('INVALID_REQUEST', 'AI response text is invalid')
   }
@@ -1045,6 +1047,18 @@ export async function commitAiResponse(
           .set({ aiStopState: null, updatedAt: now })
           .where(eq(conversation.id, current.id))
       if (input.stopCheckOnly) return { kind: 'CONTINUE' as const }
+    }
+    if (!stopReason && input.toolSkip) {
+      await tx
+        .update(aiResponseRun)
+        .set({
+          state: 'SKIPPED',
+          failureCode: 'TOOL_SKIP',
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(aiResponseRun.id, run.id))
+      return { kind: 'SKIPPED', workspaceId: current.workspaceId, conversationId: current.id }
     }
     if (!stopReason && input.unparsedInput) {
       if (!run.configSnapshot?.unparsedFallbackEnabled) {

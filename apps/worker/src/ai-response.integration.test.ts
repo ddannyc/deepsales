@@ -4,14 +4,17 @@ import {
   aiMemberConfig,
   aiProviderAttempt,
   aiResponseRun,
+  aiToolAction,
   autoAssignConversation,
   bootstrapWorkspace,
   changeCustomerIdentity,
   channel,
   channelIdentity,
   claimAiResponseRun,
+  claimKnowledgeDocument,
   clearCustomerMemory,
   commitAiResponse,
+  completeKnowledgeDocument,
   connectFacebookPages,
   conversation,
   conversationAssignment,
@@ -29,6 +32,10 @@ import {
   getAiDiagnostics,
   getAiFacebookAdvertisingContext,
   getCustomerProfile,
+  getFacebookOutboundMedia,
+  knowledgeChunk,
+  listInternalNotes,
+  mediaAsset,
   member,
   message,
   processFacebookInbound,
@@ -78,6 +85,386 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('cancels a tool removed from the current published definition before its action executes', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...config,
+      replyWaitEnabled: false,
+      instructions: '[[tool:record]]',
+    })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveContextInput(db, f, 'Please follow the configured procedure.')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!assigned.aiResponseRunId) throw new Error('Missing run')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: unknown) => {
+        if (String(url).endsWith('/embeddings'))
+          return Response.json({ data: [{ index: 0, embedding: vector() }] })
+        await updateAiMemberConfig(db, {
+          ...config,
+          instructions: 'The recording tool is disabled.',
+        })
+        await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Recorded.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  toolCalls: [{ tool: 'record', arguments: { text: 'This must not be written.' } }],
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    const outbound = vi.fn()
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+      environment({ send: outbound } as unknown as Queue),
+    )
+    expect(outbound).not.toHaveBeenCalled()
+    expect(
+      (
+        await listInternalNotes(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+        })
+      ).notes,
+    ).toHaveLength(0)
+    const [run] = await db
+      .select()
+      .from(aiResponseRun)
+      .where(eq(aiResponseRun.id, assigned.aiResponseRunId))
+    expect(run).toMatchObject({ state: 'CANCELLED', failureCode: 'TOOL_AUTHORIZATION_CHANGED' })
+    const [action] = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, run.id))
+    expect(action).toMatchObject({ state: 'CANCELLED', failureCode: 'TOOL_AUTHORIZATION_CHANGED' })
+    expect(action.completedAt).not.toBeNull()
+  })
+  it('sends authorized retrieved private media once with a durable tool receipt', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...config,
+      replyWaitEnabled: false,
+      instructions: '[[tool:send_media]]',
+    })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const assetId = crypto.randomUUID()
+    await db.insert(mediaAsset).values({
+      id: assetId,
+      workspaceId: f.workspaceId,
+      title: 'Guide',
+      filename: 'guide.pdf',
+      kind: 'FILE',
+      mimeType: 'application/pdf',
+      byteSize: 12,
+      sha256: 'a'.repeat(64),
+      storageKey: 'test/private-guide',
+      inLibrary: true,
+    })
+    const doc = await createInlineKnowledgeDocument(db, {
+      workspaceId: f.workspaceId,
+      knowledgeBaseId: f.knowledgeBaseId,
+      createdByUserId: f.ownerId,
+      name: 'Guide',
+      text: 'Setup instructions.',
+      mediaAssetId: assetId,
+    })
+    const docClaim = await claimKnowledgeDocument(db, { documentId: doc.id })
+    if (!docClaim) throw new Error('Description not claimed')
+    await completeKnowledgeDocument(db, {
+      documentId: doc.id,
+      processingStartedAt: docClaim.processingStartedAt,
+      workspaceId: f.workspaceId,
+      knowledgeBaseId: f.knowledgeBaseId,
+      contentSha256: 'b'.repeat(64),
+      embeddingMetadata: { provider: 'alibaba', model: 'qwen3.7-text-embedding', dimensions: 1536 },
+      chunks: [{ text: 'Setup instructions.', embedding: vector() }],
+    })
+    const [chunk] = await db
+      .select()
+      .from(knowledgeChunk)
+      .where(eq(knowledgeChunk.knowledgeDocumentId, doc.id))
+    const received = await receiveContextInput(db, f, 'Please send the setup guide.')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!assigned.aiResponseRunId) throw new Error('Missing run')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: unknown) =>
+        String(url).endsWith('/embeddings')
+          ? Response.json({ data: [{ index: 0, embedding: vector() }] })
+          : Response.json({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      decision: 'ANSWER',
+                      response: 'Here is the guide.',
+                      handoffReason: null,
+                      containsBusinessFacts: false,
+                      usedChunkIds: [chunk.id],
+                      toolCalls: [{ tool: 'send_media', arguments: { assetId } }],
+                    }),
+                  },
+                },
+              ],
+            }),
+      ),
+    )
+    const outbound = vi.fn()
+    for (let attempt = 0; attempt < 2; attempt++)
+      await handleAiResponseBatch(
+        batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+        environment({ send: outbound } as unknown as Queue),
+      )
+    const messages = await db
+      .select()
+      .from(message)
+      .where(
+        and(eq(message.conversationId, received.conversationId), eq(message.direction, 'OUTBOUND')),
+      )
+      .orderBy(message.createdAt)
+    expect(messages.map((m) => m.messageType)).toEqual(['TEXT', 'ATTACHMENT'])
+    expect(await getFacebookOutboundMedia(db, messages[1].id)).toMatchObject({
+      storageKey: 'test/private-guide',
+    })
+    const actions = await db
+      .select()
+      .from(aiToolAction)
+      .where(eq(aiToolAction.runId, assigned.aiResponseRunId))
+    expect(actions).toHaveLength(1)
+    expect(actions[0]).toMatchObject({ tool: 'send_media', state: 'SUCCEEDED' })
+  })
+  it('executes an authorized handoff once through assignment history and retains HUMAN_ONLY', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...config,
+      replyWaitEnabled: false,
+      instructions: '[[tool:handoff]]',
+    })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveContextInput(
+      db,
+      f,
+      'Please follow the configured support procedure.',
+    )
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!assigned.aiResponseRunId) throw new Error('Missing run')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: unknown) =>
+        String(url).endsWith('/embeddings')
+          ? Response.json({ data: [{ index: 0, embedding: vector() }] })
+          : Response.json({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      decision: 'ANSWER',
+                      response: '',
+                      handoffReason: null,
+                      containsBusinessFacts: false,
+                      usedChunkIds: [],
+                      toolCalls: [{ tool: 'handoff', arguments: {} }],
+                    }),
+                  },
+                },
+              ],
+            }),
+      ),
+    )
+    const outbound = vi.fn()
+    for (let attempt = 0; attempt < 2; attempt++)
+      await handleAiResponseBatch(
+        batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+        environment({ send: outbound } as unknown as Queue),
+      )
+    const [current] = await db
+      .select()
+      .from(conversation)
+      .where(eq(conversation.id, received.conversationId))
+    expect(current).toMatchObject({
+      status: 'OPEN',
+      assigneeMemberId: null,
+      routingConstraint: 'HUMAN_ONLY',
+    })
+    const history = await db
+      .select()
+      .from(conversationAssignment)
+      .where(
+        and(
+          eq(conversationAssignment.conversationId, current.id),
+          eq(conversationAssignment.reason, 'AI_HANDOFF'),
+        ),
+      )
+    expect(history).toHaveLength(1)
+    const actions = await db
+      .select()
+      .from(aiToolAction)
+      .where(eq(aiToolAction.runId, assigned.aiResponseRunId))
+    expect(actions).toHaveLength(1)
+    expect(actions[0]).toMatchObject({
+      tool: 'handoff',
+      state: 'SUCCEEDED',
+      result: { kind: 'HANDOFF' },
+    })
+  })
+  it('records one AI-authored internal note across duplicate queue delivery without putting it in customer replies', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...config,
+      replyWaitEnabled: false,
+      instructions: '[[tool:record]]',
+    })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveContextInput(db, f, 'Please remember this for the support team.')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!assigned.aiResponseRunId) throw new Error('Missing run')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: unknown) =>
+        String(url).endsWith('/embeddings')
+          ? Response.json({ data: [{ index: 0, embedding: vector() }] })
+          : Response.json({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      decision: 'ANSWER',
+                      response: 'Thank you.',
+                      handoffReason: null,
+                      containsBusinessFacts: false,
+                      usedChunkIds: [],
+                      toolCalls: [
+                        { tool: 'record', arguments: { text: 'Support-only observation.' } },
+                      ],
+                    }),
+                  },
+                },
+              ],
+            }),
+      ),
+    )
+    const outbound = vi.fn()
+    for (let attempt = 0; attempt < 2; attempt++)
+      await handleAiResponseBatch(
+        batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+        environment({ send: outbound } as unknown as Queue),
+      )
+    const notes = await listInternalNotes(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: received.conversationId,
+    })
+    expect(notes.notes).toHaveLength(1)
+    expect(notes.notes[0]).toMatchObject({
+      authorMemberId: f.aiMemberId,
+      text: 'Support-only observation.',
+    })
+    const messages = await db
+      .select()
+      .from(message)
+      .where(
+        and(
+          eq(message.conversationId, received.conversationId),
+          eq(message.senderMemberId, f.aiMemberId),
+        ),
+      )
+    expect(messages.map((m) => m.text)).toEqual(['Thank you.'])
+    const actions = await db
+      .select()
+      .from(aiToolAction)
+      .where(eq(aiToolAction.runId, assigned.aiResponseRunId))
+    expect(actions).toHaveLength(1)
+    expect(actions[0]).toMatchObject({ tool: 'record', state: 'SUCCEEDED' })
+  })
+  it('executes an authorized skip once without sending or changing ownership', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, {
+      ...config,
+      replyWaitEnabled: false,
+      instructions: '[[tool:skip]]',
+    })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const received = await receiveContextInput(db, f, 'This message requires no reply.')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!assigned.aiResponseRunId) throw new Error('Missing run')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: unknown) =>
+        String(url).endsWith('/embeddings')
+          ? Response.json({ data: [{ index: 0, embedding: vector() }] })
+          : Response.json({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      decision: 'ANSWER',
+                      response: '',
+                      handoffReason: null,
+                      containsBusinessFacts: false,
+                      usedChunkIds: [],
+                      toolCalls: [{ tool: 'skip', arguments: {} }],
+                    }),
+                  },
+                },
+              ],
+            }),
+      ),
+    )
+    const outbound = vi.fn()
+    for (let attempt = 0; attempt < 2; attempt++)
+      await handleAiResponseBatch(
+        batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+        environment({ send: outbound } as unknown as Queue),
+      )
+    expect(outbound).not.toHaveBeenCalled()
+    const [run] = await db
+      .select()
+      .from(aiResponseRun)
+      .where(eq(aiResponseRun.id, assigned.aiResponseRunId))
+    expect(run).toMatchObject({ state: 'SKIPPED', failureCode: 'TOOL_SKIP' })
+    const [current] = await db
+      .select()
+      .from(conversation)
+      .where(eq(conversation.id, received.conversationId))
+    expect(current).toMatchObject({ status: 'OPEN', assigneeMemberId: f.aiMemberId })
+    const actions = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, run.id))
+    expect(actions).toHaveLength(1)
+    expect(actions[0]).toMatchObject({
+      tool: 'skip',
+      ordinal: 0,
+      state: 'SUCCEEDED',
+      simulated: false,
+    })
+  })
   it('passes trusted typed variable snapshots through the live Worker without an extra model call', async () => {
     const f = await createFixture(db)
     const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
