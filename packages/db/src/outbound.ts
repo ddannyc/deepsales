@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm'
 import type { Database } from './database'
+import { assertReplySuggestionVariables } from './reply-suggestions'
 import {
   channelIdentity,
   conversation,
@@ -65,6 +66,7 @@ export async function createHumanReply(
 
   const now = input.now ?? new Date()
   return db.transaction(async (tx) => {
+    await tx.execute(sql`select id from workspace where id = ${input.workspaceId} for share`)
     const conversationLock = await tx.execute(
       sql`select id
           from ${conversation}
@@ -136,6 +138,19 @@ export async function createHumanReply(
     }
 
     if (input.clientKey) {
+      const [suggestion] = await tx
+        .select()
+        .from(replySuggestion)
+        .where(
+          and(
+            eq(replySuggestion.id, input.clientKey),
+            eq(replySuggestion.workspaceId, input.workspaceId),
+            eq(replySuggestion.conversationId, input.conversationId),
+            eq(replySuggestion.requesterMemberId, viewer.memberId),
+          ),
+        )
+      if (suggestion?.suggestedText)
+        await assertReplySuggestionVariables(tx, suggestion, viewer.memberId)
       const [existing] = await tx
         .select()
         .from(message)
