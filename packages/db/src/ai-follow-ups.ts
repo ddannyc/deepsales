@@ -1,3 +1,6 @@
+import { instructionVariableKeys } from './ai-variables'
+import { instructionTools } from './ai-tools'
+import { assertExternalToolReferences, readAiExternalCatalog } from './ai-external-actions'
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { AiMemberError, getAiMemberConfig, readAiViewerChannelIds } from './ai-members'
 import {
@@ -113,6 +116,9 @@ export async function saveAiFollowUpRule(db: Database, input: FollowUpRuleInput)
     await getAiMemberConfig(tx, input)
     await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
     try {
+      instructionVariableKeys(input.instructions)
+      instructionTools(input.instructions)
+      await assertExternalToolReferences(tx, input)
       await assertAiStopReferences(tx, input.workspaceId, { ...EMPTY_AI_STOP_RULES, groups })
     } catch {
       throw new AiMemberError('INVALID_CONFIGURATION')
@@ -297,6 +303,22 @@ async function eligible(tx: Tx, rule: Rule, conversationId: string, now: Date) {
       ...EMPTY_AI_STOP_RULES,
       groups: rule.groups,
     })
+    instructionVariableKeys(rule.instructions)
+    const toolRefs = instructionTools(rule.instructions)
+    const externalRefs = toolRefs.filter((reference) => reference.startsWith('external:'))
+    if (externalRefs.length) {
+      const available = await readAiExternalCatalog(tx, {
+        workspaceId: rule.workspaceId,
+        memberId: rule.memberId,
+        channelId: current.channelId,
+      })
+      if (
+        externalRefs.some(
+          (reference) => !available.some((row) => `external:${row.tool.id}` === reference),
+        )
+      )
+        return null
+    }
     const stop = current.snapshot.stopRules ?? EMPTY_AI_STOP_RULES
     await assertAiStopReferences(tx, rule.workspaceId, stop)
     if (
