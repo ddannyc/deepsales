@@ -351,6 +351,13 @@
       "when": 1791945656150,
       "tag": "0049_proactive_follow_ups",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1791947833309,
+      "tag": "0050_ai_tool_actions",
+      "breakpoints": true
     }
   ]
 }

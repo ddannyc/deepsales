@@ -1000,6 +1000,46 @@ export const aiResponseRun = pgTable(
   ],
 )
 
+export const aiToolAction = pgTable(
+  'ai_tool_action',
+  {
+    id: uuid().defaultRandom().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    operationId: uuid('operation_id')
+      .notNull()
+      .references(() => aiOperation.id, { onDelete: 'cascade' }),
+    runId: uuid('run_id').references(() => aiResponseRun.id, { onDelete: 'cascade' }),
+    ordinal: integer().notNull(),
+    tool: text().notNull(),
+    definitionRevision: integer('definition_revision').default(1).notNull(),
+    arguments: jsonb().$type<Record<string, unknown>>().notNull(),
+    simulated: boolean().default(false).notNull(),
+    state: text()
+      .$type<'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN'>()
+      .default('PENDING')
+      .notNull(),
+    result: jsonb().$type<Record<string, unknown>>(),
+    failureCode: text('failure_code'),
+    startedAt: timestamp('started_at', { withTimezone: true }),
+    completedAt: timestamp('completed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    uniqueIndex('ai_tool_action_operation_ordinal_idx').on(t.operationId, t.ordinal),
+    check('ai_tool_action_ordinal', sql`${t.ordinal} between 0 and 2`),
+    check(
+      'ai_tool_action_state',
+      sql`${t.state} in ('PENDING','RUNNING','SUCCEEDED','FAILED','CANCELLED','UNKNOWN')`,
+    ),
+    check('ai_tool_action_scope', sql`${t.runId} is not null or ${t.simulated}`),
+  ],
+)
+
 export const messageAttachment = pgTable(
   'message_attachment',
   {
