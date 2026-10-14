@@ -10,6 +10,7 @@ import {
   assertKnowledgeBaseManager,
   autoAssignConversation,
   CustomerError,
+  campaignDeliveryContext,
   changeCustomerIdentity,
   chunkKnowledgeText,
   claimAiResponseRun,
@@ -158,6 +159,7 @@ import { aiOperationsRoutes } from './ai-operations'
 import { meteredAiFetch } from './ai-usage'
 import { createAuth } from './auth'
 import type { Bindings } from './bindings'
+import { campaignRoutes, pumpCampaigns } from './campaigns'
 import { customerMemoryJobSchema, processCustomerMemoryJob } from './customer-memory'
 import {
   createFacebookAdapter,
@@ -851,6 +853,7 @@ app.post('/api/workspaces/:workspaceId/ai-members/:memberId/publish', async (c) 
 })
 
 app.route('/', aiOperationsRoutes(withDatabase))
+app.route('/', campaignRoutes(withDatabase))
 
 app.get('/api/workspaces/:workspaceId/knowledge-bases', async (c) => {
   if (!hasAuthBindings(c.env)) return notReady(c)
@@ -4309,7 +4312,21 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
     let pageAccessToken = ''
     let recipientId = ''
     let recipientSendStarted = false
+    let campaignDelivery: Awaited<ReturnType<typeof campaignDeliveryContext>> = null
     try {
+      campaignDelivery = await withDatabase(env, (db) => campaignDeliveryContext(db, claimed.id))
+      if (campaignDelivery && !campaignDelivery.allowed) {
+        await withDatabase(env, (db) =>
+          failOutboundMessage(db, {
+            messageId: claimed.id,
+            attemptId: claimed.attemptId,
+            failureCode: 'CAMPAIGN_NOT_PERMITTED',
+            failureMessage: 'Campaign sending permission is no longer valid',
+          }),
+        )
+        queueMessage.ack()
+        continue
+      }
       const facebookDelivery = await withDatabase(env, (db) =>
         getFacebookOutboundDelivery(db, claimed.id),
       )
@@ -4371,6 +4388,7 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
           attachment.kind,
           providerAttachmentId,
           pageAccessToken,
+          campaignDelivery ? 'UPDATE' : 'RESPONSE',
         )
       } else {
         if (!claimed.text) throw new Error('Outbound text is missing')
@@ -4380,6 +4398,7 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
           recipientId,
           claimed.text,
           pageAccessToken,
+          campaignDelivery ? 'UPDATE' : 'RESPONSE',
         )
       }
       await withDatabase(env, (db) =>
@@ -4414,7 +4433,11 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
       const preparationFailure = claimed.messageType === 'ATTACHMENT' && !recipientSendStarted
       const ambiguous =
         !preparationFailure && error instanceof FacebookProviderError && error.status === 0
-      if (claimed.messageType !== 'ATTACHMENT' && isRetryableFacebookFailure(error)) {
+      if (
+        claimed.messageType !== 'ATTACHMENT' &&
+        isRetryableFacebookFailure(error) &&
+        (!campaignDelivery || claimed.attemptNumber < 3)
+      ) {
         try {
           await withDatabase(env, (db) =>
             releaseOutboundMessage(db, {
@@ -4505,6 +4528,7 @@ export async function handleScheduled(env: Bindings) {
   if (!env.HYPERDRIVE?.connectionString) return
 
   try {
+    await pumpCampaigns(env, withDatabase)
     await withDatabase(env, (db) => recoverAiOperations(db))
     const stale = await withDatabase(env, (db) => recoverStaleOutboundMessages(db))
     if (stale.length) {

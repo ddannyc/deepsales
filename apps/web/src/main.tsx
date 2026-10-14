@@ -88,6 +88,7 @@ import { AiOperations } from './ai-operations'
 import { AiPropertySettings } from './ai-property-settings'
 import { AiSetupGuide } from './ai-setup-guide'
 import { type AiStopRules, AiStopSettings, emptyStopRules } from './ai-stop-settings'
+import { Campaigns } from './campaigns'
 import { CustomerSidebar } from './customer-sidebar'
 import { DemoPage } from './demo'
 import { InboxFilterControls, type InboxFilters, inboxQuery } from './inbox-filters'
@@ -1026,6 +1027,7 @@ const appNavItems = [
   { href: '/inbox', label: '收件箱', icon: InboxIcon },
   { href: '/team', label: '团队', icon: UsersRound },
   { href: '/knowledge', label: '知识库', icon: BookOpen },
+  { href: '/campaigns', label: '群发计划', icon: Send },
   { href: '/settings/facebook', label: 'Facebook 设置', icon: Settings2 },
 ] as const
 
@@ -1043,13 +1045,16 @@ function Shell({
   const teamPage = pathname === '/team' || Boolean(aiMemberId)
   const knowledgePage = pathname === '/knowledge'
   const facebookPage = pathname === '/settings/facebook'
+  const campaignsPage = pathname === '/campaigns'
   const activeHref = teamPage
     ? '/team'
     : knowledgePage
       ? '/knowledge'
-      : facebookPage
-        ? '/settings/facebook'
-        : '/inbox'
+      : campaignsPage
+        ? '/campaigns'
+        : facebookPage
+          ? '/settings/facebook'
+          : '/inbox'
   const inboxPage = activeHref === '/inbox'
 
   async function signOut() {
@@ -1068,7 +1073,9 @@ function Shell({
         onWorkspaceChange={onWorkspaceChange}
       />
       <div className={`app-content ${inboxPage ? 'app-content-inbox' : ''}`}>
-        {aiMemberId ? (
+        {campaignsPage ? (
+          <Campaigns workspaceId={me.workspace.id} manager={me.workspace.role !== 'AGENT'} />
+        ) : aiMemberId ? (
           <AiMemberPage workspace={me.workspace} memberId={aiMemberId} />
         ) : teamPage ? (
           <TeamPage workspace={me.workspace} />
