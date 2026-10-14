@@ -26,6 +26,8 @@ logical translation operation with separate provider stages. Failure stops that 
 unknown results visibly pause the campaign without regeneration or automatic resend.
 
 Scheduling stores the chosen IANA zone and local calendar time. The default is explicit UTC.
+Activation verifies the captured draft version under the plan lock. A concurrent saved edit
+rejects the obsolete execution request; refresh and retry to execute the current schedule.
 Past starting times and nonexistent/repeated daylight-saving starting times are rejected.
 DAILY and WEEKLY recurrence preserve local time; future missing/repeated local occurrences are
 skipped. A maximum occurrence count or end time stops new rounds while already committed work
