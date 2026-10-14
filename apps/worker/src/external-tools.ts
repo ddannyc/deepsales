@@ -7,7 +7,11 @@ import {
 } from '../../../packages/db/src/ai-external-contracts'
 
 export class ExternalToolError extends Error {
-  constructor(readonly code: string) {
+  constructor(
+    readonly code: string,
+    readonly retryable = false,
+    readonly retryAfterMs = 0,
+  ) {
     super(code)
   }
 }
@@ -90,7 +94,7 @@ export async function callExternalTool(
     timeout = setTimeout(() => {
       controller.abort()
       void reader?.cancel().catch(() => {})
-      reject(new ExternalToolError('EXTERNAL_TIMEOUT'))
+      reject(new ExternalToolError('EXTERNAL_TIMEOUT', true))
     }, 10_000)
   })
   try {
@@ -116,7 +120,18 @@ export async function callExternalTool(
         }
         if (!response.ok) {
           void response.body?.cancel().catch(() => {})
-          throw new ExternalToolError('EXTERNAL_HTTP_ERROR')
+          const header = response.headers.get('retry-after')
+          const seconds = Number(header)
+          const retryAfterMs = header
+            ? Number.isFinite(seconds)
+              ? seconds * 1000
+              : Math.max(0, Date.parse(header) - Date.now())
+            : 0
+          throw new ExternalToolError(
+            'EXTERNAL_HTTP_ERROR',
+            response.status === 429 || response.status >= 500,
+            Number.isFinite(retryAfterMs) ? retryAfterMs : 0,
+          )
         }
         if (
           response.headers.has('content-encoding') &&
@@ -186,7 +201,7 @@ export async function callExternalTool(
     ])
   } catch (error) {
     if (error instanceof ExternalToolError) throw error
-    throw new ExternalToolError('EXTERNAL_REQUEST_FAILED')
+    throw new ExternalToolError('EXTERNAL_REQUEST_FAILED', true)
   } finally {
     clearTimeout(timeout)
     controller.abort()

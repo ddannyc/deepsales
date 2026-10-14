@@ -1,4 +1,5 @@
 import {
+  AiUsageError,
   claimAiExternalAction,
   readExternalDispatchCredential,
   recordExternalActionReceipt,
@@ -56,12 +57,23 @@ export async function executeExternalToolAction(
     )
   } catch (error) {
     const unknown = dispatched && claimed.dispatch.tool.effect === 'WRITE'
-    return withDb((db) =>
+    const receipt = await withDb((db) =>
       recordExternalActionReceipt(db, {
         actionId: claimed.action.id,
         state: unknown ? 'UNKNOWN' : 'FAILED',
         failureCode: error instanceof ExternalToolError ? error.code : 'EXTERNAL_REQUEST_FAILED',
+        safeReadRetryAfterMs:
+          dispatched &&
+          claimed.dispatch?.tool.effect === 'READ' &&
+          error instanceof ExternalToolError &&
+          error.retryable
+            ? error.retryAfterMs
+            : undefined,
+        handoffEvaluation: input.handoffEvaluation,
       }),
     )
+    if (receipt?.retryAt)
+      throw new AiUsageError('RETRY_LATER', Math.max(1, receipt.retryAt.getTime() - Date.now()))
+    return receipt
   }
 }

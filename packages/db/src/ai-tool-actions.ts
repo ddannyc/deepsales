@@ -1,7 +1,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { AiResponseError, type CommitAiResponseResult, commitAiResponse } from './ai-responses'
 import { selectedAiSkillId } from './ai-skills'
-import { readAiRunToolInstructions } from './ai-tool-authorization'
+import { readAiRunToolInstructions, readAiToolSlotCount } from './ai-tool-authorization'
 import { type AiToolCall, instructionTools, validateAiToolCalls } from './ai-tools'
 import { type AssignmentResult, executeAssignment } from './assignments'
 import type { Database } from './database'
@@ -178,12 +178,19 @@ export async function executeAiBuiltinAction(
       stopCheckOnly: true,
       handoffEvaluation: input.handoffEvaluation,
     })
-    const state = allowed && guard?.kind === 'CONTINUE' ? 'RUNNING' : 'CANCELLED'
-    if (!allowed && guard?.kind === 'CONTINUE') await cancelRevokedToolRun(tx, run.id)
+    const budgetAvailable = (await readAiToolSlotCount(tx, run.id)) < 3
+    const state = allowed && budgetAvailable && guard?.kind === 'CONTINUE' ? 'RUNNING' : 'CANCELLED'
+    if ((!allowed || !budgetAvailable) && guard?.kind === 'CONTINUE')
+      await cancelRevokedToolRun(tx, run.id)
     const values = {
       state,
+      attemptCount: (existing?.attemptCount ?? 0) + (state === 'RUNNING' ? 1 : 0),
       startedAt: new Date(),
-      failureCode: allowed ? null : 'TOOL_AUTHORIZATION_CHANGED',
+      failureCode: !budgetAvailable
+        ? 'TOOL_CALL_LIMIT'
+        : allowed
+          ? null
+          : 'TOOL_AUTHORIZATION_CHANGED',
       completedAt: state === 'CANCELLED' ? new Date() : null,
     } as const
     const [action] = existing

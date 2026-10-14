@@ -1,6 +1,8 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  aiExternalPlugin,
+  aiExternalTool,
   aiToolAction,
   listInternalNotes,
   aiFollowUpEvent,
@@ -33,7 +35,7 @@ import {
   updateAiMemberConfig,
   user,
 } from '@deepsales/db'
-import { and, eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { migrate } from 'drizzle-orm/node-postgres/migrator'
 import { Pool } from 'pg'
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
@@ -165,6 +167,145 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       ],
     })
 
+  it('retries a safe read within the same follow-up budget without repeating its successful first action', async () => {
+    const f = await ready('LAST_AI_REPLY')
+    const pluginId = crypto.randomUUID(),
+      toolId = crypto.randomUUID()
+    await db.insert(aiExternalPlugin).values({
+      id: pluginId,
+      workspaceId: f.workspaceId,
+      memberId: f.aiMemberId,
+      channelId: f.channelId,
+      name: 'Status API',
+      origin: 'https://tools.example.com',
+      enabled: true,
+      auth: 'NONE',
+    })
+    await db.insert(aiExternalTool).values({
+      id: toolId,
+      pluginId,
+      name: 'Status',
+      description: 'Read status',
+      enabled: true,
+      method: 'GET',
+      path: '/status',
+      effect: 'READ',
+      output: [{ name: 'status', path: ['status'], type: 'string' }],
+      objectScope: '',
+    })
+    await db
+      .update(aiFollowUpRule)
+      .set({ instructions: `[[tool:record]] [[tool:external:${toolId}]]` })
+      .where(eq(aiFollowUpRule.id, f.rule.id))
+    const job = await trigger(f)
+    if (!job) throw new Error('Missing follow-up')
+    const external = vi.fn(async () =>
+      external.mock.calls.length === 1
+        ? Response.json({}, { status: 503 })
+        : Response.json({ status: 'ready' }),
+    )
+    vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+      if (String(url).startsWith('https://tools.example.com')) return external()
+      if (String(url).endsWith('/embeddings'))
+        return Response.json({ data: [{ index: 0, embedding: vector() }] })
+      const prompt = JSON.parse(String(init?.body))
+        .messages.map((item: { content: string }) => item.content)
+        .join('\n') as string
+      const results = JSON.parse(prompt.match(/EXTERNAL_RESULT_VALUES: ([^\n]+)/)?.[1] ?? '[]') as {
+        actionId: string
+      }[]
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: results.length ? 'Status: ready.' : 'Checking status.',
+                handoffReason: null,
+                containsBusinessFacts: results.length > 0,
+                usedChunkIds: [],
+                ...(results.length
+                  ? { usedToolActionIds: results.map((item) => item.actionId) }
+                  : {
+                      toolCalls: [
+                        {
+                          tool: 'record',
+                          arguments: { text: 'Follow-up requested a status check.' },
+                        },
+                        { tool: 'external', arguments: { definitionId: toolId, values: {} } },
+                      ],
+                    }),
+              }),
+            },
+          },
+        ],
+      })
+    })
+    const env = { ...f.env, AI_TOOL_ALLOWED_ORIGINS: '["https://tools.example.com"]' }
+    const queued = queueMessage(job)
+    await handleAiResponseBatch(batch('ai', queued), env)
+    expect(queued.retry).toHaveBeenCalledOnce()
+    expect(f.outbound).not.toHaveBeenCalled()
+    const before = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, job.runId))
+    expect(before.map((action) => [action.ordinal, action.state])).toEqual(
+      expect.arrayContaining([
+        [0, 'SUCCEEDED'],
+        [1, 'FAILED'],
+      ]),
+    )
+    // Test clock advances only the durable backoff; action/once/charge identities stay fixed.
+    await db.execute(
+      sql`update ai_tool_action set retry_at = ${new Date(0)} where run_id = ${job.runId}`,
+    )
+    await handleAiResponseBatch(batch('ai', queueMessage(job)), env)
+    await handleAiResponseBatch(batch('ai', queueMessage(job)), env)
+    const after = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, job.runId))
+    expect(after.map((action) => action.id).sort()).toEqual(
+      before.map((action) => action.id).sort(),
+    )
+    expect(after.every((action) => action.state === 'SUCCEEDED')).toBe(true)
+    expect(external).toHaveBeenCalledTimes(2)
+    expect(
+      (
+        await listInternalNotes(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: f.conversationId,
+        })
+      ).notes,
+    ).toHaveLength(1)
+    expect(f.outbound).toHaveBeenCalledOnce()
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(1)
+    expect(
+      await db
+        .select()
+        .from(aiFollowUpEvent)
+        .where(eq(aiFollowUpEvent.conversationId, f.conversationId)),
+    ).toHaveLength(1)
+  })
+  it('rejects unknown variable and unavailable tool references when saving an immediate rule', async () => {
+    const f = await ready('LAST_AI_REPLY')
+    for (const instructions of [
+      '{{customer.unknown}}',
+      '[[tool:unknown]]',
+      `[[tool:external:${crypto.randomUUID()}]]`,
+    ]) {
+      await expect(
+        saveAiFollowUpRule(db, {
+          ...f.identity,
+          id: crypto.randomUUID(),
+          name: 'Invalid references',
+          enabled: false,
+          timer: 'LAST_AI_REPLY',
+          delaySeconds: 1,
+          instructions,
+          groups: [],
+        }),
+      ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' })
+    }
+  })
   it('resolves rule-only variables and executes its authorized action once before a follow-up message', async () => {
     const f = await ready(
       'LAST_AI_REPLY',
