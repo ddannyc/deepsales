@@ -12,6 +12,7 @@ import {
 import { Button } from './components/ui/button'
 import { Checkbox } from './components/ui/checkbox'
 import { Input } from './components/ui/input'
+import { StatusBadge } from './components/ui/status-badge'
 import {
   Select,
   SelectContent,
@@ -91,6 +92,28 @@ const labels: Record<string, string> = {
   REPLY_WINDOW_CLOSED: '普通消息窗口已关闭',
 }
 const initialBlock = () => ({ id: crypto.randomUUID(), text: '' })
+const statusTones = {
+  DRAFT: 'neutral',
+  ACTIVE: 'info',
+  PAUSED: 'warning',
+  CANCELLED: 'neutral',
+  COMPLETED: 'success',
+  WAITING: 'warning',
+  SUCCESS: 'success',
+  FAILED: 'destructive',
+  SKIPPED: 'neutral',
+  UNKNOWN: 'warning',
+  PENDING: 'warning',
+  SENT: 'success',
+} as const
+
+function CampaignStatus({ state }: { state: string }) {
+  return (
+    <StatusBadge tone={statusTones[state as keyof typeof statusTones] ?? 'neutral'}>
+      {labels[state] ?? state}
+    </StatusBadge>
+  )
+}
 
 function Choice({
   label,
@@ -606,9 +629,8 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
                 <Button variant="ghost" onClick={() => void act(() => refresh(plan.id))}>
                   {plan.name}
                 </Button>
-                <span>
-                  {labels[plan.status] ?? plan.status} · {plan.identityIds.length} 个身份
-                </span>
+                <CampaignStatus state={plan.status} />
+                <span>{plan.identityIds.length} 个身份</span>
                 {plan.status === 'DRAFT' && (
                   <Button
                     variant="ghost"
@@ -704,11 +726,11 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
                   {run.recipients.map((person) => (
                     <p key={person.id}>
                       身份 …{person.channelIdentityId.slice(-6)}：
-                      {labels[person.state] ?? person.state}
+                      <CampaignStatus state={person.state} />
                       {person.reason &&
                         ` · ${labels[person.reason] ?? '发送未完成，请检查渠道和素材状态。'}`}
                       {person.messages.map((m) => (
-                        <span key={m.id}> · {labels[m.state] ?? m.state}</span>
+                        <CampaignStatus key={m.id} state={m.state} />
                       ))}
                     </p>
                   ))}

@@ -144,6 +144,17 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
       ).status,
     ).toBe(400)
   })
+  it('offers authorized built-in tools beside variables and rejects unknown tool references', async () => {
+    const f = await fixture()
+    const response = await f.call(`/${f.aiId}/variables`)
+    expect(await response.json()).toMatchObject({
+      tools: expect.arrayContaining([
+        { id: 'record', label: '记录内部备注', description: expect.any(String) },
+      ]),
+    })
+    expect((await f.configCall({ instructions: '[[tool:record]]' })).status).toBe(200)
+    expect((await f.configCall({ instructions: '[[tool:sql]]' })).status).toBe(400)
+  })
   it('resolves test instruction variables only from the simulated customer', async () => {
     const f = await fixture()
     await f.configCall({

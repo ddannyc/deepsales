@@ -17,6 +17,7 @@ import {
   message,
   processFacebookInbound,
   type readCampaign,
+  saveCampaign,
   setMemberChannelAccess,
 } from '@deepsales/db'
 import { eq } from 'drizzle-orm'
@@ -207,6 +208,66 @@ describe.skipIf(!connectionString)('ordinary campaigns', () => {
       .from(message)
       .where(eq(message.conversationId, f.conversationId))
     expect(messages.filter((m) => m.direction === 'OUTBOUND')).toHaveLength(1)
+  })
+
+  it('rejects execution of a draft edited while activation waits for its plan lock', async () => {
+    const f = await fixture()
+    const id = crypto.randomUUID()
+    const input = {
+      id,
+      name: 'Concurrent schedule',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      text: 'Neutral update',
+    }
+    expect((await f.call('', 'POST', input)).status).toBe(201)
+    const calendar = {
+      localTime: new Date(Date.now() + 86_400_000).toISOString().slice(0, 16),
+      timeZone: 'UTC',
+      repeat: 'NONE' as const,
+    }
+    let execution: Promise<Response> | undefined
+    try {
+      await db.transaction(async (tx) => {
+        await saveCampaign(tx as unknown as typeof db, {
+          ...input,
+          workspaceId: f.workspaceId,
+          userId: f.userId,
+          content: [{ id, text: input.text }],
+          calendar,
+        })
+        execution = Promise.resolve(f.call(`/${id}/execute`, 'POST', {}))
+        await expect
+          .poll(async () => {
+            const result = await pool.query(
+              "select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and state = 'active' and query ilike '%campaign%' and query ilike '%for update%'",
+            )
+            return result.rowCount
+          })
+          .toBeGreaterThan(0)
+      })
+      if (!execution) throw new Error('Execution did not start')
+      const result = await execution
+      expect(result.status).toBe(400)
+      expect(await result.json()).toMatchObject({
+        error: { code: 'INVALID_REQUEST', message: 'Campaign draft changed; refresh and retry' },
+      })
+      expect(await (await f.call(`/${id}`)).json()).toMatchObject({
+        campaign: { status: 'DRAFT', version: 2, calendar, nextRunAt: null },
+        runs: [],
+      })
+      expect((await f.call(`/${id}/execute`, 'POST', {})).status).toBe(200)
+      expect(await (await f.call(`/${id}`)).json()).toMatchObject({
+        campaign: {
+          status: 'ACTIVE',
+          calendar,
+          nextRunAt: `${calendar.localTime}:00.000Z`,
+        },
+        runs: [],
+      })
+    } finally {
+      if (execution) await execution
+    }
   })
 
   it('persists a provider retry deadline so duplicate deliveries cannot bypass channel backoff', async () => {
