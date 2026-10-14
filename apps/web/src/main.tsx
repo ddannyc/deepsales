@@ -315,6 +315,7 @@ type AiMemberRuntimeSnapshot = {
   timeZone?: string
   naturalToneEnabled?: boolean
   memoryEnabled?: boolean
+  tagsEnabled?: boolean
   replyWaitEnabled?: boolean
   adLearningEnabled?: boolean
   adMappings?: { adId: string; content: string }[]
@@ -335,6 +336,7 @@ type AiMemberConfig = {
   timeZone: string
   naturalToneEnabled: boolean
   memoryEnabled: boolean
+  tagsEnabled: boolean
   replyWaitEnabled: boolean
   adLearningEnabled: boolean
   adMappings: { adId: string; content: string }[]
@@ -370,6 +372,7 @@ type AiMemberDraft = Pick<
   | 'adMappings'
   | 'naturalToneEnabled'
   | 'memoryEnabled'
+  | 'tagsEnabled'
   | 'replyWaitEnabled'
   | 'automaticLanguageEnabled'
   | 'timeZone'
@@ -4363,6 +4366,20 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
             }
           />
           <Separator />
+          <section className="ai-config-section" aria-label="AI 标签功能">
+            <h2>AI 标签追加</h2>
+            <Switch
+              aria-label="启用 AI 标签追加"
+              checked={draft.tagsEnabled}
+              disabled={busy}
+              onCheckedChange={(checked) =>
+                setDraft((current) => (current ? { ...current, tagsEnabled: checked } : current))
+              }
+            />
+            <p className="field-description">
+              保存为草稿，发布后生效。标签规则在下方独立管理，保存立即生效。
+            </p>
+          </section>
           <section aria-label="客户长期摘要" className="ai-config-section">
             <h2>客户长期摘要</h2>
             <div className="switch-field">
@@ -4694,6 +4711,12 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
         </aside>
       </div>
       <AiPropertySettings
+        key={`tags:${workspace.id}:${memberId}`}
+        workspaceId={workspace.id}
+        memberId={memberId}
+        kind="tag"
+      />
+      <AiPropertySettings
         key={`${workspace.id}:${memberId}`}
         workspaceId={workspace.id}
         memberId={memberId}
@@ -4723,6 +4746,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.adMappings ?? [],
       left.naturalToneEnabled ?? false,
       left.memoryEnabled ?? false,
+      left.tagsEnabled ?? false,
       left.replyWaitEnabled ?? true,
       left.automaticLanguageEnabled ?? false,
       left.timeZone ?? 'UTC',
@@ -4742,6 +4766,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       right.adMappings ?? [],
       right.naturalToneEnabled ?? false,
       right.memoryEnabled ?? false,
+      right.tagsEnabled ?? false,
       right.replyWaitEnabled ?? true,
       right.automaticLanguageEnabled ?? false,
       right.timeZone ?? 'UTC',
@@ -4757,6 +4782,7 @@ function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
     stopRules: config.stopRules ?? emptyStopRules,
     naturalToneEnabled: config.naturalToneEnabled ?? false,
     memoryEnabled: config.memoryEnabled ?? false,
+    tagsEnabled: config.tagsEnabled ?? false,
     replyWaitEnabled: config.replyWaitEnabled ?? true,
     automaticLanguageEnabled: config.automaticLanguageEnabled ?? false,
     timeZone: config.timeZone ?? 'UTC',

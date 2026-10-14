@@ -9,6 +9,7 @@ import {
 } from './ai-property-rules'
 import { type AiConversationContextMessage, normalizeAiReplyLanguage } from './ai-responses'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES } from './ai-stop'
+import { readAiTestTagRules } from './ai-tag-rules'
 import type { Database } from './database'
 import { assertInboxConversationAccess } from './inbox'
 import {
@@ -123,6 +124,7 @@ export async function reserveAiOperation(
     text?: string
     snapshot?: AiMemberRuntimeSnapshot
     testContext?: AiTestContext
+    tagRules?: import('./schema').AiTagCollection['rules']
     propertyRules?: AiPropertyCollection['rules']
     handoffContext?: {
       rules: Awaited<ReturnType<typeof readEnabledAiHandoffRules>>
@@ -204,6 +206,7 @@ export async function reserveAiOperation(
               handoffContext: input.handoffContext,
               testContext: input.testContext,
               propertyRules: input.propertyRules,
+              tagRules: input.tagRules,
             }
           : undefined,
         createdAt: now,
@@ -433,6 +436,7 @@ export async function resolveTestConfiguration(
       adMappings: config.adMappings,
       naturalToneEnabled: config.naturalToneEnabled,
       memoryEnabled: config.memoryEnabled,
+      tagsEnabled: config.tagsEnabled,
       replyWaitEnabled: config.replyWaitEnabled,
     }
   if (input.source === 'PUBLISHED') {
@@ -744,6 +748,9 @@ export async function createAiTest(
       snapshot,
       handoffContext: { rules, facts },
       propertyRules: await readAiTestPropertyRules(tx, input.workspaceId, input.memberId),
+      tagRules: snapshot.tagsEnabled
+        ? await readAiTestTagRules(tx, input.workspaceId, input.memberId)
+        : [],
       testContext,
     })
     if (session && !session.operationIds.includes(operation.id)) {
@@ -770,6 +777,25 @@ export async function recordAiTestResult(
     const collected =
       (input.output as { decision?: { collectedProperties?: AiCollectedProperty[] } } | null)
         ?.decision?.collectedProperties ?? []
+    const tagRules =
+      (record?.output as { tagRules?: import('./schema').AiTagCollection['rules'] } | null)
+        ?.tagRules ?? []
+    const appendedTags =
+      (input.output as { decision?: { appendedTags?: string[] } } | null)?.decision?.appendedTags ??
+      []
+    if (
+      new Set(appendedTags).size !== appendedTags.length ||
+      appendedTags.some((id) => !tagRules.some((r) => r.definitionId === id))
+    )
+      throw new AiMemberError('INVALID_REQUEST')
+    if (tagRules.length && record?.memberId) {
+      const latest = await readAiTestTagRules(tx, record.workspaceId, record.memberId)
+      if (
+        tagRules.length !== latest.length ||
+        tagRules.some((r) => !latest.some((v) => v.id === r.id && v.revision === r.revision))
+      )
+        throw new AiMemberError('INVALID_CONFIGURATION')
+    }
     validateAiCollectedProperties(propertyRules, collected)
     if (record?.memberId) {
       await tx.execute(sql`select id from ${workspace} where id = ${record.workspaceId} for share`)
@@ -835,6 +861,7 @@ export async function recordAiTestResult(
           ...(input.output as object),
           ...(context ? { testContext: context } : {}),
           propertyRules,
+          tagRules,
         },
         chunkIds: input.chunkIds,
         state: 'COMPLETED',
@@ -865,10 +892,15 @@ export async function recordAiTestResult(
         ),
         ...collected,
       ]
-      await validateTestCustomer(tx, record?.workspaceId ?? '', { ...session.customer, properties })
+      const tags = [...new Set([...session.customer.tags, ...appendedTags])]
+      await validateTestCustomer(tx, record?.workspaceId ?? '', {
+        ...session.customer,
+        properties,
+        tags,
+      })
       await tx
         .update(aiTestSession)
-        .set({ customer: { ...session.customer, properties } })
+        .set({ customer: { ...session.customer, properties, tags } })
         .where(eq(aiTestSession.id, session.id))
     }
   })

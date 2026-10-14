@@ -348,6 +348,7 @@ export const customer = pgTable(
     preferredLanguage: text('preferred_language'),
     notes: text(),
     ownerMemberId: uuid('owner_member_id').references(() => member.id, { onDelete: 'set null' }),
+    tagRevision: integer('tag_revision').default(0).notNull(),
     profileRevision: integer('profile_revision').default(0).notNull(),
     profileSourceChannelIds: jsonb('profile_source_channel_ids')
       .$type<string[]>()
@@ -409,6 +410,7 @@ export const conversation = pgTable(
       .notNull()
       .references(() => channelIdentity.id, { onDelete: 'cascade' }),
     status: conversationStatus().default('OPEN').notNull(),
+    tagRevision: integer('tag_revision').default(0).notNull(),
     aiReplyLanguage: text('ai_reply_language'),
     aiStopState: jsonb('ai_stop_state').$type<{
       reason: 'CONDITION' | 'SCHEDULE'
@@ -631,6 +633,39 @@ export const aiPropertyRule = pgTable(
   (t) => [uniqueIndex('ai_property_rule_member_definition_idx').on(t.memberId, t.definitionId)],
 )
 
+export type AiTagCollection = {
+  customerId: string
+  customerRevision: number
+  conversationRevision: number
+  rules: {
+    id: string
+    definitionId: string
+    revision: number
+    name: string
+    level: 'CUSTOMER' | 'CONVERSATION'
+    instructions: string
+  }[]
+}
+export const aiTagRule = pgTable(
+  'ai_tag_rule',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    definitionId: uuid('definition_id')
+      .notNull()
+      .references(() => customerTagDefinition.id, { onDelete: 'cascade' }),
+    instructions: text().notNull(),
+    enabled: boolean().default(true).notNull(),
+    revision: integer().default(1).notNull(),
+  },
+  (t) => [uniqueIndex('ai_tag_rule_member_definition_idx').on(t.memberId, t.definitionId)],
+)
+
 export const customerTagDefinition = pgTable(
   'customer_tag_definition',
   {
@@ -841,6 +876,7 @@ export const aiResponseRun = pgTable(
     }>(),
     unparsedFallbackText: text('unparsed_fallback_text'),
     propertyCollection: jsonb('property_collection').$type<AiPropertyCollection>(),
+    tagCollection: jsonb('tag_collection').$type<AiTagCollection>(),
     advertisingContext: jsonb('advertising_context').$type<AdvertisingContext>(),
     contextMessageIds: uuid('context_message_ids').array(),
     outputMessageId: uuid('output_message_id').references(() => message.id, {
@@ -1056,6 +1092,7 @@ export type AiMemberRuntimeSnapshot = {
   timeZone?: string
   naturalToneEnabled?: boolean
   memoryEnabled?: boolean
+  tagsEnabled?: boolean
   replyWaitEnabled?: boolean
   instructions: string
   responseLanguage: string
@@ -1127,6 +1164,7 @@ export const aiMemberConfig = pgTable('ai_member_config', {
   timeZone: text('time_zone').default('UTC').notNull(),
   naturalToneEnabled: boolean('natural_tone_enabled').default(false).notNull(),
   memoryEnabled: boolean('memory_enabled').default(false).notNull(),
+  tagsEnabled: boolean('tags_enabled').default(false).notNull(),
   replyWaitEnabled: boolean('reply_wait_enabled').default(true).notNull(),
   memberId: uuid('member_id')
     .primaryKey()

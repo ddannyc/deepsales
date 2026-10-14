@@ -498,6 +498,16 @@ export async function setCustomerTag(
           sourceChannelId: found.identity.channelId,
         })
         .onConflictDoNothing()
+    if (customerId)
+      await tx
+        .update(customer)
+        .set({ tagRevision: sql`${customer.tagRevision} + 1` })
+        .where(eq(customer.id, customerId))
+    else
+      await tx
+        .update(conversation)
+        .set({ tagRevision: sql`${conversation.tagRevision} + 1` })
+        .where(eq(conversation.id, input.conversationId))
     return { saved: true }
   })
 }
