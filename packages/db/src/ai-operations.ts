@@ -1,6 +1,11 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
 import { assertAiHandoffReferences, readEnabledAiHandoffRules } from './ai-handoff-rules'
-import { AiMemberError, assertAiManager, getAiMemberConfig } from './ai-members'
+import {
+  AiMemberError,
+  assertAiManager,
+  getAiMemberConfig,
+  readAiViewerChannelIds,
+} from './ai-members'
 import {
   type AiCollectedProperty,
   readAiTestPropertyRules,
@@ -10,6 +15,8 @@ import {
 import { type AiConversationContextMessage, normalizeAiReplyLanguage } from './ai-responses'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES } from './ai-stop'
 import { readAiTestTagRules } from './ai-tag-rules'
+import { readAiToolSearchChunks } from './ai-tool-actions'
+import { type AiToolCall, validateAiToolCalls } from './ai-tools'
 import { readAiTestVariableInput } from './ai-variable-values'
 import type { AiVariableInput } from './ai-variables'
 import type { Database } from './database'
@@ -25,6 +32,8 @@ import {
   aiProviderAttempt,
   aiResponseRun,
   aiTestSession,
+  aiToolAction,
+  channelIdentity,
   conversation,
   knowledgeBase,
   knowledgeChunk,
@@ -616,6 +625,16 @@ export async function clearAiTestSession(
     if (session.generation !== input.generation) throw new AiMemberError('INVALID_REQUEST')
     if (session.operationIds.length)
       await tx
+        .update(aiToolAction)
+        .set({ state: 'CANCELLED', failureCode: 'TEST_CLEARED', completedAt: new Date() })
+        .where(
+          and(
+            inArray(aiToolAction.operationId, session.operationIds),
+            inArray(aiToolAction.state, ['PENDING', 'RUNNING']),
+          ),
+        )
+    if (session.operationIds.length)
+      await tx
         .update(aiOperation)
         .set({ state: 'CANCELLED', failureCode: 'TEST_CLEARED', updatedAt: new Date() })
         .where(
@@ -777,12 +796,176 @@ export async function createAiTest(
   })
 }
 
+type TestSearchInput = Identity & {
+  memberId: string
+  id: string
+  ordinal: number
+  call: Extract<AiToolCall, { tool: 'search' }>
+}
+
+async function authorizeTestSearch(tx: Transaction, input: TestSearchInput, allowUnknown = false) {
+  await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for share`)
+  const [record] = await tx
+    .select()
+    .from(aiOperation)
+    .where(
+      and(
+        eq(aiOperation.id, input.id),
+        eq(aiOperation.workspaceId, input.workspaceId),
+        eq(aiOperation.memberId, input.memberId),
+      ),
+    )
+  if (
+    record?.kind !== 'TEST' ||
+    !['RESERVED', 'STARTED', ...(allowUnknown ? ['UNKNOWN'] : [])].includes(record.state)
+  )
+    return null
+  try {
+    await getAiMemberConfig(tx, input)
+  } catch (error) {
+    if (error instanceof AiMemberError) return null
+    throw error
+  }
+  validateAiToolCalls(record.snapshot?.instructions ?? '', [input.call])
+  const context = (record.output as { testContext?: AiTestContext } | null)?.testContext
+  if (context) {
+    const session = await lockTestSession(tx, { ...input, sessionId: context.sessionId })
+    if (session.generation !== context.generation || !session.operationIds.includes(record.id))
+      return null
+  }
+  return record
+}
+
+export async function claimAiTestSearchAction(db: Database, input: TestSearchInput) {
+  return db.transaction(async (tx) => {
+    const record = await authorizeTestSearch(tx, input)
+    if (!record) return null
+    if (!Number.isInteger(input.ordinal) || input.ordinal < 0 || input.ordinal > 2)
+      throw new AiMemberError('INVALID_REQUEST')
+    const [existing] = await tx
+      .select()
+      .from(aiToolAction)
+      .where(and(eq(aiToolAction.operationId, record.id), eq(aiToolAction.ordinal, input.ordinal)))
+      .for('update')
+    if (
+      existing &&
+      (existing.tool !== 'search' || existing.arguments.query !== input.call.arguments.query)
+    )
+      throw new AiMemberError('INVALID_REQUEST')
+    if (existing?.state === 'SUCCEEDED')
+      return {
+        action: existing,
+        chunks: await readAiToolSearchChunks(tx, {
+          workspaceId: input.workspaceId,
+          knowledgeBaseId: record.snapshot?.knowledgeBaseId ?? '',
+          ids: existing.result?.chunkIds as string[],
+        }),
+      }
+    if (existing && ['UNKNOWN', 'CANCELLED'].includes(existing.state)) return null
+    const [action] = existing
+      ? await tx
+          .update(aiToolAction)
+          .set({ state: 'RUNNING', failureCode: null, startedAt: new Date(), completedAt: null })
+          .where(eq(aiToolAction.id, existing.id))
+          .returning()
+      : await tx
+          .insert(aiToolAction)
+          .values({
+            workspaceId: input.workspaceId,
+            memberId: input.memberId,
+            operationId: record.id,
+            ordinal: input.ordinal,
+            tool: 'search',
+            arguments: input.call.arguments,
+            simulated: true,
+            state: 'RUNNING',
+            startedAt: new Date(),
+          })
+          .returning()
+    return { action, chunks: null }
+  })
+}
+
+export async function finishAiTestSearchAction(
+  db: Database,
+  input: TestSearchInput & { chunkIds?: string[]; failure?: 'FAILED' | 'UNKNOWN' },
+) {
+  return db.transaction(async (tx) => {
+    const record = await authorizeTestSearch(tx, input, Boolean(input.failure))
+    const [action] = await tx
+      .select()
+      .from(aiToolAction)
+      .where(
+        and(
+          eq(aiToolAction.operationId, input.id),
+          eq(aiToolAction.ordinal, input.ordinal),
+          eq(aiToolAction.workspaceId, input.workspaceId),
+          eq(aiToolAction.memberId, input.memberId),
+        ),
+      )
+      .for('update')
+    if (!action) return null
+    if (!record || action.state === 'CANCELLED') {
+      if (action.state !== 'SUCCEEDED' && action.state !== 'CANCELLED')
+        await tx
+          .update(aiToolAction)
+          .set({
+            state: 'CANCELLED',
+            failureCode: 'TEST_AUTHORIZATION_CHANGED',
+            completedAt: new Date(),
+          })
+          .where(eq(aiToolAction.id, action.id))
+      return null
+    }
+    if (input.failure) {
+      if (action.state !== 'SUCCEEDED')
+        await tx
+          .update(aiToolAction)
+          .set({
+            state: input.failure,
+            failureCode: input.failure === 'UNKNOWN' ? 'TOOL_RESULT_UNKNOWN' : 'TOOL_SEARCH_FAILED',
+            completedAt: new Date(),
+          })
+          .where(eq(aiToolAction.id, action.id))
+      return null
+    }
+    if (!['RUNNING', 'SUCCEEDED'].includes(action.state)) return null
+    const chunks = await readAiToolSearchChunks(tx, {
+      workspaceId: input.workspaceId,
+      knowledgeBaseId: record.snapshot?.knowledgeBaseId ?? '',
+      ids:
+        action.state === 'SUCCEEDED'
+          ? (action.result?.chunkIds as string[])
+          : (input.chunkIds ?? []),
+    })
+    if (action.state !== 'SUCCEEDED')
+      await tx
+        .update(aiToolAction)
+        .set({
+          state: 'SUCCEEDED',
+          result: { chunkIds: chunks.map((chunk) => chunk.id) },
+          completedAt: new Date(),
+        })
+        .where(eq(aiToolAction.id, action.id))
+    return chunks
+  })
+}
+
 export async function recordAiTestResult(
   db: Database | Transaction,
-  input: { id: string; output: unknown; chunkIds: string[] },
+  input: {
+    id: string
+    output: unknown
+    chunkIds: string[]
+    actions?: { call: AiToolCall; chunkIds?: string[] }[]
+  },
 ) {
   await db.transaction(async (tx) => {
     const [record] = await tx.select().from(aiOperation).where(eq(aiOperation.id, input.id))
+    validateAiToolCalls(
+      record?.snapshot?.instructions ?? '',
+      (input.actions ?? []).map((a) => a.call),
+    )
     if (record)
       await tx.execute(sql`select id from ${workspace} where id = ${record.workspaceId} for share`)
     const context = (record?.output as { testContext?: AiTestContext } | null)?.testContext
@@ -891,6 +1074,28 @@ export async function recordAiTestResult(
     const selection = (
       input.output as { decision?: { languageSelection?: { language: string } } } | null
     )?.decision?.languageSelection
+    if (updated.length && record?.memberId && input.actions?.length)
+      await tx
+        .insert(aiToolAction)
+        .values(
+          input.actions.map((action, ordinal) => ({
+            workspaceId: record.workspaceId,
+            memberId: record.memberId as string,
+            operationId: record.id,
+            ordinal,
+            tool: action.call.tool,
+            arguments: action.call.arguments,
+            simulated: true,
+            state: 'SUCCEEDED' as const,
+            result: {
+              kind: 'SIMULATED',
+              ...(action.chunkIds ? { chunkIds: action.chunkIds } : {}),
+            },
+            startedAt: new Date(),
+            completedAt: new Date(),
+          })),
+        )
+        .onConflictDoNothing()
     if (updated.length && context && record?.snapshot?.automaticLanguageEnabled && selection)
       await tx
         .update(aiTestSession)
@@ -926,9 +1131,10 @@ export async function recordAiTestResult(
 export async function getAiDiagnostics(db: Database, input: Identity & { id: string }) {
   await assertAiManager(db, input.workspaceId, input.actingUserId)
   const [run] = await db
-    .select({ run: aiResponseRun })
+    .select({ run: aiResponseRun, channelId: channelIdentity.channelId })
     .from(aiResponseRun)
     .innerJoin(conversation, eq(conversation.id, aiResponseRun.conversationId))
+    .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
     .where(and(eq(aiResponseRun.id, input.id), eq(conversation.workspaceId, input.workspaceId)))
     .limit(1)
   const [operation] = await db
@@ -936,6 +1142,13 @@ export async function getAiDiagnostics(db: Database, input: Identity & { id: str
     .from(aiOperation)
     .where(and(eq(aiOperation.id, input.id), eq(aiOperation.workspaceId, input.workspaceId)))
   if (!run && operation?.kind !== 'TEST') throw new AiMemberError('NOT_FOUND')
+  if (
+    run &&
+    !(await readAiViewerChannelIds(db, { ...input, memberId: run.run.memberId })).includes(
+      run.channelId,
+    )
+  )
+    throw new AiMemberError('NOT_FOUND')
   if (run)
     await assertInboxConversationAccess(db, {
       workspaceId: input.workspaceId,
@@ -1032,6 +1245,22 @@ export async function getAiDiagnostics(db: Database, input: Identity & { id: str
         run ? eq(aiFeedback.runId, input.id) : eq(aiFeedback.operationId, input.id),
       ),
     )
+  const actions = await db
+    .select({
+      id: aiToolAction.id,
+      tool: aiToolAction.tool,
+      definitionRevision: aiToolAction.definitionRevision,
+      state: aiToolAction.state,
+      simulated: aiToolAction.simulated,
+      failureCode: aiToolAction.failureCode,
+      startedAt: aiToolAction.startedAt,
+      completedAt: aiToolAction.completedAt,
+    })
+    .from(aiToolAction)
+    .where(
+      and(eq(aiToolAction.operationId, input.id), eq(aiToolAction.workspaceId, input.workspaceId)),
+    )
+    .orderBy(asc(aiToolAction.ordinal))
   return {
     run: run
       ? {
@@ -1077,6 +1306,7 @@ export async function getAiDiagnostics(db: Database, input: Identity & { id: str
     chunks,
     missingChunkIds: chunkIds.filter((id) => !chunks.some((c) => c.id === id)),
     attempts,
+    actions,
     feedback,
   }
 }
@@ -1196,6 +1426,7 @@ export async function listAiDiagnostics(
   input: Identity & { memberId: string; cursor?: { createdAt: string; id: string } },
 ) {
   await getAiMemberConfig(db, input)
+  const channels = await readAiViewerChannelIds(db, input)
   const result = await db.execute<{
     id: string
     kind: string
@@ -1213,7 +1444,9 @@ export async function listAiDiagnostics(
       select r.id, 'LIVE_REPLY' as kind, r.state::text, r.created_at, r.config_version_id,
         r.failure_code, r.cancellation_reason::text, r.conversation_id
       from ai_response_run r join conversation c on c.id = r.conversation_id
+        join channel_identity on channel_identity.id = c.channel_identity_id
       where c.workspace_id = ${input.workspaceId} and r.member_id = ${input.memberId}
+        and ${inArray(channelIdentity.channelId, channels)}
       union all
       select o.id, o.kind, o.state, o.created_at, o.config_version_id, o.failure_code, null, null::uuid
       from ai_operation o where o.workspace_id = ${input.workspaceId} and o.member_id = ${input.memberId} and o.kind = 'TEST'

@@ -34,10 +34,39 @@ committed effect. No network call occurs inside these transactions.
   response boundary. Grounding checks require its cited knowledge reference;
   delivery remains independent after a valid message commit.
 
-This runtime slice covers these four database actions. Search result consumption,
-sandbox action simulation, instruction selection and action diagnostics are
-subsequent acceptance slices of the same feature. External tools and ordered
-skills are separate stages and are not enabled by this slice.
+- `search` retrieves only the frozen configuration's knowledge base. Results enter
+  one final, tool-disabled generation as quoted knowledge chunks, preserving
+  normal grounding. A successful search stores IDs, then rereads canonical
+  authorized content on reuse and before final response commit. Tool-specific
+  provider stages share the original logical operation and charge; follow-up
+  generation cannot open a new action plan or exceed the three-call limit.
+
+The instruction editor exposes the authorized tool picker beside variables.
+The test bench simulates all write actions and persists distinct simulated
+receipts; it never assigns a real conversation, creates a real note or sends
+customer messages. Clearing a test prevents late results and actions from
+appearing in the new generation. Search in tests still uses authorized knowledge
+and final grounding.
+
+Diagnostics expose stable call IDs, labels, revision, simulated/live state and
+failure state. They omit action arguments and result payloads, including note
+text and variable values. Live diagnostic details and run lists require the
+requesting Member and AI to retain the source channel grant, including for
+administrators. This diagnostic rule does not change existing inbox role rules.
+Tests remain under existing manager/workspace authorization.
+
+Sandbox search is an actual authorized read: it durably claims a stable search
+action before retrieval/provider I/O. Completion and cached-result reuse recheck
+the current requesting user's permission and test generation, then reread
+canonical knowledge. Clearing cancels unfinished search receipts without erasing
+provider attempts or cost. Failed and unknown reads retain explicit action states;
+pure simulated writes need no separate execution process.
+
+Known provider-unknown outcomes mark pending actions `UNKNOWN`; safe provider
+backoff retains a recoverable claim. Permanent failures mark pending actions
+`FAILED`. Completed receipts are preserved when a later generation fails.
+External tools and ordered skills are separate stages and are not enabled by
+this built-in tools stage.
 
 ## Operations
 

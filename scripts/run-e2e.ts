@@ -30,6 +30,7 @@ const e2eOwnerKeys = [
   'customer-memory',
   'ai-properties',
   'ai-tags',
+  'ai-tools',
   'ai-follow-ups',
   'campaigns',
   'lifecycle',
@@ -424,6 +425,29 @@ async function startFakeAI() {
       return
     }
     const current = /<customer_messages>([\s\S]*?)<\/customer_messages>/.exec(content)?.[1] ?? ''
+    if (current.includes('Run internal note tool')) {
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Simulated note recorded.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  toolCalls: [
+                    { tool: 'record', arguments: { text: 'Sandbox-only internal note.' } },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+      )
+      return
+    }
     if (current.includes('What help can you offer?')) {
       response.end(JSON.stringify({ choices: [{ message: { content: 'invalid JSON' } }] }))
       return

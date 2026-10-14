@@ -262,6 +262,7 @@ export function aiOperationsRoutes(
                   withDb,
                   claimed.operation,
                   (result) => recordAiBatchResult(db, { ...batchInput, attempt }, result),
+                  session.user.id,
                   `BATCH:${attempt}`,
                 )
               }
@@ -548,8 +549,13 @@ export function aiOperationsRoutes(
           if (!test.created)
             return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
           try {
-            await executeAiTest(db, c.env, withDb, test.operation, (result) =>
-              recordAiTestResult(db, result),
+            await executeAiTest(
+              db,
+              c.env,
+              withDb,
+              test.operation,
+              (result) => recordAiTestResult(db, result),
+              session.user.id,
             )
           } catch (error) {
             await finishAiOperation(db, {

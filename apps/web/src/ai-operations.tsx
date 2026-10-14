@@ -78,6 +78,13 @@ type Diagnostics = {
   }[]
   missingChunkIds: string[]
   attempts: { id: string; stage: string; state: string; httpStatus: number | null }[]
+  actions: {
+    id: string
+    tool: string
+    state: string
+    simulated: boolean
+    failureCode: string | null
+  }[]
   feedback: { id: string; category: string; note: string }[]
 }
 type Analytics = {
@@ -109,6 +116,8 @@ const labels: Record<string, string> = {
   RESERVED: '已预约',
   STARTED: '处理中',
   SUCCESS: '成功',
+  SUCCEEDED: '成功',
+  RUNNING: '执行中',
   LIVE_REPLY: '真实接待',
   TEST: '隔离测试',
   KNOWLEDGE_INDEX: '知识索引',
@@ -726,6 +735,39 @@ export function AiOperations({
                 </div>
               ))}
               {diagnostics.missingChunkIds.length > 0 && <p>部分知识已删除，无法读取原文。</p>}
+              <h3>工具动作</h3>
+              {!diagnostics.actions.length && (
+                <p className="field-description">本轮未请求工具动作。</p>
+              )}
+              {diagnostics.actions.map((action) => (
+                <div key={action.id} className="form-field">
+                  <p>
+                    {{
+                      handoff: '转人工',
+                      record: '记录内部备注',
+                      skip: '单轮跳过',
+                      search: '检索知识',
+                      send_media: '发送私有素材',
+                    }[action.tool] ?? '工具'}{' '}
+                    · {action.simulated ? '仅模拟' : '真实动作'}
+                  </p>
+                  <StatusBadge
+                    tone={
+                      action.state === 'SUCCEEDED'
+                        ? 'success'
+                        : ['FAILED', 'UNKNOWN'].includes(action.state)
+                          ? 'destructive'
+                          : 'neutral'
+                    }
+                  >
+                    {label(action.state)}
+                  </StatusBadge>
+                  <p className="field-description">调用 ID：{action.id}</p>
+                  {action.failureCode && (
+                    <p className="field-description">动作未完成，请检查授权和本轮状态。</p>
+                  )}
+                </div>
+              ))}
               <h3>服务尝试</h3>
               {diagnostics.attempts.map((a) => (
                 <p key={a.id}>

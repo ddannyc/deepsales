@@ -16,7 +16,7 @@ export function meteredAiFetch(
   let embeddingBatch = 0
   return async (url: RequestInfo | URL, init?: RequestInit) => {
     const stage = String(url).endsWith('/embeddings')
-      ? `${llmStage.startsWith('BATCH:') ? `${llmStage}:` : ''}EMBEDDING:${embeddingBatch++}`
+      ? `${llmStage === 'LLM' ? '' : `${llmStage}:`}EMBEDDING:${embeddingBatch++}`
       : llmStage
     await withDb((db) => reserveAiOperation(db, operation))
     const cached = await withDb((db) => getAiProviderResponse(db, operation.id, stage))
