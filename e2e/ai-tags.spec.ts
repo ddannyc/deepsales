@@ -48,7 +48,7 @@ test('publishes tag enablement separately from immediately effective authorized 
     await expect(enabled).not.toBeChecked()
     await page.getByRole('combobox', { name: '插入变量', exact: true }).click()
     await page.getByRole('option', { name: '联系人姓名 · 文本', exact: true }).click()
-    await expect(page.getByLabel('指令', { exact: true })).toHaveValue(/\{\{customer\.name\}\}/)
+    await expect(page.getByRole('textbox', { name: /^指令/ })).toHaveValue(/\{\{customer\.name\}\}/)
     await enabled.click()
     const saved = page.waitForResponse(
       (response) => response.url().endsWith(url) && response.request().method() === 'PATCH',
