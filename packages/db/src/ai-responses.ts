@@ -1,3 +1,4 @@
+import { aiToolInstructions } from './ai-tools'
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import { readAiFollowUpAuthorization } from './ai-follow-ups'
 import { checkExternalActionResults } from './ai-external-actions'
@@ -543,18 +544,23 @@ export async function claimAiResponseRun(
       workspaceId: current.workspaceId,
       conversationId: current.conversationId,
       memberId: current.memberId,
-      instructions: snapshot ? aiSkillVariableInstructions(snapshot) : '',
+      instructions: aiToolInstructions(
+        snapshot ? aiSkillVariableInstructions(snapshot) : '',
+        proactive.followUp?.instructions,
+      ),
       timeZone: snapshot?.timeZone ?? 'UTC',
       context: variableContext,
       now,
     })
     if (current.variableInput && !sameAiVariableSources(current.variableInput, latestVariables)) {
       await cancelRun(tx, current.id, 'PROPERTY_COLLECTION_CHANGED', now)
-      const fresh = await ensureAiResponseRun(tx, {
-        conversationId: current.conversationId,
-        memberId: current.memberId,
-        now,
-      })
+      const fresh = proactive.followUp
+        ? null
+        : await ensureAiResponseRun(tx, {
+            conversationId: current.conversationId,
+            memberId: current.memberId,
+            now,
+          })
       return {
         kind: 'CANCELLED',
         workspaceId: current.workspaceId,
@@ -884,18 +890,23 @@ export async function commitAiResponse(
         workspaceId: current.workspaceId,
         conversationId: current.id,
         memberId: run.memberId,
-        instructions: run.configSnapshot ? aiSkillVariableInstructions(run.configSnapshot) : '',
+        instructions: aiToolInstructions(
+          run.configSnapshot ? aiSkillVariableInstructions(run.configSnapshot) : '',
+          proactive.followUp?.instructions,
+        ),
         timeZone: run.configSnapshot?.timeZone ?? 'UTC',
         context: String(run.variableInput.values['conversation.context'] ?? ''),
         now: new Date(run.variableInput.capturedAt),
       })
       if (!sameAiVariableSources(run.variableInput, latestVariables)) {
         await cancelRun(tx, run.id, 'PROPERTY_COLLECTION_CHANGED', now)
-        const fresh = await ensureAiResponseRun(tx, {
-          conversationId: current.id,
-          memberId: run.memberId,
-          now,
-        })
+        const fresh = proactive.followUp
+          ? null
+          : await ensureAiResponseRun(tx, {
+              conversationId: current.id,
+              memberId: run.memberId,
+              now,
+            })
         return {
           kind: 'CANCELLED',
           cancellationReason: 'PROPERTY_COLLECTION_CHANGED',

@@ -1,6 +1,7 @@
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { AiResponseError, type CommitAiResponseResult, commitAiResponse } from './ai-responses'
-import { aiSelectedSkillInstructions, selectedAiSkillId } from './ai-skills'
+import { selectedAiSkillId } from './ai-skills'
+import { readAiRunToolInstructions } from './ai-tool-authorization'
 import { type AiToolCall, instructionTools, validateAiToolCalls } from './ai-tools'
 import { type AssignmentResult, executeAssignment } from './assignments'
 import type { Database } from './database'
@@ -93,20 +94,20 @@ async function checkTool(
     .from(aiOperation)
     .where(eq(aiOperation.id, run.id))
   const selectedId = selectedAiSkillId(operation?.output)
-  validateAiToolCalls(
-    run.configSnapshot ? aiSelectedSkillInstructions(run.configSnapshot, selectedId) : '',
-    [input.call],
-  )
   const [current] = await tx
     .select({ snapshot: aiMemberConfig.publishedSnapshot })
     .from(aiMemberConfig)
     .where(eq(aiMemberConfig.memberId, run.memberId))
-  if (
-    !instructionTools(
-      current?.snapshot ? aiSelectedSkillInstructions(current.snapshot, selectedId) : '',
-    ).includes(input.call.tool)
+  const authorized = await readAiRunToolInstructions(
+    tx,
+    run.id,
+    run.configSnapshot,
+    current?.snapshot ?? null,
+    selectedId,
   )
-    return false
+  if (!authorized) return false
+  validateAiToolCalls(authorized.frozen, [input.call])
+  if (!instructionTools(authorized.current).includes(input.call.tool)) return false
   return true
 }
 

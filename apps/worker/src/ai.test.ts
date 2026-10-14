@@ -12,6 +12,46 @@ import {
   isLlmProviderConfigurationUsable,
 } from './ai'
 
+describe('independent follow-up tool authorization', () => {
+  it('accepts a tool authorized only by the proactive rule and exposes missing variables', async () => {
+    const provider = new AlibabaLlmProvider(
+      { apiKey: 'test', baseUrl: 'http://ai.test/v1' },
+      async () =>
+        Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Follow-up ready.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  toolCalls: [{ tool: 'record', arguments: { text: 'Follow-up observation.' } }],
+                }),
+              },
+            },
+          ],
+        }),
+    )
+    const input = {
+      instructions: 'Answer safely.',
+      responseLanguage: 'English',
+      proactiveEvent: {
+        ruleId: crypto.randomUUID(),
+        instructions: 'Use {{customer.email}}. [[tool:record]]',
+      },
+      messages: [],
+      history: [],
+      knowledgeChunks: [],
+    }
+    expect(buildAiPrompt(input)[1].content).toContain('"customer.email":null')
+    expect(await provider.generateResponse(input)).toMatchObject({
+      toolCalls: [{ tool: 'record' }],
+    })
+  })
+})
+
 describe('ordered skill classification boundary', () => {
   it('rejects unknown, duplicate and actionable classifier output', async () => {
     const id = crypto.randomUUID()

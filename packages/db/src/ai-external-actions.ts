@@ -1,6 +1,7 @@
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { AiResponseError, commitAiResponse } from './ai-responses'
-import { aiSelectedSkillInstructions, selectedAiSkillId } from './ai-skills'
+import { selectedAiSkillId } from './ai-skills'
+import { readAiRunToolInstructions } from './ai-tool-authorization'
 import { instructionTools, validateAiToolCalls, type AiToolCall } from './ai-tools'
 import { readAiViewerChannelIds } from './ai-members'
 import { validValue } from './ai-external-contracts'
@@ -103,15 +104,17 @@ async function authorizedDefinition(
   id: string,
 ) {
   const reference = `external:${id}` as const
+  const instructions = await readAiRunToolInstructions(
+    tx,
+    context.run.id,
+    context.run.configSnapshot,
+    context.current ?? null,
+    context.skillId,
+  )
   if (
-    !context.run.configSnapshot ||
-    !context.current ||
-    !instructionTools(
-      aiSelectedSkillInstructions(context.run.configSnapshot, context.skillId),
-    ).includes(reference) ||
-    !instructionTools(aiSelectedSkillInstructions(context.current, context.skillId)).includes(
-      reference,
-    )
+    !instructions ||
+    !instructionTools(instructions.frozen).includes(reference) ||
+    !instructionTools(instructions.current).includes(reference)
   )
     return null
   return (
@@ -131,12 +134,14 @@ export async function claimAiExternalAction(db: Database, input: ExternalActionI
     const context = await lockRun(tx, input.runId)
     if (!Number.isInteger(input.ordinal) || input.ordinal < 0 || input.ordinal > 2)
       throw new AiResponseError('INVALID_REQUEST')
-    validateAiToolCalls(
-      context.run.configSnapshot
-        ? aiSelectedSkillInstructions(context.run.configSnapshot, context.skillId)
-        : '',
-      [input.call],
+    const instructions = await readAiRunToolInstructions(
+      tx,
+      context.run.id,
+      context.run.configSnapshot,
+      context.current ?? null,
+      context.skillId,
     )
+    validateAiToolCalls(instructions?.frozen ?? '', [input.call])
     const [existing] = await tx
       .select()
       .from(aiToolAction)

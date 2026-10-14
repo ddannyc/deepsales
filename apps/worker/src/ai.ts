@@ -5,6 +5,7 @@ import {
   type AiTestCustomer,
   AiUsageError,
   type AiVariableInput,
+  aiToolInstructions,
   BUILTIN_AI_TOOLS,
   EMPTY_AI_STOP_RULES,
   firstMatchingAiSkill,
@@ -721,7 +722,9 @@ export class AlibabaLlmProvider implements LlmProvider {
     } else if (decision.data.matchedSkillIds?.length) throw new AIOutputError()
     try {
       validateAiToolCalls(
-        input.toolsDisabled ? '' : input.instructions,
+        input.toolsDisabled
+          ? ''
+          : aiToolInstructions(input.instructions, input.proactiveEvent?.instructions),
         decision.data.toolCalls ?? [],
       )
       if (
@@ -761,9 +764,10 @@ export class AlibabaLlmProvider implements LlmProvider {
 export function buildAiPrompt(input: AiResponseInput) {
   if (input.variableInput) validateAiVariableInput(input.variableInput)
   const variableKeys = instructionVariableKeys(
-    [input.instructions, ...(input.skillConditions ?? []).map((skill) => skill.condition)].join(
-      '\n',
-    ),
+    [
+      aiToolInstructions(input.instructions, input.proactiveEvent?.instructions),
+      ...(input.skillConditions ?? []).map((skill) => skill.condition),
+    ].join('\n'),
   )
   const variableValues = {
     ...Object.fromEntries(variableKeys.map((key) => [key, null])),
@@ -852,12 +856,16 @@ export function buildAiPrompt(input: AiResponseInput) {
               'Tools have already executed for this turn. Return the final grounded answer with no toolCalls. Never claim an action succeeded unless its supplied result confirms success.',
             ]
           : []),
-        ...(!input.toolsDisabled && instructionTools(input.instructions).length
+        ...(!input.toolsDisabled &&
+        instructionTools(aiToolInstructions(input.instructions, input.proactiveEvent?.instructions))
+          .length
           ? [
               'You may request toolCalls as [{tool,arguments}], at most three in total. Only these authorized tools may be selected: ' +
                 JSON.stringify(
                   BUILTIN_AI_TOOLS.filter((tool) =>
-                    instructionTools(input.instructions).includes(tool.id),
+                    instructionTools(
+                      aiToolInstructions(input.instructions, input.proactiveEvent?.instructions),
+                    ).includes(tool.id),
                   ),
                 ) +
                 '. record arguments={text}; search={query}; send_media={assetId}; handoff and skip={}. Never choose a member, customer, conversation, tenant or URL. Handoff, skip or media send is terminal and must be the last call.',

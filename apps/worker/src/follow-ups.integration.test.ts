@@ -1,6 +1,8 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  aiToolAction,
+  listInternalNotes,
   aiFollowUpEvent,
   aiFollowUpRule,
   aiResponseRun,
@@ -58,7 +60,7 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
         .where(inArray(aiFollowUpRule.id, rulesCreated.splice(0)))
   })
 
-  async function ready(timer: 'LAST_AI_REPLY' | 'AI_ASSIGNMENT') {
+  async function ready(timer: 'LAST_AI_REPLY' | 'AI_ASSIGNMENT', instructions = '') {
     const f = await createFixture(db)
     const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
     await updateAiMemberConfig(db, { ...identity, replyWaitEnabled: false })
@@ -70,7 +72,7 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       enabled: true,
       timer,
       delaySeconds: 1,
-      instructions: '',
+      instructions,
       groups: [],
     })
     rulesCreated.push(rule.id)
@@ -163,6 +165,63 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       ],
     })
 
+  it('resolves rule-only variables and executes its authorized action once before a follow-up message', async () => {
+    const f = await ready(
+      'LAST_AI_REPLY',
+      'Use {{system.timeZone}} and {{customer.email}}. [[tool:record]]',
+    )
+    const job = await trigger(f)
+    if (!job) throw new Error('Follow-up was not scheduled')
+    const provider = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith('/embeddings'))
+        return Response.json({ data: [{ index: 0, embedding: vector() }] })
+      const prompt = JSON.parse(String(init?.body)).messages[1].content as string
+      const values = JSON.parse(
+        /<variable_values>([\s\S]*?)<\/variable_values>/.exec(prompt)?.[1] ?? '{}',
+      )
+      expect(values).toMatchObject({ 'system.timeZone': 'UTC', 'customer.email': null })
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Would you like further assistance?',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                toolCalls: [{ tool: 'record', arguments: { text: 'Follow-up observation.' } }],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', provider)
+    await handleAiResponseBatch(batch('ai', queueMessage(job)), f.env)
+    await handleAiResponseBatch(batch('ai', queueMessage(job)), f.env)
+    const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, job.runId))
+    expect(run).toMatchObject({
+      state: 'COMPLETED',
+      variableInput: { values: { 'system.timeZone': 'UTC', 'customer.email': null } },
+    })
+    expect(
+      (
+        await listInternalNotes(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: f.conversationId,
+        })
+      ).notes,
+    ).toHaveLength(1)
+    expect(
+      await db.select().from(aiToolAction).where(eq(aiToolAction.operationId, job.runId)),
+    ).toMatchObject([{ ordinal: 0, state: 'SUCCEEDED', tool: 'record' }])
+    expect(f.outbound).toHaveBeenCalledOnce()
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(1)
+  })
   it.each(['LAST_AI_REPLY', 'AI_ASSIGNMENT'] as const)(
     'authorizes one independent %s event and deduplicates scheduling and delivery',
     async (timer) => {
