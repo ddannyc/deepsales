@@ -1,11 +1,13 @@
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { AiResponseError, type CommitAiResponseResult, commitAiResponse } from './ai-responses'
+import { aiSelectedSkillInstructions, selectedAiSkillId } from './ai-skills'
 import { type AiToolCall, instructionTools, validateAiToolCalls } from './ai-tools'
 import { type AssignmentResult, executeAssignment } from './assignments'
 import type { Database } from './database'
 import { createAiInternalNote } from './inbox-collaboration'
 import {
   aiMemberConfig,
+  aiOperation,
   aiResponseRun,
   aiToolAction,
   conversation,
@@ -86,12 +88,24 @@ async function checkTool(
 ) {
   if (!Number.isInteger(input.ordinal) || input.ordinal < 0 || input.ordinal > 2)
     throw new AiResponseError('INVALID_REQUEST')
-  validateAiToolCalls(run.configSnapshot?.instructions ?? '', [input.call])
+  const [operation] = await tx
+    .select({ output: aiOperation.output })
+    .from(aiOperation)
+    .where(eq(aiOperation.id, run.id))
+  const selectedId = selectedAiSkillId(operation?.output)
+  validateAiToolCalls(
+    run.configSnapshot ? aiSelectedSkillInstructions(run.configSnapshot, selectedId) : '',
+    [input.call],
+  )
   const [current] = await tx
     .select({ snapshot: aiMemberConfig.publishedSnapshot })
     .from(aiMemberConfig)
     .where(eq(aiMemberConfig.memberId, run.memberId))
-  if (!instructionTools(current?.snapshot?.instructions ?? '').includes(input.call.tool))
+  if (
+    !instructionTools(
+      current?.snapshot ? aiSelectedSkillInstructions(current.snapshot, selectedId) : '',
+    ).includes(input.call.tool)
+  )
     return false
   return true
 }

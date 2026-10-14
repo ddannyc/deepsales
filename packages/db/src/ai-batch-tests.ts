@@ -8,6 +8,7 @@ import {
   resolveTestConfiguration,
 } from './ai-operations'
 import { readAiTestPropertyRules } from './ai-property-rules'
+import { aiSkillVariableInstructions } from './ai-skills'
 import { readAiTestTagRules } from './ai-tag-rules'
 import { readAiTestVariableInput } from './ai-variable-values'
 import type { Database } from './database'
@@ -287,7 +288,7 @@ export async function claimAiTestBatchItem(
       const output = {
         variableInput: await readAiTestVariableInput(tx, {
           workspaceId: input.workspaceId,
-          instructions: batch.snapshot.instructions,
+          instructions: aiSkillVariableInstructions(batch.snapshot),
           timeZone: batch.snapshot.timeZone ?? 'UTC',
           text: item.text,
         }),

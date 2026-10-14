@@ -6,6 +6,7 @@ import {
   AttachmentError,
   acceptAnyInvitation,
   acknowledgeConversationRead,
+  aiSelectedSkillInstructions,
   assertInboxViewer,
   assertKnowledgeBaseManager,
   autoAssignConversation,
@@ -105,6 +106,7 @@ import {
   ReplyError,
   readReplySuggestionContext,
   recordAiResponseRetrievedChunks,
+  recordAiSkillSelection,
   recoverAiOperations,
   recoverStaleOutboundMessages,
   releaseFacebookInboundAttachment,
@@ -3664,6 +3666,62 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
 
+      let responseInstructions = currentSnapshot.instructions
+      if (currentSnapshot.skills.length) {
+        const skillFetch = meteredAiFetch(
+          (work) => withDatabase(env, work),
+          {
+            id: claimed.id,
+            workspaceId: claimed.workspaceId,
+            memberId: claimed.memberId,
+            configVersionId: claimed.configVersionId,
+            kind: claimed.followUp ? 'FOLLOW_UP' : 'LIVE_REPLY',
+          },
+          'SKILL_MATCH',
+        )
+        const classification = await createAlibabaLlmProvider(
+          {
+            provider: env.LLM_PROVIDER,
+            apiKey: env.AI_API_KEY,
+            baseUrl: env.AI_BASE_URL,
+            model: env.LLM_MODEL,
+          },
+          skillFetch,
+        ).generateResponse({
+          instructions: '',
+          toolsDisabled: true,
+          responseLanguage: currentSnapshot.responseLanguage,
+          skillConditions: currentSnapshot.skills.map(({ id, condition }) => ({ id, condition })),
+          variableInput: claimed.variableInput,
+          messages: inputMessages,
+          history: claimed.history,
+          knowledgeChunks: [],
+        })
+        const guard = await commitReply({ runId: claimed.id, text: '', stopCheckOnly: true })
+        if (guard?.kind !== 'CONTINUE') {
+          await publishAiReplyResult(env, claimed, guard)
+          await withDatabase(env, (db) =>
+            finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+          )
+          queueMessage.ack()
+          continue
+        }
+        const selected = await withDatabase(env, (db) =>
+          recordAiSkillSelection(db, {
+            operationId: claimed.id,
+            workspaceId: claimed.workspaceId,
+            memberId: claimed.memberId,
+            matchedSkillIds: classification.matchedSkillIds ?? [],
+            handoffEvaluation,
+          }),
+        )
+        if (selected.kind === 'BLOCKED') {
+          await publishAiReplyResult(env, claimed, selected.guard)
+          queueMessage.ack()
+          continue
+        }
+        responseInstructions = aiSelectedSkillInstructions(currentSnapshot, selected.selection.id)
+      }
       const advertisingContext = await withDatabase(env, (db) =>
         getAiFacebookAdvertisingContext(db, {
           workspaceId: claimed.workspaceId,
@@ -3741,7 +3799,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         tagRules: claimed.tagCollection.rules,
         variableInput: claimed.variableInput,
         now: new Date(claimed.variableInput.capturedAt),
-        instructions: currentSnapshot.instructions,
+        instructions: responseInstructions,
         responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,
         history: claimed.history,
