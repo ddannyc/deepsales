@@ -174,6 +174,7 @@ export function createFacebookAdapter(
       kind: FacebookAttachmentKind,
       attachmentId: string,
       pageAccessToken: string,
+      purpose: 'RESPONSE' | 'UPDATE' = 'RESPONSE',
     ) {
       const result = await graphRequest(
         fetcher,
@@ -186,7 +187,7 @@ export function createFacebookAdapter(
           },
           body: JSON.stringify({
             recipient: { id: externalUserId },
-            messaging_type: 'RESPONSE',
+            messaging_type: purpose,
             message: {
               attachment: { type: kind.toLowerCase(), payload: { attachment_id: attachmentId } },
             },
@@ -203,6 +204,7 @@ export function createFacebookAdapter(
       externalUserId: string,
       text: string,
       pageAccessToken: string,
+      purpose: 'RESPONSE' | 'UPDATE' = 'RESPONSE',
     ): Promise<{ externalMessageId: string }> {
       const url = new URL(`${graphBase}/${encodeURIComponent(pageId)}/messages`)
       const result = await graphRequest(fetcher, url, {
@@ -213,7 +215,7 @@ export function createFacebookAdapter(
         },
         body: JSON.stringify({
           recipient: { id: externalUserId },
-          messaging_type: 'RESPONSE',
+          messaging_type: purpose,
           message: { text },
         }),
       })

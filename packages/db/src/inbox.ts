@@ -7,13 +7,13 @@ import {
   channel,
   channelIdentity,
   conversation,
-  conversationMemberRead,
   conversationMemberMute,
+  conversationMemberRead,
   customer,
-  customerTag,
-  customerTagDefinition,
   customerPropertyDefinition,
   customerPropertyValue,
+  customerTag,
+  customerTagDefinition,
   facebookAttachmentSource,
   facebookChannelConfig,
   facebookMessagingWindow,
@@ -365,6 +365,9 @@ export type InboxFilters = {
   memberIds?: string[]
   tagIds?: string[]
   customerId?: string
+  channelId?: string
+  createdFrom?: string
+  createdTo?: string
   updatedFrom?: string
   updatedTo?: string
   attention?: 'unread' | 'unanswered'
@@ -496,6 +499,10 @@ export async function listConversations(
       sql`${sharedCustomerVisible} and (strpos(lower(coalesce(${customer.displayName}, '')), lower(${input.query})) > 0 or strpos(lower(coalesce(${customer.notes}, '')), lower(${input.query})) > 0)`,
     )
   if (input.customerId) filters.push(eq(customer.id, input.customerId))
+  if (input.channelId) filters.push(eq(channelIdentity.channelId, input.channelId))
+  if (input.createdFrom)
+    filters.push(sql`${customer.createdAt} >= ${input.createdFrom}::timestamptz`)
+  if (input.createdTo) filters.push(sql`${customer.createdAt} <= ${input.createdTo}::timestamptz`)
   if (input.memberIds?.length) filters.push(inArray(conversation.assigneeMemberId, input.memberIds))
   if (input.updatedFrom)
     filters.push(sql`${conversation.updatedAt} >= ${input.updatedFrom}::timestamptz`)
@@ -558,6 +565,7 @@ export async function listConversations(
       lastCustomerMessageAt: conversation.lastCustomerMessageAt,
       updatedAt: conversation.updatedAt,
       customerId: customer.id,
+      channelIdentityId: channelIdentity.id,
       customerName: sql<
         string | null
       >`case when ${sharedCustomerVisible} then ${customer.displayName} else null end`,

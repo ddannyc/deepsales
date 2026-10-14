@@ -399,6 +399,96 @@ export const facebookMessagingWindow = pgTable('facebook_messaging_window', {
   updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
 })
 
+export type CampaignContent = { id: string; text?: string; assetId?: string }[]
+export type CampaignCalendar = {
+  localTime: string
+  timeZone: string
+  repeat: 'NONE' | 'DAILY' | 'WEEKLY'
+  until?: string
+  maxRuns?: number
+}
+
+export const campaign = pgTable(
+  'campaign',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => channel.id),
+    creatorMemberId: uuid('creator_member_id')
+      .notNull()
+      .references(() => member.id),
+    name: text().notNull(),
+    status: text().notNull().default('DRAFT'),
+    identityIds: uuid('identity_ids').array().notNull(),
+    content: jsonb().$type<CampaignContent>().notNull(),
+    selectionMode: text('selection_mode').notNull().default('ALL'),
+    targetLanguage: text('target_language'),
+    calendar: jsonb().$type<CampaignCalendar>(),
+    intervalSeconds: integer('interval_seconds').notNull().default(1),
+    nextRunAt: timestamp('next_run_at', { withTimezone: true }),
+    version: integer().notNull().default(1),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('campaign_due_idx').on(t.status, t.nextRunAt),
+    check(
+      'campaign_status_check',
+      sql`${t.status} in ('DRAFT','ACTIVE','PAUSED','CANCELLED','COMPLETED')`,
+    ),
+    check('campaign_interval_check', sql`${t.intervalSeconds} between 1 and 86400`),
+    check('campaign_selection_check', sql`${t.selectionMode} in ('ALL','RANDOM')`),
+  ],
+)
+
+export const campaignRun = pgTable(
+  'campaign_run',
+  {
+    id: uuid().primaryKey(),
+    campaignId: uuid('campaign_id')
+      .notNull()
+      .references(() => campaign.id, { onDelete: 'cascade' }),
+    version: integer().notNull(),
+    scheduledAt: timestamp('scheduled_at', { withTimezone: true }).notNull(),
+    content: jsonb().$type<CampaignContent>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex('campaign_run_occurrence_idx').on(t.campaignId, t.scheduledAt)],
+)
+
+export const campaignRecipient = pgTable(
+  'campaign_recipient',
+  {
+    id: uuid().primaryKey(),
+    runId: uuid('run_id')
+      .notNull()
+      .references(() => campaignRun.id, { onDelete: 'cascade' }),
+    channelIdentityId: uuid('channel_identity_id')
+      .notNull()
+      .references(() => channelIdentity.id),
+    ordinal: integer().notNull(),
+    state: text().notNull().default('WAITING'),
+    reason: text(),
+    content: jsonb().$type<CampaignContent>().notNull(),
+    translatedContent: jsonb('translated_content').$type<CampaignContent>(),
+    translationOperationId: uuid('translation_operation_id').notNull(),
+    messageIds: uuid('message_ids').array().notNull().default(sql`ARRAY[]::uuid[]`),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('campaign_recipient_identity_idx').on(t.runId, t.channelIdentityId),
+    index('campaign_recipient_pending_idx').on(t.state, t.runId),
+    check(
+      'campaign_recipient_state_check',
+      sql`${t.state} in ('WAITING','SUCCESS','FAILED','SKIPPED','UNKNOWN')`,
+    ),
+  ],
+)
+
 export const conversation = pgTable(
   'conversation',
   {
