@@ -99,6 +99,50 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
     expect(await (await f.call(root)).json()).toMatchObject({
       rules: [{ id, revision: 2, enabled: false }],
     })
+    expect(
+      (
+        await f.call(root, 'POST', {
+          id,
+          revision: 1,
+          name: 'Stale',
+          enabled: true,
+          timer: 'LAST_AI_REPLY',
+          delaySeconds: 60,
+          instructions: '',
+          groups: [],
+        })
+      ).status,
+    ).toBe(400)
+    const other = await fixture()
+    expect((await other.call(`/${f.aiId}/follow-ups`)).status).toBe(404)
+    expect(
+      (
+        await f.call(root, 'POST', {
+          id: crypto.randomUUID(),
+          name: 'Invalid reference',
+          enabled: true,
+          timer: 'LAST_AI_REPLY',
+          delaySeconds: 60,
+          instructions: '',
+          groups: [[{ kind: 'TAG', tagId: crypto.randomUUID() }]],
+        })
+      ).status,
+    ).toBe(400)
+    expect((await f.call(root, 'DELETE', { id, revision: 2 })).status).toBe(200)
+    expect(await (await f.call(root)).json()).toMatchObject({ rules: [] })
+    expect(
+      (
+        await f.call(root, 'POST', {
+          id,
+          name: 'Reusing deleted identity',
+          enabled: true,
+          timer: 'LAST_AI_REPLY',
+          delaySeconds: 60,
+          instructions: '',
+          groups: [],
+        })
+      ).status,
+    ).toBe(400)
   })
   it('resolves test instruction variables only from the simulated customer', async () => {
     const f = await fixture()

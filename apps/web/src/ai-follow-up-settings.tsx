@@ -41,6 +41,8 @@ type Event = {
   failureCode: string | null
   operationState: string | null
   outputMessageId: string | null
+  deliveryState: string | null
+  deliveryFailureCode: string | null
 }
 const fresh = (): Rule => ({
   id: crypto.randomUUID(),
@@ -122,6 +124,19 @@ export function AiFollowUpSettings({
       setBusy(false)
     }
   }
+  async function refresh() {
+    setBusy(true)
+    setError('')
+    try {
+      const response = await fetch(root)
+      if (!response.ok) throw new Error('回访记录刷新失败；原列表与草稿已保留，请重试。')
+      setData(await response.json())
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '刷新失败，请重试。')
+    } finally {
+      setBusy(false)
+    }
+  }
   return (
     <section className="ai-config-section" aria-labelledby="ai-follow-up-title">
       <div className="section-heading">
@@ -151,33 +166,45 @@ export function AiFollowUpSettings({
       {!data && !error && <p role="status">正在读取回访规则…</p>}
       {data?.rules.length === 0 && <p>尚无回访规则。</p>}
       {data?.rules.map((rule) => (
-        <div className="settings-row" key={rule.id}>
+        <div className="runtime-panel" key={rule.id}>
           <span>
             {rule.name} · {rule.enabled ? '启用' : '停用'} ·{' '}
             {rule.timer === 'LAST_AI_REPLY' ? '最后 AI 回复' : '分配 AI'}后 {rule.delaySeconds} 秒 ·
             修订 {rule.revision}
           </span>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={busy}
-            onClick={() => {
-              setDraft(rule)
-              setPreview(undefined)
-            }}
-          >
-            编辑 {rule.name}
-          </Button>
-          <Button type="button" variant="ghost" disabled={busy} onClick={() => setDeleting(rule)}>
-            删除 {rule.name}
-          </Button>
+          <div className="row-actions">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setDraft(rule)
+                setPreview(undefined)
+              }}
+            >
+              编辑 {rule.name}
+            </Button>
+            <Button type="button" variant="ghost" disabled={busy} onClick={() => setDeleting(rule)}>
+              删除 {rule.name}
+            </Button>
+          </div>
         </div>
       ))}
       {draft && (
         <form
+          className="dialog-form"
           onSubmit={(event) => {
             event.preventDefault()
-            void action('POST', draft)
+            void action('POST', {
+              id: draft.id,
+              revision: draft.revision,
+              name: draft.name,
+              enabled: draft.enabled,
+              timer: draft.timer,
+              delaySeconds: draft.delaySeconds,
+              instructions: draft.instructions,
+              groups: draft.groups,
+            })
           }}
         >
           <label className="form-field" htmlFor="follow-up-name">
@@ -265,7 +292,7 @@ export function AiFollowUpSettings({
               。执行时仍重新检查资格。
             </p>
           )}
-          <div className="form-actions">
+          <div className="ai-form-actions">
             <Button type="submit" disabled={busy}>
               {busy ? '保存中…' : '保存回访规则'}
             </Button>
@@ -281,6 +308,9 @@ export function AiFollowUpSettings({
         </form>
       )}
       <h3>回访记录</h3>
+      <Button type="button" variant="outline" disabled={busy} onClick={() => void refresh()}>
+        刷新回访记录
+      </Button>
       <p className="field-description">
         失败复用原触发记录，安全重试最多 2
         次；结果不明暂停，需先核对原消息和提供方结果，不自动创建新机会。
@@ -290,11 +320,17 @@ export function AiFollowUpSettings({
         <p key={event.id}>
           {data.rules.find((rule) => rule.id === event.ruleId)?.name ?? '已删除规则'} · 会话{' '}
           {event.conversationId.slice(0, 8)} ·{' '}
-          {event.operationState === 'UNKNOWN'
+          {event.operationState === 'UNKNOWN' || event.deliveryFailureCode === 'AMBIGUOUS_DELIVERY'
             ? '结果不明，已暂停'
-            : (states[event.state] ?? event.state)}{' '}
+            : event.deliveryState === 'FAILED'
+              ? '发送失败，详见会话'
+              : event.deliveryState === 'SENT'
+                ? '发送接口已确认成功'
+                : (states[event.state] ?? event.state)}{' '}
           · {new Date(event.triggeredAt).toLocaleString()}
-          {event.failureCode ? ` · ${event.failureCode}` : ''}
+          {event.failureCode
+            ? ` · ${{ FOLLOW_UP_INELIGIBLE: '回访资格或锚点已变化', FOLLOW_UP_RULE_CHANGED: '规则已修改或删除', NEW_CUSTOMER_MESSAGE: '客户已发送新消息', AI_PROVIDER_ERROR: '模型服务失败', INVALID_OUTPUT: '模型输出无效', QUOTA_EXHAUSTED: '额度已耗尽' }[event.failureCode] ?? event.failureCode}`
+            : ''}
         </p>
       ))}
       <AlertDialog

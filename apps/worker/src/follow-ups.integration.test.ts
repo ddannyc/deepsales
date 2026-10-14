@@ -9,6 +9,8 @@ import {
   autoAssignConversation,
   bootstrapWorkspace,
   connectFacebookPages,
+  claimOutboundMessage,
+  closeConversation,
   conversation,
   conversationAssignment,
   createAiMember,
@@ -19,6 +21,7 @@ import {
   getAiBudget,
   getCustomerProfile,
   message,
+  member,
   processFacebookInbound,
   publishAiMemberConfig,
   saveAiFollowUpRule,
@@ -131,6 +134,7 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
     }
   }
   async function trigger(f: Awaited<ReturnType<typeof ready>>) {
+    const before = f.ai.mock.calls.length
     await handleMaintenanceBatch(
       batch(
         'maintenance',
@@ -138,7 +142,9 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       ),
       f.env,
     )
-    return f.ai.mock.calls.at(-1)?.[0] as { v: 1; type: 'ai.response'; runId: string } | undefined
+    return (f.ai.mock.calls.length > before ? f.ai.mock.calls.at(-1)?.[0] : undefined) as
+      | { v: 1; type: 'ai.response'; runId: string }
+      | undefined
   }
   const answer = () =>
     Response.json({
@@ -433,6 +439,162 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       .where(eq(aiFollowUpEvent.conversationId, f.conversationId))
     expect(events.map((event) => event.ruleId)).toEqual([f.rule.id, second.id])
   })
+  it('keeps a committed follow-up deliverable after takeover and gives a new Conversation a fresh chance', async () => {
+    const f = await ready('LAST_AI_REPLY')
+    const job = await trigger(f)
+    if (!job) throw new Error('Missing follow-up')
+    vi.stubGlobal('fetch', async (url: unknown) =>
+      String(url).endsWith('/embeddings')
+        ? Response.json({ data: [{ index: 0, embedding: vector() }] })
+        : answer(),
+    )
+    await handleAiResponseBatch(batch('ai', queueMessage(job)), f.env)
+    const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, job.runId))
+    if (!run.outputMessageId) throw new Error('Missing outbound')
+    await takeOverConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: f.conversationId,
+      actingUserId: f.ownerId,
+    })
+    expect(await claimOutboundMessage(db, { messageId: run.outputMessageId })).toMatchObject({
+      id: run.outputMessageId,
+    })
+    await saveAiFollowUpRule(db, { ...f.identity, ...f.rule, enabled: false, revision: 1 })
+    const enabled = await saveAiFollowUpRule(db, {
+      ...f.identity,
+      ...f.rule,
+      enabled: true,
+      revision: 2,
+    })
+    expect(enabled.revision).toBe(3)
+    expect(
+      await db.select().from(aiFollowUpEvent).where(eq(aiFollowUpEvent.ruleId, f.rule.id)),
+    ).toHaveLength(1)
+    await closeConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: f.conversationId,
+      actingUserId: f.ownerId,
+    })
+    const received = await receiveContextInput(db, f, 'New conversation.')
+    await db
+      .update(message)
+      .set({ createdAt: new Date(Date.now() - 10000) })
+      .where(eq(message.id, received.messageId))
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!assigned.aiResponseRunId) throw new Error('Missing new run')
+    await db
+      .update(aiResponseRun)
+      .set({ state: 'CANCELLED' })
+      .where(eq(aiResponseRun.id, assigned.aiResponseRunId))
+    await db
+      .update(aiFollowUpRule)
+      .set({ effectiveAt: new Date(Date.now() - 20000) })
+      .where(eq(aiFollowUpRule.id, f.rule.id))
+    await db
+      .update(conversationAssignment)
+      .set({ createdAt: new Date(Date.now() - 7000) })
+      .where(eq(conversationAssignment.conversationId, received.conversationId))
+    await db.insert(message).values({
+      conversationId: received.conversationId,
+      channelId: f.channelId,
+      direction: 'OUTBOUND',
+      senderType: 'MEMBER',
+      senderMemberId: f.aiMemberId,
+      messageType: 'TEXT',
+      text: 'A new answer.',
+      deliveryState: 'SENT',
+      createdAt: new Date(Date.now() - 6000),
+      deliveryCompletedAt: new Date(Date.now() - 5000),
+    })
+    const next = await trigger({ ...f, conversationId: received.conversationId })
+    expect(next?.runId).toBeTruthy()
+    expect(next?.runId).not.toBe(job.runId)
+    expect(
+      await db.select().from(aiFollowUpEvent).where(eq(aiFollowUpEvent.ruleId, f.rule.id)),
+    ).toHaveLength(2)
+  })
+  it('continues beyond 100 nonmatching candidates and deduplicates repeated scan cursors', async () => {
+    const f = await ready('AI_ASSIGNMENT')
+    await db.update(member).set({ maxActiveConversations: 200 }).where(eq(member.id, f.aiMemberId))
+    const ids = [f.conversationId]
+    for (let index = 0; index < 100; index++) {
+      const received = await receiveContextInput(
+        db,
+        { ...f, ownerId: `${f.ownerId}-${index}` },
+        'Hello.',
+      )
+      await db
+        .update(message)
+        .set({ createdAt: new Date(Date.now() - 10000) })
+        .where(eq(message.id, received.messageId))
+      const assigned = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: received.conversationId,
+      })
+      if (!assigned.aiResponseRunId) throw new Error('Missing fixture assignment')
+      ids.push(received.conversationId)
+    }
+    await db
+      .update(aiResponseRun)
+      .set({ state: 'CANCELLED' })
+      .where(inArray(aiResponseRun.conversationId, ids))
+    await db
+      .update(conversationAssignment)
+      .set({ createdAt: new Date(Date.now() - 7000) })
+      .where(inArray(conversationAssignment.conversationId, ids))
+    const last = ids.sort().at(-1)
+    if (!last) throw new Error('Missing candidate fixture')
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        level: 'CONVERSATION',
+        name: 'Follow-up match',
+        type: 'TEXT',
+      })
+      .returning()
+    const profile = await getCustomerProfile(db, {
+      workspaceId: f.workspaceId,
+      conversationId: last,
+      userId: f.ownerId,
+    })
+    await setCustomerProperty(db, {
+      workspaceId: f.workspaceId,
+      conversationId: last,
+      userId: f.ownerId,
+      expectedCustomerId: profile.customer.id,
+      definitionId: definition.id,
+      allowAutomaticUpdate: false,
+      expectedRevision: 0,
+      value: 'yes',
+    })
+    await db
+      .update(aiFollowUpRule)
+      .set({ groups: [[{ kind: 'PROPERTY', definitionId: definition.id, value: 'yes' }]] })
+      .where(eq(aiFollowUpRule.id, f.rule.id))
+    await handleScheduled(f.env)
+    const continuation = f.maintenance.mock.calls
+      .map(([job]) => job)
+      .find((job) => job.type === 'ai.follow-up.scan')
+    expect(continuation).toBeTruthy()
+    f.ai.mockClear()
+    f.maintenance.mockClear()
+    for (let repeat = 0; repeat < 2; repeat++)
+      await handleMaintenanceBatch(batch('maintenance', queueMessage(continuation)), f.env)
+    const jobs = f.maintenance.mock.calls
+      .map(([job]) => job)
+      .filter((job) => job.type === 'ai.follow-up')
+    expect(jobs.some((job) => job.conversationId === last)).toBe(true)
+    for (const job of jobs)
+      await handleMaintenanceBatch(batch('maintenance', queueMessage(job)), f.env)
+    expect(f.ai).toHaveBeenCalledOnce()
+    expect(
+      await db.select().from(aiFollowUpEvent).where(eq(aiFollowUpEvent.ruleId, f.rule.id)),
+    ).toHaveLength(1)
+  }, 90_000)
 })
 
 async function createFixture(db: ReturnType<typeof createDatabase>) {

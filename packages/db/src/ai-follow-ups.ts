@@ -4,6 +4,7 @@ import {
   assertAiStopReferences,
   EMPTY_AI_STOP_RULES,
   isAiStopPeriod,
+  hasAiStopPeriodBetween,
   matchesAiStopCondition,
   normalizeAiStopRules,
 } from './ai-stop'
@@ -63,11 +64,14 @@ export async function listAiFollowUpRules(db: Database, input: Identity) {
       failureCode: aiResponseRun.failureCode,
       operationState: aiOperation.state,
       outputMessageId: aiResponseRun.outputMessageId,
+      deliveryState: message.deliveryState,
+      deliveryFailureCode: message.failureCode,
     })
     .from(aiFollowUpEvent)
     .innerJoin(aiFollowUpRule, eq(aiFollowUpRule.id, aiFollowUpEvent.ruleId))
     .innerJoin(aiResponseRun, eq(aiResponseRun.id, aiFollowUpEvent.id))
     .leftJoin(aiOperation, eq(aiOperation.id, aiFollowUpEvent.id))
+    .leftJoin(message, eq(message.id, aiResponseRun.outputMessageId))
     .where(
       and(
         eq(aiFollowUpRule.workspaceId, input.workspaceId),
@@ -303,6 +307,16 @@ async function eligible(tx: Tx, rule: Rule, conversationId: string, now: Date) {
   }
   const found = await anchor(tx, rule, conversationId)
   if (!found) return null
+  if (
+    hasAiStopPeriodBetween(
+      current.snapshot.stopRules ?? EMPTY_AI_STOP_RULES,
+      current.snapshot.timeZone ?? 'UTC',
+      new Date(found.at),
+      now,
+    )
+  )
+    return null
+
   return {
     ...current,
     anchor: found,
@@ -310,7 +324,11 @@ async function eligible(tx: Tx, rule: Rule, conversationId: string, now: Date) {
   }
 }
 
-export async function listDueAiFollowUpConversations(db: Database, now = new Date()) {
+export async function listDueAiFollowUpConversations(
+  db: Database,
+  now = new Date(),
+  after?: string,
+) {
   const rows = await db.execute<{ conversationId: string }>(sql`
     select distinct c.id as "conversationId" from ai_follow_up_rule r join conversation c on c.assignee_member_id = r.member_id
     join message i on i.id = c.last_customer_message_id
@@ -321,11 +339,13 @@ export async function listDueAiFollowUpConversations(db: Database, now = new Dat
       ) a order by a.at desc, a.id desc limit 1
     ) anchor on anchor.at >= r.effective_at
     where r.enabled and r.deleted_at is null and c.status = 'OPEN' and c.ai_stop_state is null and anchor.at + r.delay_seconds * interval '1 second' <= ${now}
+      and (${after ?? null}::uuid is null or c.id > ${after ?? null}::uuid)
       and not exists (select 1 from ai_follow_up_event e where e.rule_id = r.id and e.conversation_id = c.id)
       and not exists (select 1 from ai_response_run a where a.conversation_id = c.id and a.state in ('QUEUED','GENERATING'))
       and not exists (select 1 from message m where m.conversation_id = c.id and m.direction = 'OUTBOUND' and (m.delivery_state = 'PENDING' or m.failure_code = 'AMBIGUOUS_DELIVERY'))
-      limit 100`)
-  return rows.rows.map((r) => r.conversationId)
+      order by c.id limit 101`)
+  const conversations = rows.rows.slice(0, 100).map((r) => r.conversationId)
+  return { conversations, nextCursor: rows.rows.length > 100 ? conversations.at(-1) : undefined }
 }
 
 export async function startAiFollowUp(db: Database, conversationId: string, now = new Date()) {

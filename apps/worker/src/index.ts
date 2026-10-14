@@ -4548,8 +4548,32 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
   }
 }
 
+async function enqueueFollowUpPage(env: Bindings, after?: string) {
+  if (!env.MAINTENANCE_QUEUE) return
+  const page = await withDatabase(env, (db) =>
+    listDueAiFollowUpConversations(db, new Date(), after),
+  )
+  for (const conversationId of page.conversations)
+    await env.MAINTENANCE_QUEUE.send({ v: 1, type: 'ai.follow-up', conversationId })
+  if (page.nextCursor)
+    await env.MAINTENANCE_QUEUE.send({ v: 1, type: 'ai.follow-up.scan', after: page.nextCursor })
+}
+
 export async function handleMaintenanceBatch(batch: MessageBatch<unknown>, env: Bindings) {
   for (const queueMessage of batch.messages) {
+    const scan = z
+      .object({ v: z.literal(1), type: z.literal('ai.follow-up.scan'), after: z.string().uuid() })
+      .strict()
+      .safeParse(queueMessage.body)
+    if (scan.success) {
+      try {
+        await enqueueFollowUpPage(env, scan.data.after)
+        queueMessage.ack()
+      } catch {
+        queueMessage.retry()
+      }
+      continue
+    }
     const followUp = z
       .object({
         v: z.literal(1),
@@ -4631,11 +4655,7 @@ export async function handleScheduled(env: Bindings) {
 
   try {
     await pumpCampaigns(env, withDatabase)
-    if (env.MAINTENANCE_QUEUE) {
-      const conversations = await withDatabase(env, (db) => listDueAiFollowUpConversations(db))
-      for (const conversationId of conversations)
-        await env.MAINTENANCE_QUEUE.send({ v: 1, type: 'ai.follow-up', conversationId })
-    }
+    await enqueueFollowUpPage(env)
 
     await withDatabase(env, (db) => recoverAiOperations(db))
     const stale = await withDatabase(env, (db) => recoverStaleOutboundMessages(db))
