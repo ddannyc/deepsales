@@ -1,9 +1,83 @@
 import { and, desc, eq, getTableColumns, sql } from 'drizzle-orm'
+import { commitAiResponse } from './ai-responses'
+import { instructionTools } from './ai-tools'
 import type { Database } from './database'
 import { assertInboxConversationAccess, InboxError } from './inbox'
-import { conversation, conversationInternalNote, conversationMemberMute, member } from './schema'
+import {
+  aiMemberConfig,
+  aiResponseRun,
+  conversation,
+  conversationInternalNote,
+  conversationMemberMute,
+  member,
+} from './schema'
+
+type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 
 type Context = { workspaceId: string; userId: string; conversationId: string }
+
+export async function createAiInternalNote(
+  db: Database | Transaction,
+  input: {
+    runId: string
+    clientKey: string
+    text: string
+    handoffEvaluation?: Parameters<typeof commitAiResponse>[1]['handoffEvaluation']
+  },
+) {
+  if (!input.text.trim() || input.text.length > 2000)
+    throw new InboxError('INVALID_REQUEST', 'Invalid internal note')
+  return db.transaction(async (tx) => {
+    const guard = await commitAiResponse(tx, {
+      runId: input.runId,
+      text: '',
+      stopCheckOnly: true,
+      handoffEvaluation: input.handoffEvaluation,
+    })
+    if (guard?.kind !== 'CONTINUE') return { guard }
+    const [author] = await tx
+      .select({
+        conversationId: aiResponseRun.conversationId,
+        memberId: member.id,
+        name: member.displayName,
+        frozen: aiResponseRun.configSnapshot,
+        current: aiMemberConfig.publishedSnapshot,
+      })
+      .from(aiResponseRun)
+      .innerJoin(member, eq(member.id, aiResponseRun.memberId))
+      .innerJoin(aiMemberConfig, eq(aiMemberConfig.memberId, member.id))
+      .where(eq(aiResponseRun.id, input.runId))
+    if (
+      !author ||
+      !instructionTools(author.frozen?.instructions ?? '').includes('record') ||
+      !instructionTools(author.current?.instructions ?? '').includes('record')
+    )
+      throw new InboxError('INVALID_REQUEST', 'Tool is unavailable')
+    await tx
+      .insert(conversationInternalNote)
+      .values({
+        conversationId: author.conversationId,
+        authorMemberId: author.memberId,
+        authorName: author.name ?? 'AI member',
+        clientKey: input.clientKey,
+        text: input.text.trim(),
+        createdAt: sql`clock_timestamp()`,
+      })
+      .onConflictDoNothing()
+    const [note] = await tx
+      .select({ id: conversationInternalNote.id, text: conversationInternalNote.text })
+      .from(conversationInternalNote)
+      .where(
+        and(
+          eq(conversationInternalNote.conversationId, author.conversationId),
+          eq(conversationInternalNote.authorMemberId, author.memberId),
+          eq(conversationInternalNote.clientKey, input.clientKey),
+        ),
+      )
+    if (!note || note.text !== input.text.trim()) throw new InboxError('INVALID_REQUEST')
+    return { noteId: note.id }
+  })
+}
 
 export async function setConversationMute(db: Database, input: Context & { muted: boolean }) {
   return db.transaction(async (tx) => {
