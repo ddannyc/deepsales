@@ -23,6 +23,7 @@ import {
   customerMemoryCommunication,
   customerPropertyDefinition,
   customerPropertyValue,
+  customerTagDefinition,
   getAiBudget,
   getAiFacebookAdvertisingContext,
   getCustomerProfile,
@@ -36,7 +37,9 @@ import {
   saveAiBudget,
   saveAiHandoffRule,
   saveAiPropertyRule,
+  saveAiTagRule,
   setCustomerProperty,
+  setCustomerTag,
   setMemberChannelAccess,
   takeOverConversation,
   transferConversation,
@@ -123,6 +126,70 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     const next = await receiveContextInput(db, f, 'Hello again.')
     expect(next.aiResponseRunId).toBeTruthy()
   })
+  it.each(['none', 'manual', 'rule', 'revoke', 'input', 'disabled'] as const)(
+    'appends controlled tags and protects newer %s decisions',
+    async (change) => {
+      const f = await createFixture(db)
+      const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+      await updateAiMemberConfig(db, { ...config, replyWaitEnabled: false, tagsEnabled: true })
+      await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+      const received = await receiveContextInput(db, f, 'Please follow up with me.')
+      const [tag] = await db
+        .insert(customerTagDefinition)
+        .values({ workspaceId: f.workspaceId, name: 'Follow up', level: 'CUSTOMER' })
+        .returning()
+      const rule = {
+        ...config,
+        id: crypto.randomUUID(),
+        definitionId: tag.id,
+        instructions: 'Explicit follow-up request.',
+        enabled: true,
+      }
+      await saveAiTagRule(db, rule)
+      const profileInput = {
+        workspaceId: f.workspaceId,
+        userId: f.ownerId,
+        conversationId: received.conversationId,
+      }
+      const profile = await getCustomerProfile(db, profileInput)
+      const assigned = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: received.conversationId,
+      })
+      if (!assigned.aiResponseRunId) throw new Error('Missing run')
+      const claim = await claimAiResponseRun(db, { runId: assigned.aiResponseRunId })
+      expect(claim).toMatchObject({
+        kind: 'CLAIMED',
+        tagCollection: { rules: [{ definitionId: tag.id }] },
+      })
+      if (change === 'manual')
+        await setCustomerTag(db, {
+          ...profileInput,
+          expectedCustomerId: profile.customer.id,
+          tagId: tag.id,
+          remove: true,
+        })
+      if (change === 'rule') await saveAiTagRule(db, { ...rule, revision: 1, enabled: false })
+      if (change === 'revoke') await setMemberChannelAccess(db, { ...config, channelIds: [] })
+      if (change === 'input') await receiveContextInput(db, f, 'No need for follow up.')
+      if (change === 'disabled') {
+        await updateAiMemberConfig(db, { ...config, tagsEnabled: false })
+        await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+      }
+      const result = await commitAiResponse(db, {
+        runId: assigned.aiResponseRunId,
+        text: 'Thank you.',
+        appendedTags: [tag.id],
+      })
+      expect(result?.kind === 'COMMITTED').toBe(change === 'none' || change === 'manual')
+      const after = await getCustomerProfile(db, profileInput)
+      expect(after.tags).toEqual(
+        change === 'none'
+          ? [expect.objectContaining({ tagId: tag.id, sourceMemberId: f.aiMemberId })]
+          : [],
+      )
+    },
+  )
   it('collects properties through the live Worker reply and reuses the single paid operation', async () => {
     const f = await createFixture(db)
     const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }

@@ -31,11 +31,16 @@ type Definition = { id: string; name: string; level: string; type: string }
 export function AiPropertySettings({
   workspaceId,
   memberId,
+  kind = 'property',
 }: {
   workspaceId: string
   memberId: string
+  kind?: 'property' | 'tag'
 }) {
-  const root = `/api/workspaces/${workspaceId}/ai-operations/${memberId}/property-rules`
+  const noun = kind === 'tag' ? '标签追加' : '属性采集'
+  const action = kind === 'tag' ? '追加' : '采集'
+  const field = kind === 'tag' ? '标签' : '属性'
+  const root = `/api/workspaces/${workspaceId}/ai-operations/${memberId}/${kind}-rules`
   const prefix = useId()
   const loadRequest = useRef(0)
   const [rules, setRules] = useState<Rule[]>([])
@@ -55,8 +60,8 @@ export function AiPropertySettings({
     const [data, options] = await Promise.all([r.json(), d.json()])
     if (request !== loadRequest.current) return
     setRules(data.rules)
-    setDefinitions(options.properties)
-  }, [root, workspaceId])
+    setDefinitions(kind === 'tag' ? options.tags : options.properties)
+  }, [root, workspaceId, kind])
   useEffect(() => {
     void load().catch((e) => setError(e.message))
     return () => {
@@ -95,11 +100,12 @@ export function AiPropertySettings({
     }
   }
   return (
-    <section aria-label="AI 属性采集" className="ai-config-section">
-      <h2>AI 属性采集</h2>
+    <section aria-label={`AI ${noun}`} className="ai-config-section">
+      <h2>AI {noun}</h2>
       <p className="field-description">
-        独立规则保存、启停和删除立即生效，不随主配置历史还原。每个 AI 最多 20
-        个受控字段，复用回复生成；人工值仅在明确允许自动更新后可覆盖，属性与长期摘要分别管理。
+        {kind === 'tag'
+          ? '功能开关发布后生效；规则保存、启停和删除立即生效。仅追加已有授权标签，人工较新决定受保护。'
+          : '独立规则保存、启停和删除立即生效，不随主配置历史还原。每个 AI 最多 20 个受控字段，复用回复生成；人工值仅在明确允许自动更新后可覆盖，属性与长期摘要分别管理。'}
       </p>
       <Button
         type="button"
@@ -115,14 +121,18 @@ export function AiPropertySettings({
         <p role="status">正在读取属性…</p>
       ) : (
         <>
-          {!rules.length && <p>暂无采集规则。先在客户资料中定义属性，再选择采集字段。</p>}
+          {!rules.length && (
+            <p>
+              暂无{action}规则。先在客户资料中定义{field}，再选择授权对象。
+            </p>
+          )}
           {rules.map((rule) => (
             <div className="runtime-panel" key={rule.id}>
               <strong>
                 {definitions.find((d) => d.id === rule.definitionId)?.name ?? '属性已失效'}
               </strong>
               <Switch
-                aria-label={`启用采集 ${definitions.find((d) => d.id === rule.definitionId)?.name ?? '失效属性'}`}
+                aria-label={`启用${action} ${definitions.find((d) => d.id === rule.definitionId)?.name ?? '失效定义'}`}
                 checked={rule.enabled}
                 disabled={busy}
                 onCheckedChange={(enabled) => void save({ ...rule, enabled })}
@@ -134,7 +144,7 @@ export function AiPropertySettings({
                 disabled={busy}
                 onClick={() => setDraft(rule)}
               >
-                编辑采集规则
+                编辑{action}规则
               </Button>
               <Button
                 type="button"
@@ -142,7 +152,7 @@ export function AiPropertySettings({
                 disabled={busy}
                 onClick={() => setDeleting(rule)}
               >
-                删除采集规则
+                删除{action}规则
               </Button>
             </div>
           ))}
@@ -153,7 +163,7 @@ export function AiPropertySettings({
               void save(draft)
             }}
           >
-            <label htmlFor={`${prefix}-field`}>采集属性</label>
+            <label htmlFor={`${prefix}-field`}>{kind === 'tag' ? '追加标签' : '采集属性'}</label>
             <Select
               value={draft.definitionId ?? ''}
               onValueChange={(definitionId) => setDraft((d) => ({ ...d, definitionId }))}
@@ -171,7 +181,7 @@ export function AiPropertySettings({
                 ))}
               </SelectContent>
             </Select>
-            <label htmlFor={`${prefix}-instructions`}>采集说明</label>
+            <label htmlFor={`${prefix}-instructions`}>{action}说明</label>
             <Textarea
               id={`${prefix}-instructions`}
               value={draft.instructions ?? ''}
@@ -181,7 +191,7 @@ export function AiPropertySettings({
               onChange={(e) => setDraft((d) => ({ ...d, instructions: e.target.value }))}
             />
             <Button type="submit" disabled={busy || !draft.definitionId}>
-              {busy ? '正在保存…' : '保存采集规则'}
+              {busy ? '正在保存…' : `保存${action}规则`}
             </Button>
             {draft.id && (
               <Button

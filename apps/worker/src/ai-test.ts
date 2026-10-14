@@ -178,6 +178,9 @@ export async function executeAiTest(
     history,
     simulatedCustomer: testContext?.customer,
     propertyRules,
+    tagRules:
+      (operation.output as { tagRules?: import('@deepsales/db').AiTagCollection['rules'] } | null)
+        ?.tagRules ?? [],
     establishedLanguage: snapshot.automaticLanguageEnabled
       ? testContext?.customer.language || undefined
       : undefined,

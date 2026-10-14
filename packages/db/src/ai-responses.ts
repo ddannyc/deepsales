@@ -16,12 +16,14 @@ import {
   isAiStopPeriod,
   matchesAiStopCondition,
 } from './ai-stop'
+import { applyAiTags, readAiTagCollection, sameAiTagRules } from './ai-tag-rules'
 import { ensureAiResponseRun } from './assignments'
 import { readCustomerMemory } from './customer-memory'
 import type { Database } from './database'
 import {
   type AiMemberRuntimeSnapshot,
   type AiPropertyCollection,
+  type AiTagCollection,
   aiMemberConfig,
   aiResponseRun,
   channel,
@@ -61,6 +63,7 @@ export type AiResponseInputMessage = {
 
 export type AiResponseRunClaim = {
   propertyCollection: AiPropertyCollection
+  tagCollection: AiTagCollection
   customerMemoryInput?: {
     customerId: string
     revision: number
@@ -201,6 +204,7 @@ export async function claimAiResponseRun(
         contextMessageIds: aiResponseRun.contextMessageIds,
         customerMemoryInput: aiResponseRun.customerMemoryInput,
         propertyCollection: aiResponseRun.propertyCollection,
+        tagCollection: aiResponseRun.tagCollection,
         customerId: channelIdentity.customerId,
         channelId: channelIdentity.channelId,
         workspaceId: conversation.workspaceId,
@@ -442,6 +446,31 @@ export async function claimAiResponseRun(
         aiResponseRunId,
       }
     }
+    const tagContext = {
+      workspaceId: current.workspaceId,
+      memberId: current.memberId,
+      customerId: current.customerId,
+      conversationId: current.conversationId,
+      channelId: current.channelId,
+    }
+    const tags = await readAiTagCollection(tx, tagContext)
+    if (!snapshot?.tagsEnabled || !config?.publishedSnapshot?.tagsEnabled) tags.rules = []
+    if (current.tagCollection && !sameAiTagRules(current.tagCollection, tags)) {
+      await cancelRun(tx, current.id, 'PROPERTY_COLLECTION_CHANGED', now)
+      const fresh = await ensureAiResponseRun(tx, {
+        conversationId: current.conversationId,
+        memberId: current.memberId,
+        now,
+      })
+      return {
+        kind: 'CANCELLED',
+        workspaceId: current.workspaceId,
+        conversationId: current.conversationId,
+        cancellationReason: 'PROPERTY_COLLECTION_CHANGED',
+        aiResponseRunId: fresh,
+      }
+    }
+    const tagCollection = current.tagCollection ?? tags
     const propertyCollection = current.propertyCollection ?? currentCollection
     const memory =
       snapshot?.memoryEnabled && config?.publishedSnapshot?.memoryEnabled
@@ -483,11 +512,12 @@ export async function claimAiResponseRun(
         : null)
     await tx
       .update(aiResponseRun)
-      .set({ customerMemoryInput, propertyCollection })
+      .set({ customerMemoryInput, propertyCollection, tagCollection })
       .where(eq(aiResponseRun.id, current.id))
     return {
       kind: 'CLAIMED' as const,
       propertyCollection,
+      tagCollection,
       customerMemoryInput,
       state: 'GENERATING' as const,
       id: current.id,
@@ -670,6 +700,7 @@ export async function commitAiResponse(
     now?: Date
     mediaAssetId?: string | null
     languageSelection?: { language: string; explicitSwitch: boolean } | null
+    appendedTags?: string[]
     collectedProperties?: AiCollectedProperty[]
   },
 ): Promise<CommitAiResponseResult> {
@@ -728,6 +759,7 @@ export async function commitAiResponse(
         retrievedChunkIds: aiResponseRun.retrievedChunkIds,
         customerMemoryInput: aiResponseRun.customerMemoryInput,
         propertyCollection: aiResponseRun.propertyCollection,
+        tagCollection: aiResponseRun.tagCollection,
       })
       .from(aiResponseRun)
       .where(eq(aiResponseRun.id, input.runId))
@@ -1006,6 +1038,31 @@ export async function commitAiResponse(
           aiResponseRunId: fresh,
         }
       }
+      const currentTags = await readAiTagCollection(tx, context)
+      const [tagConfig] = await tx
+        .select({ snapshot: aiMemberConfig.publishedSnapshot })
+        .from(aiMemberConfig)
+        .where(eq(aiMemberConfig.memberId, run.memberId))
+      if (!run.configSnapshot?.tagsEnabled || !tagConfig?.snapshot?.tagsEnabled)
+        currentTags.rules = []
+      if (run.tagCollection && !sameAiTagRules(run.tagCollection, currentTags)) {
+        await cancelRun(tx, run.id, 'PROPERTY_COLLECTION_CHANGED', now)
+        const fresh = await ensureAiResponseRun(tx, {
+          conversationId: current.id,
+          memberId: run.memberId,
+          now,
+        })
+        return {
+          kind: 'CANCELLED',
+          cancellationReason: 'PROPERTY_COLLECTION_CHANGED',
+          aiResponseRunId: fresh,
+        }
+      }
+      await applyAiTags(tx, {
+        ...context,
+        collection: run.tagCollection ?? { ...currentTags, rules: [] },
+        values: input.appendedTags ?? [],
+      })
       await applyAiCollectedProperties(tx, {
         ...context,
         collection: run.propertyCollection ?? { customerId: current.customerId, rules: [] },

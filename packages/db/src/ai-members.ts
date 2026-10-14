@@ -49,6 +49,7 @@ export type AiMemberConfig = {
   timeZone: string
   naturalToneEnabled: boolean
   memoryEnabled: boolean
+  tagsEnabled: boolean
   replyWaitEnabled: boolean
   memberId: string
   memberDisplayName: string | null
@@ -79,6 +80,7 @@ export type UpdateAiMemberConfigInput = {
   timeZone?: string
   naturalToneEnabled?: boolean
   memoryEnabled?: boolean
+  tagsEnabled?: boolean
   replyWaitEnabled?: boolean
   workspaceId: string
   memberId: string
@@ -147,6 +149,7 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
         adMappings: draft.adMappings ?? [],
         naturalToneEnabled: draft.naturalToneEnabled ?? false,
         memoryEnabled: draft.memoryEnabled ?? false,
+        tagsEnabled: draft.tagsEnabled ?? false,
         replyWaitEnabled: draft.replyWaitEnabled ?? true,
       })
     }
@@ -233,6 +236,7 @@ export async function publishAiMemberConfig(
       adMappings: config.adMappings,
       naturalToneEnabled: config.naturalToneEnabled,
       memoryEnabled: config.memoryEnabled,
+      tagsEnabled: config.tagsEnabled,
       replyWaitEnabled: config.replyWaitEnabled,
     }
     const [version] = await tx
@@ -313,6 +317,7 @@ async function selectAiMemberConfig(
       adMappings: aiMemberConfig.adMappings,
       naturalToneEnabled: aiMemberConfig.naturalToneEnabled,
       memoryEnabled: aiMemberConfig.memoryEnabled,
+      tagsEnabled: aiMemberConfig.tagsEnabled,
       replyWaitEnabled: aiMemberConfig.replyWaitEnabled,
       publishedSnapshot: aiMemberConfig.publishedSnapshot,
       publishedAt: aiMemberConfig.publishedAt,
@@ -347,6 +352,7 @@ async function selectAiMemberConfig(
     adMappings: row.adMappings ?? [],
     naturalToneEnabled: row.naturalToneEnabled ?? false,
     memoryEnabled: row.memoryEnabled ?? false,
+    tagsEnabled: row.tagsEnabled ?? false,
     replyWaitEnabled: row.replyWaitEnabled ?? true,
     publishedSnapshot: row.publishedSnapshot ?? null,
     publishedAt: row.publishedAt ?? null,
@@ -467,6 +473,7 @@ export async function restoreAiConfigVersion(
         adMappings: version.snapshot.adMappings ?? [],
         naturalToneEnabled: version.snapshot.naturalToneEnabled ?? false,
         memoryEnabled: version.snapshot.memoryEnabled ?? false,
+        tagsEnabled: version.snapshot.tagsEnabled ?? false,
         replyWaitEnabled: version.snapshot.replyWaitEnabled ?? true,
         knowledgeBaseId: base?.id ?? null,
         updatedAt: new Date(),
@@ -482,6 +489,8 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
     typeof input.unparsedFallbackEnabled !== 'boolean'
   )
     throw new AiMemberError('INVALID_REQUEST', 'Invalid fallback setting')
+  if (input.tagsEnabled !== undefined && typeof input.tagsEnabled !== 'boolean')
+    throw new AiMemberError('INVALID_CONFIGURATION')
   if (input.memoryEnabled !== undefined && typeof input.memoryEnabled !== 'boolean')
     throw new AiMemberError('INVALID_REQUEST', 'Invalid customer memory setting')
   let stopRules: AiStopRules | undefined
@@ -523,6 +532,7 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
     adLearningEnabled: input.adLearningEnabled,
     naturalToneEnabled: input.naturalToneEnabled,
     memoryEnabled: input.memoryEnabled,
+    tagsEnabled: input.tagsEnabled,
     replyWaitEnabled: input.replyWaitEnabled,
     adMappings: input.adMappings === undefined ? undefined : normalizeAdMappings(input.adMappings),
   }
@@ -576,6 +586,7 @@ function defaultConfig(memberId: string) {
     adMappings: [],
     naturalToneEnabled: false,
     memoryEnabled: false,
+    tagsEnabled: false,
     replyWaitEnabled: true,
     publishedSnapshot: null,
     publishedAt: null,

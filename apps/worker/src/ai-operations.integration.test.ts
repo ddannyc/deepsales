@@ -61,6 +61,39 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('manages controlled tag rules immediately and rejects foreign definitions', async () => {
+    const f = await fixture()
+    const [tag] = await db
+      .insert(customerTagDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Follow up', level: 'CUSTOMER' })
+      .returning()
+    const id = crypto.randomUUID()
+    const rule = {
+      id,
+      definitionId: tag.id,
+      instructions: 'Explicit follow-up request.',
+      enabled: true,
+    }
+    expect((await f.call(`/${f.aiId}/tag-rules`, 'POST', rule)).status).toBe(201)
+    expect(await (await f.call(`/${f.aiId}/tag-rules`)).json()).toMatchObject({
+      rules: [{ ...rule, revision: 1 }],
+    })
+    expect(
+      (
+        await f.call(`/${f.aiId}/tag-rules`, 'POST', {
+          ...rule,
+          definitionId: crypto.randomUUID(),
+          revision: 1,
+        })
+      ).status,
+    ).toBe(400)
+    expect(
+      (await f.call(`/${f.aiId}/tag-rules`, 'POST', { ...rule, enabled: false, revision: 1 }))
+        .status,
+    ).toBe(201)
+    expect((await f.call(`/${f.aiId}/tag-rules`, 'DELETE', { id, revision: 1 })).status).toBe(400)
+    expect((await f.call(`/${f.aiId}/tag-rules`, 'DELETE', { id, revision: 2 })).status).toBe(200)
+  })
   it('collects test properties only into the isolated simulated customer', async () => {
     const f = await fixture()
     const [definition] = await db

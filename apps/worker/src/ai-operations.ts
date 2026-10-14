@@ -15,6 +15,7 @@ import {
   deleteAiHandoffRule,
   deleteAiPropertyRule,
   deleteAiQuestionSet,
+  deleteAiTagRule,
   failAiBatchItem,
   finishAiOperation,
   getAiAnalytics,
@@ -27,6 +28,7 @@ import {
   listAiHandoffRules,
   listAiPropertyRules,
   listAiQuestionSets,
+  listAiTagRules,
   listAiTestBatches,
   readAiTestBatch,
   readAiTestSession,
@@ -37,6 +39,7 @@ import {
   saveAiHandoffRule,
   saveAiPropertyRule,
   saveAiQuestionSet,
+  saveAiTagRule,
 } from '@deepsales/db'
 import { Hono } from 'hono'
 import { z } from 'zod'
@@ -131,6 +134,31 @@ export function aiOperationsRoutes(
               .strict()
               .parse(body)
             return c.json({ rule: await saveAiPropertyRule(db, { ...memberInput, ...input }) }, 201)
+          }
+        }
+        if (action === 'tag-rules') {
+          if (c.req.method === 'GET')
+            return c.json({ rules: await listAiTagRules(db, memberInput) })
+          if (c.req.method === 'DELETE') {
+            const input = z
+              .object({ id: uuid, revision: z.number().int().positive() })
+              .strict()
+              .parse(body)
+            await deleteAiTagRule(db, { ...memberInput, ...input })
+            return c.json({ ok: true })
+          }
+          if (c.req.method === 'POST') {
+            const input = z
+              .object({
+                id: uuid,
+                definitionId: uuid,
+                instructions: z.string().trim().min(1).max(2000),
+                enabled: z.boolean(),
+                revision: z.number().int().positive().optional(),
+              })
+              .strict()
+              .parse(body)
+            return c.json({ rule: await saveAiTagRule(db, { ...memberInput, ...input }) }, 201)
           }
         }
         if (action === 'question-sets') {
