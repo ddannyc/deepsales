@@ -9,6 +9,7 @@ import {
 } from './ai-operations'
 import { readAiTestPropertyRules } from './ai-property-rules'
 import { readAiTestTagRules } from './ai-tag-rules'
+import { readAiTestVariableInput } from './ai-variable-values'
 import type { Database } from './database'
 import {
   aiOperation,
@@ -284,6 +285,12 @@ export async function claimAiTestBatchItem(
     })
     if (previous?.state === 'FAILED') {
       const output = {
+        variableInput: await readAiTestVariableInput(tx, {
+          workspaceId: input.workspaceId,
+          instructions: batch.snapshot.instructions,
+          timeZone: batch.snapshot.timeZone ?? 'UTC',
+          text: item.text,
+        }),
         propertyRules: await readAiTestPropertyRules(tx, input.workspaceId, input.memberId),
         tagRules: batch.snapshot.tagsEnabled
           ? await readAiTestTagRules(tx, input.workspaceId, input.memberId)

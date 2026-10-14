@@ -50,6 +50,7 @@ type Diagnostics = {
         configSnapshot: Record<string, unknown> | null
         advertisingContext?: { status: string; adId?: string; content?: string } | null
         customerMemoryRevision?: number | null
+        variableInputVersion?: { version: number; capturedAt: string } | null
       })
     | null
   operation: {
@@ -620,6 +621,12 @@ export function AiOperations({
               {diagnostics.run?.failureCode && <p>{label(diagnostics.run.failureCode)}</p>}
               {diagnostics.run?.customerMemoryRevision != null && (
                 <p>长期摘要输入修订：{diagnostics.run.customerMemoryRevision}</p>
+              )}
+              {diagnostics.run?.variableInputVersion && (
+                <p>
+                  变量输入版本：{diagnostics.run.variableInputVersion.version} ·{' '}
+                  {new Date(diagnostics.run.variableInputVersion.capturedAt).toLocaleString()}
+                </p>
               )}
               {diagnostics.operation?.failureCode && (
                 <p>{label(diagnostics.operation.failureCode)}</p>
