@@ -337,6 +337,13 @@
       "when": 1791944585291,
       "tag": "0047_ordinary_campaigns",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1791945423090,
+      "tag": "0048_instruction_variables",
+      "breakpoints": true
     }
   ]
 }
