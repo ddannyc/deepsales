@@ -89,6 +89,30 @@ export function validValue(value: unknown): value is ExternalValue {
     (typeof value === 'number' && Number.isFinite(value))
   )
 }
+export function validateExternalArguments(
+  definition: ExternalRequestDefinition,
+  values: Record<string, unknown>,
+) {
+  if (
+    Object.keys(values).length > 20 ||
+    Object.keys(values).some((name) => !definition.inputs.some((field) => field.name === name))
+  )
+    throw new Error('Invalid external arguments')
+  for (const field of definition.inputs) {
+    const value = values[field.name]
+    if (value === undefined && !field.required) continue
+    if (!validValue(value) || typeof value !== field.type)
+      throw new Error('Invalid external arguments')
+    if (
+      field.location === 'path' &&
+      (!String(value) ||
+        String(value).length > 200 ||
+        /[/%\\]/.test(String(value)) ||
+        ['.', '..'].includes(String(value)))
+    )
+      throw new Error('Invalid external path')
+  }
+}
 
 export function validateExternalObjectScope(scope: string, definition: ExternalRequestDefinition) {
   if (definition.effect !== 'WRITE') return

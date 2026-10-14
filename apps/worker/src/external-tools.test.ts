@@ -15,6 +15,36 @@ const definition = {
   effect: 'READ' as const,
 }
 describe('external HTTPS tool boundary', () => {
+  it.each([301, 302, 303, 307, 308])(
+    'rejects HTTP %s redirects without a second request',
+    async (status) => {
+      const fetcher = vi.fn(
+        async () => new Response(null, { status, headers: { Location: `${origin}/other` } }),
+      )
+      await expect(
+        callExternalTool(
+          buildExternalRequest(definition, { record: 'abc' }, [origin]),
+          definition.output,
+          'private',
+          fetcher,
+        ),
+      ).rejects.toMatchObject({ code: 'EXTERNAL_REDIRECT' })
+      expect(fetcher).toHaveBeenCalledOnce()
+    },
+  )
+  it('rejects compressed and malformed mapped bodies without exposing credentials or raw fields', async () => {
+    const request = buildExternalRequest(definition, { record: 'abc' }, [origin])
+    for (const response of [
+      new Response('compressed', {
+        headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' },
+      }),
+      Response.json({ data: { status: 'private' } }),
+      Response.json({ data: { status: 42 } }),
+    ])
+      await expect(
+        callExternalTool(request, definition.output, 'private', async () => response),
+      ).rejects.toMatchObject({ code: 'EXTERNAL_RESPONSE_INVALID' })
+  })
   it('recognizes stable external references but never authorizes arbitrary or unreferenced IDs', () => {
     const id = '11111111-1111-4111-8111-111111111111'
     expect(instructionTools(`Use [[tool:external:${id}]]`)).toEqual([`external:${id}`])

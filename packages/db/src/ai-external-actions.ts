@@ -2,8 +2,8 @@ import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { AiResponseError, commitAiResponse } from './ai-responses'
 import { aiSelectedSkillInstructions, selectedAiSkillId } from './ai-skills'
 import { instructionTools, validateAiToolCalls, type AiToolCall } from './ai-tools'
-import { readAiViewerChannelIds } from './ai-members'
-import { validValue } from './ai-external-contracts'
+import { readAiViewerChannelIds, AiMemberError } from './ai-members'
+import { validValue, validateExternalArguments } from './ai-external-contracts'
 import { authorizeAiTestTool } from './ai-operations'
 import type { Database } from './database'
 import {
@@ -186,13 +186,50 @@ export async function claimAiExternalAction(db: Database, input: ExternalActionI
       return { action: existing, dispatch: null }
     }
     const definition = await authorizedDefinition(tx, context, input.call.arguments.definitionId)
+    const [uncertain] = await tx
+      .select({ id: aiToolAction.id })
+      .from(aiToolAction)
+      .innerJoin(aiResponseRun, eq(aiResponseRun.id, aiToolAction.runId))
+      .where(
+        and(
+          eq(aiResponseRun.conversationId, context.run.conversationId),
+          eq(aiToolAction.state, 'UNKNOWN'),
+          sql`${aiToolAction.tool} like 'external:%'`,
+        ),
+      )
+      .limit(1)
     const guard = await commitAiResponse(tx, {
       runId: input.runId,
       text: '',
       stopCheckOnly: true,
       handoffEvaluation: input.handoffEvaluation,
     })
-    const allowed = definition && guard?.kind === 'CONTINUE'
+    const allowed = definition && !uncertain && guard?.kind === 'CONTINUE'
+    if (!allowed && guard?.kind === 'CONTINUE') {
+      await tx
+        .update(aiResponseRun)
+        .set({
+          state: uncertain ? 'FAILED' : 'CANCELLED',
+          failureCode: uncertain ? 'EXTERNAL_PREVIOUS_UNKNOWN' : 'TOOL_AUTHORIZATION_CHANGED',
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(and(eq(aiResponseRun.id, input.runId), eq(aiResponseRun.state, 'GENERATING')))
+      if (uncertain)
+        await tx
+          .update(aiOperation)
+          .set({
+            state: 'UNKNOWN',
+            failureCode: 'EXTERNAL_PREVIOUS_UNKNOWN',
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(aiOperation.id, input.runId),
+              inArray(aiOperation.state, ['RESERVED', 'STARTED']),
+            ),
+          )
+    }
     const [action] = await tx
       .insert(aiToolAction)
       .values({
@@ -383,6 +420,14 @@ export async function simulateExternalTestAction(
       (row) => row.tool.id === input.call.arguments.definitionId,
     )
     if (!definition) return null
+    try {
+      validateExternalArguments(
+        { ...definition.tool, origin: definition.origin },
+        input.call.arguments.values,
+      )
+    } catch {
+      throw new AiMemberError('INVALID_REQUEST')
+    }
     const [existing] = await tx
       .select()
       .from(aiToolAction)
