@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { Button } from '#components/ui/button'
 import { Input } from '#components/ui/input'
 import { Textarea } from '#components/ui/textarea'
@@ -36,12 +36,15 @@ export function AiStopSettings({
   rules,
   onChange,
   busy,
+  audienceOnly = false,
 }: {
   workspaceId: string
   rules: AiStopRules
   onChange: (rules: AiStopRules) => void
   busy: boolean
+  audienceOnly?: boolean
 }) {
+  const titleId = useId()
   const [options, setOptions] = useState<Options>()
   const [assets, setAssets] = useState<{ id: string; title: string; kind: string }[]>()
   const [error, setError] = useState('')
@@ -87,13 +90,29 @@ export function AiStopSettings({
       ),
     })
   }
+  const firstProperty = options?.properties[0]
+  const defaultCondition: AiStopCondition | undefined = audienceOnly
+    ? firstProperty
+      ? {
+          kind: 'PROPERTY',
+          definitionId: firstProperty.id,
+          value: firstProperty.type === 'NUMBER' ? 0 : (firstProperty.options[0] ?? ''),
+        }
+      : options?.tags[0]
+        ? { kind: 'TAG', tagId: options.tags[0].id }
+        : undefined
+    : { kind: 'REPLIES', minimum: 1 }
   const days = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
   return (
-    <section className="ai-config-section" aria-labelledby="ai-stop-title">
+    <section className="ai-config-section" aria-labelledby={titleId}>
       <div className="section-heading">
         <div>
-          <h2 id="ai-stop-title">停止回复</h2>
-          <p>保存草稿后发布生效。组内全部匹配（AND），组间任一匹配（OR）；停止不自动转人工。</p>
+          <h2 id={titleId}>{audienceOnly ? '回访客户条件' : '停止回复'}</h2>
+          <p>
+            {audienceOnly
+              ? '条件为空面向全部合格客户；组内 AND，组间 OR。失效条件不会匹配，保存和执行时重新校验。'
+              : '保存草稿后发布生效。组内全部匹配（AND），组间任一匹配（OR）；停止不自动转人工。'}
+          </p>
         </div>
       </div>
       {error && (
@@ -133,7 +152,7 @@ export function AiStopSettings({
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="REPLIES">AI 逻辑回复轮次达到</SelectItem>
+                  {!audienceOnly && <SelectItem value="REPLIES">AI 逻辑回复轮次达到</SelectItem>}
                   {options?.properties.map((d) => (
                     <SelectItem key={d.id} value={`property:${d.id}`}>
                       {d.level === 'CUSTOMER' ? '客户' : '会话'}属性：{d.name} 等于
@@ -226,12 +245,12 @@ export function AiStopSettings({
           <Button
             type="button"
             variant="outline"
-            disabled={group.length >= 10}
+            disabled={group.length >= 10 || !defaultCondition}
             onClick={() =>
               onChange({
                 ...rules,
                 groups: rules.groups.map((g, k) =>
-                  k === i ? [...g, { kind: 'REPLIES', minimum: 1 }] : g,
+                  k === i && defaultCondition ? [...g, defaultCondition] : g,
                 ),
               })
             }
@@ -243,134 +262,142 @@ export function AiStopSettings({
       <Button
         type="button"
         variant="outline"
-        disabled={busy || rules.groups.length >= 10}
+        disabled={busy || rules.groups.length >= 10 || !defaultCondition}
         onClick={() =>
-          onChange({ ...rules, groups: [...rules.groups, [{ kind: 'REPLIES', minimum: 1 }]] })
+          defaultCondition && onChange({ ...rules, groups: [...rules.groups, [defaultCondition]] })
         }
       >
-        添加停止条件组
+        {audienceOnly ? '添加回访条件组' : '添加停止条件组'}
       </Button>
-      <p className="field-description">
-        条件停止持续当前会话；改变属性或移除标签不会恢复。分段回复和附带素材算一个逻辑回复，已提交的失败回复也计入；系统转人工通知不计入。
-      </p>
-      <h3>每周停止时段</h3>
-      <p className="field-description">
-        使用上方配置时区，起点包含、终点不包含。跨午夜请拆为两天，全天可填
-        00:00–24:00。时段结束后，新的客户输入恢复接待。
-      </p>
-      {rules.periods.map((p, i) => (
-        <div className="form-grid-two" key={periodKeys.current[i]}>
-          <Select
-            disabled={busy}
-            value={String(p.day)}
-            onValueChange={(value) =>
-              onChange({
-                ...rules,
-                periods: rules.periods.map((v, j) => (j === i ? { ...v, day: Number(value) } : v)),
-              })
-            }
-          >
-            <SelectTrigger aria-label={`停止时段 ${i + 1} 星期`}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {days.map((d, j) => (
-                <SelectItem key={d} value={String(j)}>
-                  {d}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          {(['start', 'end'] as const).map((key) => (
-            <label
-              key={key}
-              className="form-field"
-              htmlFor={`stop-${periodKeys.current[i]}-${key}`}
-            >
-              <span>{key === 'start' ? '开始' : '结束'}</span>
-              <Input
-                id={`stop-${periodKeys.current[i]}-${key}`}
+      {!audienceOnly && (
+        <>
+          <p className="field-description">
+            条件停止持续当前会话；改变属性或移除标签不会恢复。分段回复和附带素材算一个逻辑回复，已提交的失败回复也计入；系统转人工通知不计入。
+          </p>
+          <h3>每周停止时段</h3>
+          <p className="field-description">
+            使用上方配置时区，起点包含、终点不包含。跨午夜请拆为两天，全天可填
+            00:00–24:00。时段结束后，新的客户输入恢复接待。
+          </p>
+          {rules.periods.map((p, i) => (
+            <div className="form-grid-two" key={periodKeys.current[i]}>
+              <Select
                 disabled={busy}
-                aria-label={`停止时段 ${i + 1} ${key === 'start' ? '开始' : '结束'}`}
-                value={p[key]}
-                placeholder="HH:mm"
-                maxLength={5}
-                onChange={(e) =>
+                value={String(p.day)}
+                onValueChange={(value) =>
                   onChange({
                     ...rules,
                     periods: rules.periods.map((v, j) =>
-                      j === i ? { ...v, [key]: e.target.value } : v,
+                      j === i ? { ...v, day: Number(value) } : v,
                     ),
                   })
                 }
-              />
-            </label>
+              >
+                <SelectTrigger aria-label={`停止时段 ${i + 1} 星期`}>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {days.map((d, j) => (
+                    <SelectItem key={d} value={String(j)}>
+                      {d}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {(['start', 'end'] as const).map((key) => (
+                <label
+                  key={key}
+                  className="form-field"
+                  htmlFor={`stop-${periodKeys.current[i]}-${key}`}
+                >
+                  <span>{key === 'start' ? '开始' : '结束'}</span>
+                  <Input
+                    id={`stop-${periodKeys.current[i]}-${key}`}
+                    disabled={busy}
+                    aria-label={`停止时段 ${i + 1} ${key === 'start' ? '开始' : '结束'}`}
+                    value={p[key]}
+                    placeholder="HH:mm"
+                    maxLength={5}
+                    onChange={(e) =>
+                      onChange({
+                        ...rules,
+                        periods: rules.periods.map((v, j) =>
+                          j === i ? { ...v, [key]: e.target.value } : v,
+                        ),
+                      })
+                    }
+                  />
+                </label>
+              ))}
+              <Button
+                type="button"
+                disabled={busy}
+                variant="ghost"
+                onClick={() => {
+                  periodKeys.current.splice(i, 1)
+                  onChange({ ...rules, periods: rules.periods.filter((_, j) => j !== i) })
+                }}
+              >
+                移除时段
+              </Button>
+            </div>
           ))}
           <Button
             type="button"
-            disabled={busy}
-            variant="ghost"
-            onClick={() => {
-              periodKeys.current.splice(i, 1)
-              onChange({ ...rules, periods: rules.periods.filter((_, j) => j !== i) })
-            }}
+            variant="outline"
+            disabled={busy || rules.periods.length >= 28}
+            onClick={() =>
+              onChange({
+                ...rules,
+                periods: [...rules.periods, { day: 1, start: '18:00', end: '24:00' }],
+              })
+            }
           >
-            移除时段
+            添加每周停止时段
           </Button>
-        </div>
-      ))}
-      <Button
-        type="button"
-        variant="outline"
-        disabled={busy || rules.periods.length >= 28}
-        onClick={() =>
-          onChange({
-            ...rules,
-            periods: [...rules.periods, { day: 1, start: '18:00', end: '24:00' }],
-          })
-        }
-      >
-        添加每周停止时段
-      </Button>
-      <label className="form-field" htmlFor="ai-stop-ending">
-        <span className="form-field-label">停止结束文字（可选）</span>
-        <Textarea
-          id="ai-stop-ending"
-          disabled={busy}
-          value={rules.endingText}
-          maxLength={4000}
-          rows={3}
-          onChange={(e) => onChange({ ...rules, endingText: e.target.value })}
-        />
-      </label>
-      <Select
-        disabled={busy || !assets}
-        value={rules.endingMediaAssetId ?? 'NONE'}
-        onValueChange={(value) =>
-          onChange({ ...rules, endingMediaAssetId: value === 'NONE' ? null : value })
-        }
-      >
-        <SelectTrigger aria-label="停止结束图片">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="NONE">无结束图片</SelectItem>
-          {assets?.map((a) => (
-            <SelectItem key={a.id} value={a.id}>
-              {a.title}
-            </SelectItem>
-          ))}
-          {rules.endingMediaAssetId &&
-            assets &&
-            !assets.some((a) => a.id === rules.endingMediaAssetId) && (
-              <SelectItem value={rules.endingMediaAssetId}>图片已失效，请移除或重新选择</SelectItem>
-            )}
-        </SelectContent>
-      </Select>
-      <p className="field-description">
-        只在进入停止时发送一次；留空则不发送。文字由管理员提供，请确认事实和语言；图片必须来自授权私有素材库。发送状态和渠道限制仍会显示在会话中，客户要求人工仍按转人工策略处理。
-        启用客户要求人工转接时，停止期间仍使用模型识别请求，并按现有用量计费。
-      </p>
+          <label className="form-field" htmlFor="ai-stop-ending">
+            <span className="form-field-label">停止结束文字（可选）</span>
+            <Textarea
+              id="ai-stop-ending"
+              disabled={busy}
+              value={rules.endingText}
+              maxLength={4000}
+              rows={3}
+              onChange={(e) => onChange({ ...rules, endingText: e.target.value })}
+            />
+          </label>
+          <Select
+            disabled={busy || !assets}
+            value={rules.endingMediaAssetId ?? 'NONE'}
+            onValueChange={(value) =>
+              onChange({ ...rules, endingMediaAssetId: value === 'NONE' ? null : value })
+            }
+          >
+            <SelectTrigger aria-label="停止结束图片">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="NONE">无结束图片</SelectItem>
+              {assets?.map((a) => (
+                <SelectItem key={a.id} value={a.id}>
+                  {a.title}
+                </SelectItem>
+              ))}
+              {rules.endingMediaAssetId &&
+                assets &&
+                !assets.some((a) => a.id === rules.endingMediaAssetId) && (
+                  <SelectItem value={rules.endingMediaAssetId}>
+                    图片已失效，请移除或重新选择
+                  </SelectItem>
+                )}
+            </SelectContent>
+          </Select>
+          <p className="field-description">
+            只在进入停止时发送一次；留空则不发送。文字由管理员提供，请确认事实和语言；图片必须来自授权私有素材库。发送状态和渠道限制仍会显示在会话中，客户要求人工仍按转人工策略处理。
+            启用客户要求人工转接时，停止期间仍使用模型识别请求，并按现有用量计费。
+          </p>
+        </>
+      )}
     </section>
   )
 }

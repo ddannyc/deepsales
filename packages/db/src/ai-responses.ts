@@ -1,4 +1,5 @@
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
+import { readAiFollowUpAuthorization } from './ai-follow-ups'
 import {
   type AiHandoffEvaluation,
   matchAiHandoffRule,
@@ -64,6 +65,7 @@ export type AiResponseInputMessage = {
 }
 
 export type AiResponseRunClaim = {
+  followUp: { id: string; ruleId: string; instructions: string } | null
   propertyCollection: AiPropertyCollection
   tagCollection: AiTagCollection
   variableInput: AiVariableInput
@@ -263,6 +265,19 @@ export async function claimAiResponseRun(
       .set({ configSnapshot: snapshot, configVersionId })
       .where(eq(aiResponseRun.id, current.id))
 
+    const proactive = await readAiFollowUpAuthorization(tx, current.id, now)
+    if (!proactive.valid) {
+      await tx
+        .update(aiResponseRun)
+        .set({
+          state: 'CANCELLED',
+          failureCode: 'FOLLOW_UP_INELIGIBLE',
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(aiResponseRun.id, current.id))
+      return null
+    }
     const boundaries = await tx
       // Keep PostgreSQL microseconds for cutoff comparisons; JavaScript Dates lose them.
       .select({ id: message.id, createdAt: sql<string>`${message.createdAt}::text` })
@@ -338,14 +353,18 @@ export async function claimAiResponseRun(
           and(
             eq(message.conversationId, current.conversationId),
             sql`${message.text} is not null and trim(${message.text}) <> ''`,
-            sql`(${message.createdAt}, ${message.id}) < (${start.createdAt}::timestamptz, ${start.id}::uuid)`,
+            proactive.followUp
+              ? sql`${message.createdAt} <= ${now}`
+              : sql`(${message.createdAt}, ${message.id}) < (${start.createdAt}::timestamptz, ${start.id}::uuid)`,
             or(
               and(eq(message.direction, 'INBOUND'), eq(message.senderType, 'CUSTOMER')),
               and(
                 eq(message.direction, 'OUTBOUND'),
                 eq(message.senderType, 'MEMBER'),
                 eq(message.deliveryState, 'SENT'),
-                sql`(${message.deliveryCompletedAt} is null or ${message.deliveryCompletedAt} <= ${end.createdAt}::timestamptz)`,
+                proactive.followUp
+                  ? sql`${message.deliveryCompletedAt} <= ${now}`
+                  : sql`(${message.deliveryCompletedAt} is null or ${message.deliveryCompletedAt} <= ${end.createdAt}::timestamptz)`,
               ),
             ),
           ),
@@ -371,7 +390,7 @@ export async function claimAiResponseRun(
         turns.shift()
       let size = 0
       for (const turn of turns.reverse()) {
-        if (turn.at(-1)?.origin === 'CUSTOMER') continue
+        if (!proactive.followUp && turn.at(-1)?.origin === 'CUSTOMER') continue
         const length = turn.reduce((sum, item) => sum + Array.from(item.text).length, 0)
         if (
           size + length > MAX_AI_HISTORY_CODE_POINTS ||
@@ -549,6 +568,7 @@ export async function claimAiResponseRun(
       .where(eq(aiResponseRun.id, current.id))
     return {
       kind: 'CLAIMED' as const,
+      followUp: proactive.followUp,
       propertyCollection,
       tagCollection,
       variableInput,
@@ -697,6 +717,7 @@ export async function recoverStaleAiResponseRuns(
 
 export type CommitAiResponseResult =
   | { kind: 'CONTINUE' }
+  | { kind: 'FOLLOW_UP_CANCELLED' }
   | { kind: 'SKIPPED'; workspaceId: string; conversationId: string }
   | { kind: 'UNPARSED_FALLBACK_REQUIRED'; text: string }
   | { kind: 'HANDOFF_CHECK_REQUIRED' }
@@ -840,6 +861,19 @@ export async function commitAiResponse(
       return { kind: 'CANCELLED' as const, cancellationReason: 'NEW_CUSTOMER_MESSAGE' as const }
     }
 
+    const proactive = await readAiFollowUpAuthorization(tx, run.id, now)
+    if (!proactive.valid) {
+      await tx
+        .update(aiResponseRun)
+        .set({
+          state: 'CANCELLED',
+          failureCode: 'FOLLOW_UP_INELIGIBLE',
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(aiResponseRun.id, run.id))
+      return { kind: 'FOLLOW_UP_CANCELLED' as const }
+    }
     if (run.variableInput) {
       const latestVariables = await readAiVariableInput(tx, {
         workspaceId: current.workspaceId,

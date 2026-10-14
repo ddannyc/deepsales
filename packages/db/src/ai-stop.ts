@@ -138,10 +138,73 @@ export function isAiStopPeriod(rules: AiStopRules, timeZone: string, at: Date) {
     minute: '2-digit',
     hourCycle: 'h23',
   }).formatToParts(at)
+  return matchesStopPeriod(rules, parts)
+}
+
+function matchesStopPeriod(rules: AiStopRules, parts: Intl.DateTimeFormatPart[]) {
   const get = (key: Intl.DateTimeFormatPartTypes) => parts.find((p) => p.type === key)?.value ?? ''
   const day = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(get('weekday'))
   const time = `${get('hour')}:${get('minute')}`
   return rules.periods.some((p) => p.day === day && p.start <= time && time < p.end)
+}
+
+// Two weekly occurrences cover a DST-skipped occurrence. Only offset-changing hours
+// need minute resolution; even long downtime scans at most fifteen days.
+export function hasAiStopPeriodBetween(rules: AiStopRules, timeZone: string, from: Date, to: Date) {
+  if (!rules.periods.length || to < from) return false
+  if (to.getTime() - from.getTime() >= 15 * 86400000) return true
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  })
+  const clock = (at: number) => {
+    const parts = formatter.formatToParts(at)
+    const get = (key: Intl.DateTimeFormatPartTypes) =>
+      Number(parts.find((p) => p.type === key)?.value)
+    return {
+      parts,
+      wall: Date.UTC(get('year'), get('month') - 1, get('day'), get('hour'), get('minute')),
+    }
+  }
+  const minute = (text: string) => Number(text.slice(0, 2)) * 60 + Number(text.slice(3))
+  let cursor = from.getTime()
+  const end = to.getTime()
+  while (cursor <= end) {
+    const start = clock(cursor)
+    if (matchesStopPeriod(rules, start.parts)) return true
+    if (cursor === end) break
+    const next = Math.min(end, (Math.floor(cursor / 3600000) + 1) * 3600000)
+    const last = clock(next)
+    const elapsedMinutes = Math.floor(next / 60000) - Math.floor(cursor / 60000)
+    if (last.wall - start.wall === elapsedMinutes * 60000) {
+      for (
+        let day = Math.floor(start.wall / 86400000) * 86400000;
+        day <= last.wall;
+        day += 86400000
+      ) {
+        if (
+          rules.periods.some(
+            (p) =>
+              p.day === new Date(day).getUTCDay() &&
+              day + minute(p.start) * 60000 > start.wall &&
+              day + minute(p.start) * 60000 <= last.wall,
+          )
+        )
+          return true
+      }
+    } else {
+      for (let at = (Math.floor(cursor / 60000) + 1) * 60000; at <= next; at += 60000)
+        if (matchesStopPeriod(rules, clock(at).parts)) return true
+    }
+    cursor = next
+  }
+  return false
 }
 
 // Caller holds the workspace and conversation locks used by fact edits and AI commits.

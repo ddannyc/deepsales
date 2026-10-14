@@ -62,6 +62,88 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('starts follow-up rules empty and saves a versioned immediate rule', async () => {
+    const f = await fixture()
+    const root = `/${f.aiId}/follow-ups`
+    const empty = await f.call(root)
+    expect(empty.status).toBe(200)
+    expect(await empty.json()).toMatchObject({ rules: [] })
+    const id = crypto.randomUUID()
+    const saved = await f.call(root, 'POST', {
+      id,
+      name: 'Helpful check-in',
+      enabled: true,
+      timer: 'LAST_AI_REPLY',
+      delaySeconds: 60,
+      instructions: '',
+      groups: [],
+    })
+    expect(saved.status).toBe(201)
+    expect(await saved.json()).toMatchObject({
+      rule: { id, revision: 1, enabled: true, timer: 'LAST_AI_REPLY', delaySeconds: 60 },
+    })
+    expect(
+      (
+        await f.call(root, 'POST', {
+          id,
+          revision: 1,
+          name: 'Helpful check-in',
+          enabled: false,
+          timer: 'AI_ASSIGNMENT',
+          delaySeconds: 120,
+          instructions: '',
+          groups: [],
+        })
+      ).status,
+    ).toBe(201)
+    expect(await (await f.call(root)).json()).toMatchObject({
+      rules: [{ id, revision: 2, enabled: false }],
+    })
+    expect(
+      (
+        await f.call(root, 'POST', {
+          id,
+          revision: 1,
+          name: 'Stale',
+          enabled: true,
+          timer: 'LAST_AI_REPLY',
+          delaySeconds: 60,
+          instructions: '',
+          groups: [],
+        })
+      ).status,
+    ).toBe(400)
+    const other = await fixture()
+    expect((await other.call(`/${f.aiId}/follow-ups`)).status).toBe(404)
+    expect(
+      (
+        await f.call(root, 'POST', {
+          id: crypto.randomUUID(),
+          name: 'Invalid reference',
+          enabled: true,
+          timer: 'LAST_AI_REPLY',
+          delaySeconds: 60,
+          instructions: '',
+          groups: [[{ kind: 'TAG', tagId: crypto.randomUUID() }]],
+        })
+      ).status,
+    ).toBe(400)
+    expect((await f.call(root, 'DELETE', { id, revision: 2 })).status).toBe(200)
+    expect(await (await f.call(root)).json()).toMatchObject({ rules: [] })
+    expect(
+      (
+        await f.call(root, 'POST', {
+          id,
+          name: 'Reusing deleted identity',
+          enabled: true,
+          timer: 'LAST_AI_REPLY',
+          delaySeconds: 60,
+          instructions: '',
+          groups: [],
+        })
+      ).status,
+    ).toBe(400)
+  })
   it('offers authorized built-in tools beside variables and rejects unknown tool references', async () => {
     const f = await fixture()
     const response = await f.call(`/${f.aiId}/variables`)

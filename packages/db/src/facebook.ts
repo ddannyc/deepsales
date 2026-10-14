@@ -137,7 +137,11 @@ export async function retryFacebookHumanReply(
   })
 }
 
-async function facebookReplyWindowOpen(tx: Transaction, channelIdentityId: string, now: Date) {
+export async function facebookReplyWindowOpen(
+  tx: Transaction,
+  channelIdentityId: string,
+  now: Date,
+) {
   const [window] = await tx
     .select({ eligibleUntil: facebookMessagingWindow.eligibleUntil })
     .from(facebookMessagingWindow)

@@ -53,6 +53,7 @@ export interface EmbeddingProvider {
 }
 
 export type AiResponseInput = {
+  proactiveEvent?: { ruleId: string; instructions: string } | null
   variableInput?: AiVariableInput | null
   tagRules?: { definitionId: string; name: string; instructions: string }[]
   propertyRules?: AiPropertyCollection['rules']
@@ -785,6 +786,12 @@ export function buildAiPrompt(input: AiResponseInput) {
         'If a reference is missing or ambiguous, ask for clarification or hand off; never invent a referent.',
         'Company-specific facts may be used only when supported by the supplied knowledge chunks.',
         'If a supplied knowledge chunk has media_asset_id, you may send that private asset by returning mediaAssetId and citing that chunk in usedChunkIds. Return null when no asset is needed. Never invent an asset ID, URL or downloadable link. Descriptions are references, not file contents.',
+        ...(input.proactiveEvent
+          ? [
+              'This is an independently authorized proactive follow-up event, not a new customer message. Use the conversation history as past context. Do not repeat an already answered question. Follow the configured follow-up requirements below; if empty, offer a concise useful check-in. Company facts still require supplied knowledge. Follow-up requirements: ' +
+                escapePromptData(input.proactiveEvent.instructions),
+            ]
+          : []),
         ...(input.naturalToneEnabled
           ? [
               'Use a natural, conversational tone with clear, concise wording. Keep your AI identity; never pretend to be human.',

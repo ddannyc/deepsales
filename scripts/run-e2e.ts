@@ -30,6 +30,7 @@ const e2eOwnerKeys = [
   'customer-memory',
   'ai-properties',
   'ai-tags',
+  'ai-follow-ups',
   'campaigns',
   'lifecycle',
   'facebook',
@@ -445,17 +446,22 @@ async function startFakeAI() {
     const mediaMatch = current.includes('Send setup guide')
       ? /<knowledge_chunk id="([^"]+)" media_asset_id="([^"]+)"/.exec(content)
       : null
-    const answer = current.includes('Explain split delivery')
-      ? `${'Split first.'.padEnd(500, '.')}${'Split reject.'.padEnd(500, '.')}Split tail.`
-      : mediaMatch
-        ? 'Here is the setup guide.'
-        : options
-          ? 'Option one is Torch One. Option two is Torch Two.'
-          : secondOption || humanContinuation
-            ? hasReferent && chunkId
-              ? 'Torch Two comes in blue.'
-              : 'Please clarify which option.'
-            : 'Shipping is free.'
+    const proactive = body.messages?.[0]?.content.includes(
+      'independently authorized proactive follow-up event',
+    )
+    const answer = proactive
+      ? 'Would you like any further assistance?'
+      : current.includes('Explain split delivery')
+        ? `${'Split first.'.padEnd(500, '.')}${'Split reject.'.padEnd(500, '.')}Split tail.`
+        : mediaMatch
+          ? 'Here is the setup guide.'
+          : options
+            ? 'Option one is Torch One. Option two is Torch Two.'
+            : secondOption || humanContinuation
+              ? hasReferent && chunkId
+                ? 'Torch Two comes in blue.'
+                : 'Please clarify which option.'
+              : 'Shipping is free.'
     response.end(
       JSON.stringify({
         choices: [
@@ -466,12 +472,17 @@ async function startFakeAI() {
                 response: answer,
                 handoffReason: null,
                 containsBusinessFacts:
-                  !mediaMatch && !current.includes('Explain split delivery') && Boolean(chunkId),
-                usedChunkIds: mediaMatch
-                  ? [mediaMatch[1]]
-                  : !current.includes('Explain split delivery') && chunkId
-                    ? [chunkId]
-                    : [],
+                  !proactive &&
+                  !mediaMatch &&
+                  !current.includes('Explain split delivery') &&
+                  Boolean(chunkId),
+                usedChunkIds: proactive
+                  ? []
+                  : mediaMatch
+                    ? [mediaMatch[1]]
+                    : !current.includes('Explain split delivery') && chunkId
+                      ? [chunkId]
+                      : [],
                 mediaAssetId: mediaMatch?.[2] ?? null,
                 ...(body.messages?.[0]?.content.includes('Automatic language mode.')
                   ? { languageSelection: null }
