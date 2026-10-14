@@ -1,7 +1,8 @@
+import { AiUsageError } from './ai-operations'
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { AiResponseError, commitAiResponse } from './ai-responses'
 import { selectedAiSkillId } from './ai-skills'
-import { readAiRunToolInstructions } from './ai-tool-authorization'
+import { readAiRunToolInstructions, readAiToolSlotCount } from './ai-tool-authorization'
 import { instructionTools, validateAiToolCalls, type AiToolCall } from './ai-tools'
 import { readAiViewerChannelIds, AiMemberError } from './ai-members'
 import { validValue, validateExternalArguments } from './ai-external-contracts'
@@ -155,6 +156,54 @@ export async function claimAiExternalAction(db: Database, input: ExternalActionI
         JSON.stringify(existing.arguments) !== JSON.stringify(input.call.arguments.values)
       )
         throw new AiResponseError('INVALID_REQUEST')
+      if (existing.state === 'FAILED' && existing.retryAt) {
+        if (existing.retryAt.getTime() > Date.now())
+          throw new AiUsageError('RETRY_LATER', existing.retryAt.getTime() - Date.now())
+        const definition = await authorizedDefinition(
+          tx,
+          context,
+          input.call.arguments.definitionId,
+        )
+        const guard = await commitAiResponse(tx, {
+          runId: input.runId,
+          text: '',
+          stopCheckOnly: true,
+          handoffEvaluation: input.handoffEvaluation,
+        })
+        const budgetAvailable = (await readAiToolSlotCount(tx, input.runId)) < 3
+        const allowed =
+          definition?.tool.effect === 'READ' &&
+          definition.tool.revision === existing.definitionRevision &&
+          budgetAvailable &&
+          guard?.kind === 'CONTINUE'
+        const [action] = await tx
+          .update(aiToolAction)
+          .set({
+            state: allowed ? 'RUNNING' : 'CANCELLED',
+            retryAt: null,
+            attemptCount: existing.attemptCount + (allowed ? 1 : 0),
+            startedAt: new Date(),
+            completedAt: allowed ? null : new Date(),
+            failureCode: allowed
+              ? null
+              : !budgetAvailable
+                ? 'TOOL_CALL_LIMIT'
+                : 'TOOL_AUTHORIZATION_CHANGED',
+          })
+          .where(eq(aiToolAction.id, existing.id))
+          .returning()
+        if (!allowed && guard?.kind === 'CONTINUE')
+          await tx
+            .update(aiResponseRun)
+            .set({
+              state: 'CANCELLED',
+              failureCode: action.failureCode,
+              completedAt: new Date(),
+              updatedAt: new Date(),
+            })
+            .where(eq(aiResponseRun.id, input.runId))
+        return { action, dispatch: allowed ? definition : null }
+      }
       if (
         existing.state === 'RUNNING' &&
         Date.now() - (existing.startedAt?.getTime() ?? 0) > 15_000
@@ -209,13 +258,18 @@ export async function claimAiExternalAction(db: Database, input: ExternalActionI
       stopCheckOnly: true,
       handoffEvaluation: input.handoffEvaluation,
     })
-    const allowed = definition && !uncertain && guard?.kind === 'CONTINUE'
+    const budgetAvailable = (await readAiToolSlotCount(tx, input.runId)) < 3
+    const allowed = definition && !uncertain && budgetAvailable && guard?.kind === 'CONTINUE'
     if (!allowed && guard?.kind === 'CONTINUE') {
       await tx
         .update(aiResponseRun)
         .set({
           state: uncertain ? 'FAILED' : 'CANCELLED',
-          failureCode: uncertain ? 'EXTERNAL_PREVIOUS_UNKNOWN' : 'TOOL_AUTHORIZATION_CHANGED',
+          failureCode: uncertain
+            ? 'EXTERNAL_PREVIOUS_UNKNOWN'
+            : !budgetAvailable
+              ? 'TOOL_CALL_LIMIT'
+              : 'TOOL_AUTHORIZATION_CHANGED',
           completedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -247,9 +301,14 @@ export async function claimAiExternalAction(db: Database, input: ExternalActionI
         definitionRevision: definition?.tool.revision ?? 1,
         arguments: input.call.arguments.values,
         state: allowed ? 'RUNNING' : 'CANCELLED',
+        attemptCount: allowed ? 1 : 0,
         startedAt: new Date(),
         completedAt: allowed ? null : new Date(),
-        failureCode: allowed ? null : 'TOOL_AUTHORIZATION_CHANGED',
+        failureCode: allowed
+          ? null
+          : !budgetAvailable
+            ? 'TOOL_CALL_LIMIT'
+            : 'TOOL_AUTHORIZATION_CHANGED',
       })
       .returning()
     return { action, dispatch: allowed ? definition : null }
@@ -312,6 +371,8 @@ export async function recordExternalActionReceipt(
     state: 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'CANCELLED'
     result?: Record<string, unknown>
     failureCode?: string
+    safeReadRetryAfterMs?: number
+    handoffEvaluation?: ExternalActionInput['handoffEvaluation']
   },
 ) {
   return db.transaction(async (tx) => {
@@ -329,17 +390,48 @@ export async function recordExternalActionReceipt(
       .where(eq(aiToolAction.id, input.actionId))
       .for('update')
     if (!action || action.state === 'SUCCEEDED' || action.state === 'CANCELLED') return action
+    let retryAt: Date | null = null
+    if (
+      input.state === 'FAILED' &&
+      input.safeReadRetryAfterMs !== undefined &&
+      action.runId &&
+      !action.simulated
+    ) {
+      const context = await lockRun(tx, action.runId)
+      const definition = await authorizedDefinition(
+        tx,
+        context,
+        action.tool.slice('external:'.length),
+      )
+      const guard = await commitAiResponse(tx, {
+        runId: action.runId,
+        text: '',
+        stopCheckOnly: true,
+        handoffEvaluation: input.handoffEvaluation,
+      })
+      if (
+        definition?.tool.effect === 'READ' &&
+        definition.tool.revision === action.definitionRevision &&
+        guard?.kind === 'CONTINUE' &&
+        (await readAiToolSlotCount(tx, action.runId)) < 3
+      )
+        retryAt = new Date(
+          Date.now() +
+            Math.max(action.attemptCount >= 2 ? 120000 : 30000, input.safeReadRetryAfterMs),
+        )
+    }
     const [saved] = await tx
       .update(aiToolAction)
       .set({
         state: input.state,
+        retryAt,
         result: input.result ?? null,
         failureCode: input.failureCode ?? null,
         completedAt: new Date(),
       })
       .where(eq(aiToolAction.id, action.id))
       .returning()
-    if (input.state !== 'SUCCEEDED' && action.runId) {
+    if (input.state !== 'SUCCEEDED' && !retryAt && action.runId) {
       await tx
         .update(aiResponseRun)
         .set({
