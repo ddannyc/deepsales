@@ -51,6 +51,11 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     await expect(page.getByRole('heading', { name: 'Answer Bot', exact: true })).toBeVisible()
     await page.locator('#ai-instructions').fill('Answer from support facts only.')
     await page.locator('#ai-response-language').fill('English')
+    await expect(
+      page.getByRole('switch', { name: '启用无法解析兜底', exact: true }),
+    ).not.toBeChecked()
+    await page.getByRole('switch', { name: '启用无法解析兜底', exact: true }).click()
+    await page.locator('#ai-unparsed-texts').fill('Please send text.\nCould you describe this?')
     await expect(page.getByRole('switch', { name: '自动回复语言', exact: true })).not.toBeChecked()
     await expect(page.locator('#ai-time-zone')).toHaveValue('UTC')
     await page.getByRole('switch', { name: '自动回复语言', exact: true }).click()
@@ -101,6 +106,7 @@ test('owner edits and publishes an AI member configuration', async ({ page }) =>
     )
     await expect(page.locator('.ai-published-panel')).toContainText('启用 · 1 条映射')
     await expect(page.locator('.ai-published-panel')).toContainText('自然语气启用')
+    await expect(page.locator('.ai-published-panel')).toContainText('无法解析兜底启用 · 2 条话术')
     await expect(page.locator('.ai-published-panel')).toContainText('自动回复语言启用')
     await expect(page.locator('.ai-published-panel')).toContainText('America/New_York')
     await expect(page.locator('.ai-published-panel')).toContainText('等待合并输入停用')

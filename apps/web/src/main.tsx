@@ -311,6 +311,8 @@ type KnowledgeDocument = {
 
 type AiMemberRuntimeSnapshot = {
   stopRules?: AiStopRules
+  unparsedFallbackEnabled?: boolean
+  unparsedFallbackTexts?: string[]
   splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
@@ -332,6 +334,8 @@ type AiMemberRuntimeSnapshot = {
 
 type AiMemberConfig = {
   stopRules: AiStopRules
+  unparsedFallbackEnabled: boolean
+  unparsedFallbackTexts: string[]
   splitRepliesEnabled: boolean
   automaticLanguageEnabled: boolean
   timeZone: string
@@ -377,6 +381,8 @@ type AiMemberDraft = Pick<
   | 'replyWaitEnabled'
   | 'automaticLanguageEnabled'
   | 'timeZone'
+  | 'unparsedFallbackEnabled'
+  | 'unparsedFallbackTexts'
   | 'splitRepliesEnabled'
   | 'stopRules'
 >
@@ -4471,6 +4477,51 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
             </p>
           </section>
           <Separator />
+          <section className="ai-config-section" aria-labelledby="ai-unparsed-title">
+            <div className="section-heading">
+              <div>
+                <h2 id="ai-unparsed-title">无法解析内容</h2>
+                <p>附件无法读取或没有可用转写时，先检查通用转人工条件；未匹配时使用此设置。</p>
+              </div>
+            </div>
+            <div className="switch-field">
+              <span>启用无法解析兜底</span>
+              <Switch
+                aria-label="启用无法解析兜底"
+                checked={draft.unparsedFallbackEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) =>
+                  setDraft((current) =>
+                    current ? { ...current, unparsedFallbackEnabled: checked } : current,
+                  )
+                }
+              />
+            </div>
+            <label className="form-field" htmlFor="ai-unparsed-texts">
+              <span className="form-field-label">兜底话术（每行一条）</span>
+              <Textarea
+                id="ai-unparsed-texts"
+                disabled={busy}
+                value={draft.unparsedFallbackTexts.join('\n')}
+                onChange={(event) =>
+                  setDraft((current) =>
+                    current
+                      ? { ...current, unparsedFallbackTexts: event.target.value.split('\n') }
+                      : current,
+                  )
+                }
+              />
+              <span className="form-field-help">
+                最多 10 条，每条 500
+                字符。启用时至少填写一条；随机选择后保持本轮选择，按固定语言或已确定的自动语言翻译，翻译计入
+                AI 用量。
+              </span>
+            </label>
+            <p className="form-field-help">
+              保存草稿后发布生效。关闭时仅跳过本轮，不发空消息、不转人工、不持续停止；后续有效输入仍正常接待。模型与运行故障仍走安全故障处理。
+            </p>
+          </section>
+          <Separator />
           <section aria-labelledby="ai-ad-title" className="ai-config-section">
             <div className="section-heading">
               <div>
@@ -4680,6 +4731,18 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                   <dd>{config.publishedSnapshot.memoryEnabled ? '启用' : '停用'}</dd>
                 </div>
                 <div>
+                  <dt>无法解析兜底</dt>
+                  <dd>
+                    {config.publishedSnapshot.unparsedFallbackEnabled
+                      ? `启用 · ${config.publishedSnapshot.unparsedFallbackTexts?.length ?? 0} 条话术`
+                      : '关闭 · 仅跳过本轮'}
+                  </dd>
+                </div>
+                <div>
+                  <dt>AI 标签追加</dt>
+                  <dd>{config.publishedSnapshot.tagsEnabled ? '启用' : '停用'}</dd>
+                </div>
+                <div>
                   <dt>拆分长回复</dt>
                   <dd>{config.publishedSnapshot.splitRepliesEnabled ? '启用' : '停用'}</dd>
                 </div>
@@ -4757,6 +4820,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.replyWaitEnabled ?? true,
       left.automaticLanguageEnabled ?? false,
       left.timeZone ?? 'UTC',
+      left.unparsedFallbackEnabled ?? false,
+      left.unparsedFallbackTexts ?? [],
       left.splitRepliesEnabled ?? false,
       left.stopRules ?? emptyStopRules,
     ]) ===
@@ -4777,6 +4842,8 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       right.replyWaitEnabled ?? true,
       right.automaticLanguageEnabled ?? false,
       right.timeZone ?? 'UTC',
+      right.unparsedFallbackEnabled ?? false,
+      right.unparsedFallbackTexts ?? [],
       right.splitRepliesEnabled ?? false,
       right.stopRules ?? emptyStopRules,
     ])
@@ -4793,6 +4860,8 @@ function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
     replyWaitEnabled: config.replyWaitEnabled ?? true,
     automaticLanguageEnabled: config.automaticLanguageEnabled ?? false,
     timeZone: config.timeZone ?? 'UTC',
+    unparsedFallbackEnabled: config.unparsedFallbackEnabled ?? false,
+    unparsedFallbackTexts: config.unparsedFallbackTexts ?? [],
     splitRepliesEnabled: config.splitRepliesEnabled ?? false,
     adLearningEnabled: config.adLearningEnabled ?? false,
     adMappings: config.adMappings ?? [],
