@@ -94,6 +94,77 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
     expect((await f.call(`/${f.aiId}/tag-rules`, 'DELETE', { id, revision: 1 })).status).toBe(400)
     expect((await f.call(`/${f.aiId}/tag-rules`, 'DELETE', { id, revision: 2 })).status).toBe(200)
   })
+  it('appends test tags only into the isolated simulated customer', async () => {
+    const f = await fixture()
+    expect((await f.configCall({ tagsEnabled: true })).status).toBe(200)
+    const [definition] = await db
+      .insert(customerTagDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Preferred contact',
+        level: 'CUSTOMER',
+      })
+      .returning()
+    expect(
+      (
+        await f.call(`/${f.aiId}/tag-rules`, 'POST', {
+          id: crypto.randomUUID(),
+          definitionId: definition.id,
+          instructions: 'Collect stated preference.',
+          enabled: true,
+        })
+      ).status,
+    ).toBe(201)
+    const sessionId = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/sessions`, 'POST', {
+          id: sessionId,
+          source: 'DRAFT',
+          customer: { properties: [], tags: [], source: '', language: '', memory: '' },
+        })
+      ).status,
+    ).toBe(201)
+    const fetcher = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      expect(String(init?.body)).toContain('Preferred contact')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Thank you.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                appendedTags: [definition.id],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const result = await f.call(`/${f.aiId}/test`, 'POST', {
+      id: crypto.randomUUID(),
+      source: 'DRAFT',
+      sessionId,
+      generation: 1,
+      text: 'I prefer email.',
+    })
+    expect(result.status).toBe(200)
+    expect(await (await f.call(`/${f.aiId}/sessions/${sessionId}`)).json()).toMatchObject({
+      session: { customer: { tags: [definition.id] } },
+    })
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(
+      (
+        await db.execute(
+          sql`select count(*)::int as count from customer_tag where tag_id = ${definition.id}`,
+        )
+      ).rows,
+    ).toEqual([{ count: 0 }])
+  })
   it('collects test properties only into the isolated simulated customer', async () => {
     const f = await fixture()
     const [definition] = await db

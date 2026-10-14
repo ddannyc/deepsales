@@ -116,7 +116,7 @@ const labels: Record<string, string> = {
   PERSONA: '人设草稿',
   CUSTOMER_MEMORY: '客户长期摘要',
   CUSTOMER_MEMORY_CHANGED: '长期摘要或其权限已变化，重新生成',
-  PROPERTY_COLLECTION_CHANGED: '属性采集规则或权限已变化，重新生成',
+  PROPERTY_COLLECTION_CHANGED: '属性或标签规则、权限已变化，重新生成',
   HUMAN: '人工',
   AI: 'AI',
   KNOWLEDGE: '知识问题',
@@ -838,6 +838,10 @@ function SnapshotPreview({ snapshot }: { snapshot: Record<string, unknown> | nul
             ? `启用 · ${Array.isArray(snapshot.unparsedFallbackTexts) ? snapshot.unparsedFallbackTexts.length : 0} 条话术`
             : '关闭 · 仅跳过本轮'}
         </dd>
+      </div>
+      <div>
+        <dt>AI 标签追加</dt>
+        <dd>{snapshot.tagsEnabled ? '启用' : '停用'}</dd>
       </div>
       <div>
         <dt>拆分长回复</dt>

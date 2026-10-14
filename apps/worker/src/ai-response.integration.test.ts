@@ -347,7 +347,7 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
       }
     },
   )
-  it.each(['none', 'manual', 'rule', 'revoke', 'input', 'disabled'] as const)(
+  it.each(['none', 'manual', 'concurrent', 'rule', 'revoke', 'input', 'disabled'] as const)(
     'appends controlled tags and protects newer %s decisions',
     async (change) => {
       const f = await createFixture(db)
@@ -378,6 +378,7 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
         conversationId: received.conversationId,
       })
       if (!assigned.aiResponseRunId) throw new Error('Missing run')
+      const runId = assigned.aiResponseRunId
       const claim = await claimAiResponseRun(db, { runId: assigned.aiResponseRunId })
       expect(claim).toMatchObject({
         kind: 'CLAIMED',
@@ -397,12 +398,27 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
         await updateAiMemberConfig(db, { ...config, tagsEnabled: false })
         await publishAiMemberConfig(db, { ...config, providerConfigured: true })
       }
-      const result = await commitAiResponse(db, {
-        runId: assigned.aiResponseRunId,
-        text: 'Thank you.',
-        appendedTags: [tag.id],
-      })
-      expect(result?.kind === 'COMMITTED').toBe(change === 'none' || change === 'manual')
+      const commit = () =>
+        commitAiResponse(db, {
+          runId,
+          text: 'Thank you.',
+          appendedTags: [tag.id],
+        })
+      const result =
+        change === 'concurrent'
+          ? (
+              await Promise.all([
+                commit(),
+                setCustomerTag(db, {
+                  ...profileInput,
+                  expectedCustomerId: profile.customer.id,
+                  tagId: tag.id,
+                  remove: true,
+                }),
+              ])
+            )[0]
+          : await commit()
+      expect(result?.kind === 'COMMITTED').toBe(['none', 'manual', 'concurrent'].includes(change))
       const after = await getCustomerProfile(db, profileInput)
       expect(after.tags).toEqual(
         change === 'none'
@@ -411,6 +427,72 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
       )
     },
   )
+  it('appends tags through the live Worker reply and reuses the single paid operation', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, replyWaitEnabled: false, tagsEnabled: true })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    const [definition] = await db
+      .insert(customerTagDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Preferred contact',
+        level: 'CUSTOMER',
+      })
+      .returning()
+    await saveAiTagRule(db, {
+      ...config,
+      id: crypto.randomUUID(),
+      definitionId: definition.id,
+      instructions: 'Collect explicitly stated preference.',
+      enabled: true,
+    })
+    const received = await receiveContextInput(db, f, 'I prefer email.')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const fetcher = vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith('/embeddings'))
+        return Response.json({ data: [{ index: 0, embedding: vector() }] })
+      expect(String(init?.body)).toContain('Preferred contact')
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Thanks for sharing.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                appendedTags: [definition.id],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', fetcher)
+    const outbound = vi.fn()
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+      environment({ send: outbound } as unknown as Queue),
+    )
+    const profile = await getCustomerProfile(db, {
+      workspaceId: f.workspaceId,
+      userId: f.ownerId,
+      conversationId: received.conversationId,
+    })
+    expect(profile.tags).toMatchObject([{ tagId: definition.id, sourceMemberId: f.aiMemberId }])
+    expect(outbound).toHaveBeenCalledOnce()
+    expect(
+      fetcher.mock.calls.filter(([url]) => String(url).endsWith('/chat/completions')),
+    ).toHaveLength(1)
+    expect(
+      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+    ).toBe(1)
+  })
   it('collects properties through the live Worker reply and reuses the single paid operation', async () => {
     const f = await createFixture(db)
     const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }

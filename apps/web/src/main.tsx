@@ -4732,6 +4732,10 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                   </dd>
                 </div>
                 <div>
+                  <dt>AI 标签追加</dt>
+                  <dd>{config.publishedSnapshot.tagsEnabled ? '启用' : '停用'}</dd>
+                </div>
+                <div>
                   <dt>拆分长回复</dt>
                   <dd>{config.publishedSnapshot.splitRepliesEnabled ? '启用' : '停用'}</dd>
                 </div>
