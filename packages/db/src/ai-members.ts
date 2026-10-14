@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from 'drizzle-orm'
 import { assertAiHandoffReferences, readEnabledAiHandoffRules } from './ai-handoff-rules'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES, normalizeAiStopRules } from './ai-stop'
+import { instructionTools } from './ai-tools'
 import { instructionVariableKeys } from './ai-variables'
 import type { Database } from './database'
 import {
@@ -209,6 +210,7 @@ export async function publishAiMemberConfig(
     }
     try {
       instructionVariableKeys(config.instructions)
+      instructionTools(config.instructions)
       await assertAiStopReferences(tx, input.workspaceId, config.stopRules)
       await assertAiHandoffReferences(
         tx,
@@ -506,6 +508,7 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
   if (input.instructions !== undefined) {
     try {
       instructionVariableKeys(input.instructions)
+      instructionTools(input.instructions)
     } catch {
       throw new AiMemberError('INVALID_REQUEST', 'Unknown instruction variable')
     }

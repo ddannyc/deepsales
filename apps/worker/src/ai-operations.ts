@@ -4,6 +4,7 @@ import {
   AiUsageError,
   addAiFeedback,
   aiOperationForMessage,
+  BUILTIN_AI_TOOLS,
   cancelAiTestBatch,
   claimAiTestBatchItem,
   clearAiTestSession,
@@ -115,7 +116,12 @@ export function aiOperationsRoutes(
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
         if (action === 'variables' && c.req.method === 'GET') {
           await getAiMemberConfig(db, memberInput)
-          return c.json({ variables: AI_VARIABLES, positions: ['instructions'], missing: null })
+          return c.json({
+            variables: AI_VARIABLES,
+            tools: BUILTIN_AI_TOOLS,
+            positions: ['instructions'],
+            missing: null,
+          })
         }
         if (action === 'property-rules') {
           if (c.req.method === 'GET')
