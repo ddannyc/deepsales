@@ -135,3 +135,19 @@ affected validation passes: `pnpm format:check`, `pnpm lint`, `pnpm typecheck`,
 `pnpm test`, plus relevant integration, E2E, and `pnpm build` checks. For
 database changes, the reviewed forward migration and operational notes are
 included. Inspect the final diff before handoff.
+
+## Agent skills
+
+### Issue tracker
+
+Before reading or updating GitHub issues and specs for `ddannyc/deepsales`,
+read `docs/agents/issue-tracker.md` and use `gh`.
+
+### Triage labels
+
+Before assigning triage labels, read `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Before changing domain terminology or architectural decisions, read
+`docs/agents/domain.md`; use `docs/architecture/CONTEXT.md` and `docs/adr/`.

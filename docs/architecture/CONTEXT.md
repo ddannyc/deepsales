@@ -123,6 +123,26 @@ Ownership of a conversation by one `Member`.
 
 A conversation has at most one current assignee.
 
+### Conversation Context
+
+The prior customer, AI, and human messages within the current Conversation that give meaning to subsequent replies. This term is distinct from Customer Memory and structured customer properties; the current-context feature does not include other Conversations or cross-channel history.
+
+### Customer Memory
+
+A persistent summary of a customer's prior communications within one Workspace, shared across Conversations, AI Members, and channel identities explicitly linked to that Customer. This term is distinct from current Conversation Context and structured customer properties.
+
+### Customer Property
+
+A named, typed piece of structured information about a Customer, distinct from free-form Customer Memory. Conversation-scoped properties describe one service episode rather than the customer's persistent profile.
+
+### Follow-up Rule
+
+A configured condition for an AI Member to contact eligible customers proactively after a specified delay, with optional instructions and actions. A follow-up is distinct from responding to a new customer message.
+
+### Single-turn Skip
+
+An AI decision to provide no customer-visible reply for the current input while leaving later replies eligible. It is distinct from a persistent stop and from transferring ownership to a human.
+
 ### queue_reason
 Why an unassigned conversation is currently queued.
 
