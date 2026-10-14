@@ -45,9 +45,11 @@ type Plan = {
 }
 type Detail = {
   campaign: Plan
+  nextRunBefore: string | null
   runs: {
     id: string
     scheduledAt: string
+    nextRecipientOrdinal: number | null
     recipients: {
       id: string
       channelIdentityId: string
@@ -77,6 +79,16 @@ const labels: Record<string, string> = {
   UNKNOWN: '结果不明',
   PENDING: '等待发送',
   SENT: '发送接口已接受',
+  SEND_NOT_PERMITTED: '渠道、成员权限或消息窗口不允许发送',
+  CAMPAIGN_NOT_PERMITTED: '渠道或成员权限已变化',
+  TRANSLATION_FAILED: '翻译失败，未发送',
+  TRANSLATION_RESULT_UNKNOWN: '翻译结果不明，已暂停',
+  QUOTA_EXHAUSTED: 'AI 用量已达限额，未发送',
+  MEDIA_UNAVAILABLE: '素材已不可用',
+  NO_CONVERSATION: '没有可用的历史会话',
+  FACEBOOK_DELIVERY_FAILED: '提供方拒绝了发送',
+  AMBIGUOUS_DELIVERY: '发送结果不明，请先核实',
+  REPLY_WINDOW_CLOSED: '普通消息窗口已关闭',
 }
 const initialBlock = () => ({ id: crypto.randomUUID(), text: '' })
 
@@ -118,6 +130,7 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
   const [assets, setAssets] = useState<{ id: string; title: string; kind: string }[]>([])
   const [templates, setTemplates] = useState<{ id: string; title: string; text: string }[]>([])
   const [name, setName] = useState('')
+  const [editingId, setEditingId] = useState<string>()
   const [channelId, setChannelId] = useState('none')
   const [filters, setFilters] = useState<InboxFilters>({ view: 'all-open' })
   const ready = useCallback((next?: InboxFilters) => {
@@ -139,6 +152,7 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
   const [interval, setInterval] = useState('1')
   const [detail, setDetail] = useState<Detail>()
   const [confirm, setConfirm] = useState<Plan>()
+  const [confirmAction, setConfirmAction] = useState<'execute' | 'cancel'>('execute')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [status, setStatus] = useState('')
@@ -230,19 +244,23 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
     setBlocks(blocks.map((current, i) => (i === index ? block : current)))
   if (!manager)
     return (
-      <main className="page">
+      <main className="workspace-page">
         <h1>群发计划</h1>
         <p>仅管理员可管理群发计划。</p>
       </main>
     )
   return (
-    <main className="page">
+    <main className="workspace-page">
       <header className="page-header">
         <div className="page-header-copy">
           <h1>群发计划</h1>
           <p>保存明确受众后单独执行。普通消息仅在当前获许可窗口内发送，不改变接待成员。</p>
         </div>
-        <Button variant="outline" disabled={busy} onClick={() => void act(load)}>
+        <Button
+          variant="outline"
+          disabled={busy}
+          onClick={() => void act(() => (detail ? refresh(detail.campaign.id) : load()))}
+        >
           刷新
         </Button>
       </header>
@@ -257,7 +275,20 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
       ) : (
         <>
           <section className="runtime-section" aria-labelledby="campaign-create">
-            <h2 id="campaign-create">新建计划</h2>
+            <h2 id="campaign-create">{editingId ? '编辑草稿' : '新建计划'}</h2>
+            {editingId && (
+              <Button
+                variant="ghost"
+                onClick={() => {
+                  setEditingId(undefined)
+                  setName('')
+                  setSelected([])
+                  setBlocks([initialBlock()])
+                }}
+              >
+                新建另一份草稿
+              </Button>
+            )}
             <div className="form-grid-two">
               <label htmlFor="campaign-name">
                 计划名称
@@ -318,6 +349,9 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
               预览受众
             </Button>
             <p>已明确选择 {selected.length} 个渠道身份。循环不会自动加入新客户。</p>
+            <Button variant="ghost" disabled={!selected.length} onClick={() => setSelected([])}>
+              清除已选身份
+            </Button>
             {audience.map((person) => (
               <label
                 key={person.id}
@@ -347,16 +381,14 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
             <h3>内容块</h3>
             {blocks.map((block, index) => (
               <div key={block.id} className="runtime-section">
-                <label htmlFor={`block-${block.id}`}>
-                  第 {index + 1} 块文字
-                  <Textarea
-                    id={`block-${block.id}`}
-                    value={block.text ?? ''}
-                    maxLength={2000}
-                    disabled={Boolean(block.assetId)}
-                    onChange={(e) => changeBlock(index, { id: block.id, text: e.target.value })}
-                  />
-                </label>
+                <label htmlFor={`block-${block.id}`}>第 {index + 1} 块文字</label>
+                <Textarea
+                  id={`block-${block.id}`}
+                  value={block.text ?? ''}
+                  maxLength={2000}
+                  disabled={Boolean(block.assetId)}
+                  onChange={(e) => changeBlock(index, { id: block.id, text: e.target.value })}
+                />
                 <Choice
                   label={`第 ${index + 1} 块素材`}
                   value={block.assetId ?? 'none'}
@@ -527,6 +559,10 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
             <Button
               disabled={
                 busy ||
+                Boolean(
+                  editingId &&
+                    plans.some((plan) => plan.id === editingId && plan.status !== 'DRAFT'),
+                ) ||
                 !name.trim() ||
                 !selected.length ||
                 channelId === 'none' ||
@@ -535,7 +571,7 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
               onClick={() =>
                 void act(async () => {
                   const result = await request<{ campaign: Plan }>('/campaigns', 'POST', {
-                    id: crypto.randomUUID(),
+                    id: editingId ?? crypto.randomUUID(),
                     name,
                     channelId,
                     identityIds: selected,
@@ -554,6 +590,7 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
                           },
                   })
                   await refresh(result.campaign.id)
+                  setEditingId(result.campaign.id)
                   setStatus('草稿已保存，尚未发送。')
                 })
               }
@@ -573,7 +610,37 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
                   {labels[plan.status] ?? plan.status} · {plan.identityIds.length} 个身份
                 </span>
                 {plan.status === 'DRAFT' && (
-                  <Button disabled={busy} variant="outline" onClick={() => setConfirm(plan)}>
+                  <Button
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => {
+                      setEditingId(plan.id)
+                      setName(plan.name)
+                      setChannelId(plan.channelId)
+                      setSelected(plan.identityIds)
+                      setBlocks(plan.content)
+                      setSelectionMode(plan.selectionMode)
+                      setLanguage(plan.targetLanguage ?? 'none')
+                      setInterval(String(plan.intervalSeconds))
+                      setTiming(plan.calendar ? 'SCHEDULED' : 'NOW')
+                      setLocalTime(plan.calendar?.localTime ?? '')
+                      setTimeZone(plan.calendar?.timeZone ?? 'UTC')
+                      setRepeat(plan.calendar?.repeat ?? 'NONE')
+                      setMaxRuns(String(plan.calendar?.maxRuns ?? 10))
+                    }}
+                  >
+                    编辑草稿
+                  </Button>
+                )}
+                {plan.status === 'DRAFT' && (
+                  <Button
+                    disabled={busy}
+                    variant="outline"
+                    onClick={() => {
+                      setConfirmAction('execute')
+                      setConfirm(plan)
+                    }}
+                  >
                     执行计划
                   </Button>
                 )}
@@ -609,12 +676,10 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
                   <Button
                     disabled={busy}
                     variant="ghost"
-                    onClick={() =>
-                      void act(async () => {
-                        await request(`/campaigns/${plan.id}/cancel`, 'POST', {})
-                        await refresh(plan.id)
-                      })
-                    }
+                    onClick={() => {
+                      setConfirmAction('cancel')
+                      setConfirm(plan)
+                    }}
                   >
                     取消后续发送
                   </Button>
@@ -640,14 +705,71 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
                     <p key={person.id}>
                       身份 …{person.channelIdentityId.slice(-6)}：
                       {labels[person.state] ?? person.state}
-                      {person.reason && ` · ${person.reason}`}
+                      {person.reason &&
+                        ` · ${labels[person.reason] ?? '发送未完成，请检查渠道和素材状态。'}`}
                       {person.messages.map((m) => (
                         <span key={m.id}> · {labels[m.state] ?? m.state}</span>
                       ))}
                     </p>
                   ))}
+                  {run.nextRecipientOrdinal !== null && (
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() =>
+                        void act(async () => {
+                          const more = await request<Detail>(
+                            `/campaigns/${detail.campaign.id}?runId=${run.id}&afterOrdinal=${run.nextRecipientOrdinal}`,
+                          )
+                          const next = more.runs[0]
+                          if (!next) throw new Error('此轮次已不可用，请刷新。')
+                          setDetail((current) =>
+                            current?.campaign.id === detail.campaign.id
+                              ? {
+                                  ...current,
+                                  runs: current.runs.map((item) =>
+                                    item.id === run.id
+                                      ? {
+                                          ...next,
+                                          recipients: [...item.recipients, ...next.recipients],
+                                        }
+                                      : item,
+                                  ),
+                                }
+                              : current,
+                          )
+                        })
+                      }
+                    >
+                      更多收件结果
+                    </Button>
+                  )}
                 </section>
               ))}
+              {detail.nextRunBefore && (
+                <Button
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() =>
+                    void act(async () => {
+                      const more = await request<Detail>(
+                        `/campaigns/${detail.campaign.id}?before=${encodeURIComponent(detail.nextRunBefore ?? '')}`,
+                      )
+                      setDetail((current) =>
+                        current?.campaign.id === detail.campaign.id
+                          ? {
+                              ...current,
+                              runs: [...current.runs, ...more.runs],
+                              nextRunBefore: more.nextRunBefore,
+                            }
+                          : current,
+                      )
+                    })
+                  }
+                >
+                  更早轮次
+                </Button>
+              )}
             </section>
           )}
         </>
@@ -660,28 +782,35 @@ export function Campaigns({ workspaceId, manager }: { workspaceId: string; manag
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>执行此群发计划？</AlertDialogTitle>
+            <AlertDialogTitle>
+              {confirmAction === 'execute' ? '执行此群发计划？' : '取消此计划的后续发送？'}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              {confirm?.name} 将按已保存内容及时间向 {confirm?.identityIds.length}{' '}
-              个明确选择的身份发送。每次发送前重新检查许可；不改变接待成员。
+              {confirmAction === 'execute'
+                ? `${confirm?.name} 将按已保存内容及时间向 ${confirm?.identityIds.length} 个明确选择的身份发送。每次发送前重新检查许可；不改变接待成员。`
+                : `${confirm?.name} 的未提交收件项和未来轮次将取消。已合法提交的消息仍独立送达。`}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>保留草稿</AlertDialogCancel>
+            <AlertDialogCancel>
+              {confirmAction === 'execute' ? '保留草稿' : '保留计划'}
+            </AlertDialogCancel>
             <AlertDialogAction
               disabled={busy}
               onClick={() => {
                 const plan = confirm
                 if (plan)
                   void act(async () => {
-                    await request(`/campaigns/${plan.id}/execute`, 'POST', {})
+                    await request(`/campaigns/${plan.id}/${confirmAction}`, 'POST', {})
                     setConfirm(undefined)
                     await refresh(plan.id)
-                    setStatus('计划已提交执行。')
+                    setStatus(
+                      confirmAction === 'execute' ? '计划已提交执行。' : '计划后续发送已取消。',
+                    )
                   })
               }}
             >
-              确认执行计划
+              {confirmAction === 'execute' ? '确认执行计划' : '确认取消后续发送'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
