@@ -3716,7 +3716,19 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           }),
         )
         if (selected.kind === 'BLOCKED') {
-          await publishAiReplyResult(env, claimed, selected.guard)
+          let blocked = selected.guard
+          if (
+            blocked?.kind === 'HANDOFF_REQUIRED' ||
+            blocked?.kind === 'CUSTOM_HANDOFF_CHECK_REQUIRED'
+          ) {
+            blocked = await commitReply({ runId: claimed.id, text: '', stopCheckOnly: true })
+            if (blocked?.kind === 'CONTINUE')
+              await withDatabase(env, (db) => cancelAiToolAuthorizationRun(db, claimed.id))
+          }
+          await publishAiReplyResult(env, claimed, blocked)
+          await withDatabase(env, (db) =>
+            finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+          )
           queueMessage.ack()
           continue
         }

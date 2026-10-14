@@ -86,6 +86,125 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it.each(['unmatched', 'invalid', 'takeover', 'input', 'revoked'] as const)(
+    'keeps skill matching bounded and rechecks live authorization (%s)',
+    async (mode) => {
+      const f = await createFixture(db)
+      const identity = {
+        workspaceId: f.workspaceId,
+        memberId: f.aiMemberId,
+        actingUserId: f.ownerId,
+      }
+      const skill = {
+        id: crypto.randomUUID(),
+        name: 'Controlled',
+        condition: 'Setup help',
+        instructions: 'ONLY_SELECTED [[tool:record]]',
+      }
+      await updateAiMemberConfig(db, {
+        ...identity,
+        skills: [skill],
+        replyWaitEnabled: false,
+        instructions: 'ORDINARY_RESPONSE',
+      })
+      await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+      const received = await receiveContextInput(db, f, 'Help with setup')
+      const assigned = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: received.conversationId,
+      })
+      if (!assigned.aiResponseRunId) throw new Error('Missing run')
+      let generations = 0
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: unknown, init?: RequestInit) => {
+          if (String(url).endsWith('/embeddings'))
+            return Response.json({ data: [{ index: 0, embedding: vector() }] })
+          const classifier = String(init?.body).includes('skill_conditions')
+          generations++
+          if (classifier && mode === 'takeover')
+            await takeOverConversation(db, {
+              workspaceId: f.workspaceId,
+              conversationId: received.conversationId,
+              actingUserId: f.ownerId,
+            })
+          if (classifier && mode === 'input') await receiveContextInput(db, f, 'A newer question')
+          if (!classifier && mode === 'unmatched') {
+            expect(String(init?.body)).toContain('ORDINARY_RESPONSE')
+            expect(String(init?.body)).not.toContain('ONLY_SELECTED')
+          }
+          if (!classifier && mode === 'revoked') {
+            await updateAiMemberConfig(db, { ...identity, skills: [] })
+            await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+          }
+          return Response.json({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    decision: 'ANSWER',
+                    response: classifier ? 'Classified.' : 'Ordinary reply.',
+                    handoffReason: null,
+                    containsBusinessFacts: false,
+                    usedChunkIds: [],
+                    ...(classifier
+                      ? {
+                          matchedSkillIds:
+                            mode === 'unmatched'
+                              ? []
+                              : [mode === 'invalid' ? crypto.randomUUID() : skill.id],
+                        }
+                      : mode === 'revoked'
+                        ? { toolCalls: [{ tool: 'record', arguments: { text: 'Must not write' } }] }
+                        : {}),
+                  }),
+                },
+              },
+            ],
+          })
+        }),
+      )
+      await handleAiResponseBatch(
+        batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+        environment(),
+      )
+      const replies = await db
+        .select()
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        )
+      if (mode === 'unmatched') {
+        expect(replies.map((reply) => reply.text)).toEqual(['Ordinary reply.'])
+        expect(generations).toBe(2)
+      } else if (mode === 'invalid') {
+        expect(replies.map((reply) => reply.text)).toEqual([
+          "I'll connect you with a human teammate. Please wait.",
+        ])
+        expect(generations).toBe(1)
+        const [run] = await db
+          .select()
+          .from(aiResponseRun)
+          .where(eq(aiResponseRun.id, assigned.aiResponseRunId))
+        expect(run).toMatchObject({ state: 'FAILED', failureCode: 'INVALID_OUTPUT' })
+      } else {
+        expect(replies).toEqual([])
+        if (mode !== 'revoked') expect(generations).toBe(1)
+      }
+      expect(
+        (
+          await listInternalNotes(db, {
+            workspaceId: f.workspaceId,
+            userId: f.ownerId,
+            conversationId: received.conversationId,
+          })
+        ).notes,
+      ).toHaveLength(0)
+    },
+  )
   it('executes only the first published matching skill with its authorized tools and stable version', async () => {
     const f = await createFixture(db)
     const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
