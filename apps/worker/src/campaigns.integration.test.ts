@@ -1,3 +1,4 @@
+import { isolateOutboundRecoveryTest } from './outbound.test-fixture'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
@@ -64,6 +65,7 @@ describe.skipIf(!connectionString)('ordinary campaigns', () => {
   })
 
   it('saves an explicit deduplicated audience without sending, then executes once without taking ownership', async () => {
+    await isolateOutboundRecoveryTest(pool)
     const f = await fixture()
     const id = crypto.randomUUID()
     const created = await f.call('', 'POST', {

@@ -1,3 +1,4 @@
+import { isolateOutboundRecoveryTest } from './outbound.test-fixture'
 import { randomUUID } from 'node:crypto'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -169,6 +170,7 @@ describe.skipIf(!connectionString)('outbound Worker consumer', () => {
   })
 
   it('requeues unclaimed committed messages during scheduled recovery', async () => {
+    await isolateOutboundRecoveryTest(pool)
     const fixture = await createFixture(db)
     const send = vi.fn().mockResolvedValue(undefined)
 
