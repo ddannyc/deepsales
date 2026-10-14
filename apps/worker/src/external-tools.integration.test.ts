@@ -172,6 +172,33 @@ describe.skipIf(!process.env.DATABASE_URL)('External API tool configuration', ()
       expect(f.outbound).not.toHaveBeenCalled()
     },
   )
+  it('persists failed simulated actions when model arguments override a fixed target', async () => {
+    const f = await readyExternalWrite()
+    const external = vi.fn(async () => Response.json({ status: 'forbidden' }))
+    const normal = toolFetch(f.toolId, external)
+    vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+      const response = await normal(url, init)
+      if (!String(url).endsWith('/chat/completions')) return response
+      const payload = (await response.json()) as { choices: { message: { content: string } }[] }
+      const decision = JSON.parse(payload.choices[0].message.content)
+      decision.toolCalls[0].arguments.values = { recordId: 'unapproved-target' }
+      payload.choices[0].message.content = JSON.stringify(decision)
+      return Response.json(payload)
+    })
+    const id = crypto.randomUUID()
+    await f.call('test', 'POST', { id, source: 'PUBLISHED', text: 'Try the configured tool.' })
+    const [operation] = await db.select().from(aiOperation).where(eq(aiOperation.id, id))
+    expect(operation).toMatchObject({ state: 'FAILED', failureCode: 'EXTERNAL_ARGUMENTS_INVALID' })
+    const [action] = await db.select().from(aiToolAction).where(eq(aiToolAction.operationId, id))
+    expect(action).toMatchObject({
+      simulated: true,
+      state: 'FAILED',
+      failureCode: 'EXTERNAL_ARGUMENTS_INVALID',
+      result: null,
+    })
+    expect(external).not.toHaveBeenCalled()
+    expect(f.outbound).not.toHaveBeenCalled()
+  })
   it('retains the same three mixed tool slots across final generation and replay', async () => {
     const f = await readyExternalWrite()
     await updateAiMemberConfig(db, {
