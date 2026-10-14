@@ -3716,7 +3716,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           }),
         )
         if (selected.kind === 'BLOCKED') {
-          let blocked = selected.guard
+          let blocked: Awaited<ReturnType<typeof commitAiResponse>> = selected.guard
           if (
             blocked?.kind === 'HANDOFF_REQUIRED' ||
             blocked?.kind === 'CUSTOM_HANDOFF_CHECK_REQUIRED'
