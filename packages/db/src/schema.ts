@@ -1000,6 +1000,49 @@ export const aiResponseRun = pgTable(
   ],
 )
 
+export const aiExternalPlugin = pgTable('ai_external_plugin', {
+  id: uuid().primaryKey(),
+  workspaceId: uuid('workspace_id').notNull().references(() => workspace.id, { onDelete: 'cascade' }),
+  memberId: uuid('member_id').notNull().references(() => member.id, { onDelete: 'cascade' }),
+  channelId: uuid('channel_id').notNull().references(() => channel.id, { onDelete: 'cascade' }),
+  name: text().notNull(),
+  origin: text().notNull(),
+  enabled: boolean().default(false).notNull(),
+  revision: integer().default(1).notNull(),
+  auth: text().$type<'NONE' | 'BEARER'>().notNull(),
+  encryptedCredential: text('encrypted_credential'),
+  credentialIv: text('credential_iv'),
+  credentialKeyVersion: text('credential_key_version'),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, t => [
+  index('ai_external_plugin_member_idx').on(t.workspaceId, t.memberId),
+  check('ai_external_plugin_valid', sql`${t.revision} > 0 and ${t.auth} in ('NONE','BEARER') and ((${t.encryptedCredential} is null and ${t.credentialIv} is null and ${t.credentialKeyVersion} is null) or (${t.encryptedCredential} is not null and ${t.credentialIv} is not null and ${t.credentialKeyVersion} is not null))`),
+])
+
+export const aiExternalTool = pgTable('ai_external_tool', {
+  id: uuid().primaryKey(),
+  pluginId: uuid('plugin_id').notNull().references(() => aiExternalPlugin.id, { onDelete: 'cascade' }),
+  name: text().notNull(),
+  description: text().notNull(),
+  enabled: boolean().default(false).notNull(),
+  revision: integer().default(1).notNull(),
+  method: text().$type<import('./ai-external-contracts').ExternalRequestDefinition['method']>().notNull(),
+  path: text().notNull(),
+  effect: text().$type<'READ' | 'WRITE'>().notNull(),
+  inputs: jsonb().$type<import('./ai-external-contracts').ExternalInput[]>().default([]).notNull(),
+  fixed: jsonb().$type<import('./ai-external-contracts').ExternalFixed[]>().default([]).notNull(),
+  output: jsonb().$type<import('./ai-external-contracts').ExternalOutput[]>().notNull(),
+  objectScope: text('object_scope').notNull(),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, t => [
+  index('ai_external_tool_plugin_idx').on(t.pluginId),
+  check('ai_external_tool_valid', sql`${t.revision} > 0 and ${t.effect} in ('READ','WRITE') and ${t.method} in ('GET','POST','PUT','PATCH','DELETE')`),
+])
+
 export const aiToolAction = pgTable(
   'ai_tool_action',
   {
