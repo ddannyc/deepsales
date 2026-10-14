@@ -1,5 +1,10 @@
 # AI follow-up rules
 
+Event history and audience preview require the intersection of the requesting
+human's and AI member's current active channel grants. Manager roles do not imply
+access to every channel. Preview property/tag facts obey the same source-channel
+intersection; hidden-channel facts cannot determine a visible audience match.
+
 Follow-up rules take effect immediately and independently of AI draft publication.
 Managers can create, edit, enable, disable and delete rules. Each edit increments
 the revision and starts a new effective interval; anchors from before that interval

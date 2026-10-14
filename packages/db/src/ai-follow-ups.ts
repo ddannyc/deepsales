@@ -23,6 +23,7 @@ import {
   memberChannelAccess,
   channel,
   workspace,
+  workspaceUserAccess,
   type AiStopCondition,
 } from './schema'
 
@@ -40,47 +41,74 @@ export type FollowUpRuleInput = Identity & {
   groups: AiStopCondition[][]
 }
 
+async function visibleFollowUpChannels(db: Database | Tx, input: Identity) {
+  const rows = await db
+    .select({ id: channel.id })
+    .from(member)
+    .innerJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
+    .innerJoin(memberChannelAccess, eq(memberChannelAccess.memberId, member.id))
+    .innerJoin(channel, eq(channel.id, memberChannelAccess.channelId))
+    .where(
+      and(
+        eq(workspaceUserAccess.workspaceId, input.workspaceId),
+        eq(workspaceUserAccess.userId, input.actingUserId),
+        eq(member.status, 'ACTIVE'),
+        eq(channel.workspaceId, input.workspaceId),
+        eq(channel.status, 'ACTIVE'),
+        sql`exists (select 1 from member_channel_access ai_grant where ai_grant.member_id = ${input.memberId} and ai_grant.channel_id = ${channel.id})`,
+      ),
+    )
+  return rows.map((row) => row.id)
+}
+
 export async function listAiFollowUpRules(db: Database, input: Identity) {
-  await getAiMemberConfig(db, input)
-  const rules = await db
-    .select()
-    .from(aiFollowUpRule)
-    .where(
-      and(
-        eq(aiFollowUpRule.workspaceId, input.workspaceId),
-        eq(aiFollowUpRule.memberId, input.memberId),
-        isNull(aiFollowUpRule.deletedAt),
-      ),
-    )
-    .orderBy(asc(aiFollowUpRule.createdAt), asc(aiFollowUpRule.id))
-  const events = await db
-    .select({
-      id: aiFollowUpEvent.id,
-      ruleId: aiFollowUpEvent.ruleId,
-      conversationId: aiFollowUpEvent.conversationId,
-      triggeredAt: aiFollowUpEvent.triggeredAt,
-      dueAt: aiFollowUpEvent.dueAt,
-      state: aiResponseRun.state,
-      failureCode: aiResponseRun.failureCode,
-      operationState: aiOperation.state,
-      outputMessageId: aiResponseRun.outputMessageId,
-      deliveryState: message.deliveryState,
-      deliveryFailureCode: message.failureCode,
-    })
-    .from(aiFollowUpEvent)
-    .innerJoin(aiFollowUpRule, eq(aiFollowUpRule.id, aiFollowUpEvent.ruleId))
-    .innerJoin(aiResponseRun, eq(aiResponseRun.id, aiFollowUpEvent.id))
-    .leftJoin(aiOperation, eq(aiOperation.id, aiFollowUpEvent.id))
-    .leftJoin(message, eq(message.id, aiResponseRun.outputMessageId))
-    .where(
-      and(
-        eq(aiFollowUpRule.workspaceId, input.workspaceId),
-        eq(aiFollowUpRule.memberId, input.memberId),
-      ),
-    )
-    .orderBy(desc(aiFollowUpEvent.triggeredAt))
-    .limit(100)
-  return { rules, events }
+  return db.transaction(async (tx) => {
+    await getAiMemberConfig(tx, input)
+    await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
+    const channels = await visibleFollowUpChannels(tx, input)
+    const rules = await tx
+      .select()
+      .from(aiFollowUpRule)
+      .where(
+        and(
+          eq(aiFollowUpRule.workspaceId, input.workspaceId),
+          eq(aiFollowUpRule.memberId, input.memberId),
+          isNull(aiFollowUpRule.deletedAt),
+        ),
+      )
+      .orderBy(asc(aiFollowUpRule.createdAt), asc(aiFollowUpRule.id))
+    const events = await tx
+      .select({
+        id: aiFollowUpEvent.id,
+        ruleId: aiFollowUpEvent.ruleId,
+        conversationId: aiFollowUpEvent.conversationId,
+        triggeredAt: aiFollowUpEvent.triggeredAt,
+        dueAt: aiFollowUpEvent.dueAt,
+        state: aiResponseRun.state,
+        failureCode: aiResponseRun.failureCode,
+        operationState: aiOperation.state,
+        outputMessageId: aiResponseRun.outputMessageId,
+        deliveryState: message.deliveryState,
+        deliveryFailureCode: message.failureCode,
+      })
+      .from(aiFollowUpEvent)
+      .innerJoin(aiFollowUpRule, eq(aiFollowUpRule.id, aiFollowUpEvent.ruleId))
+      .innerJoin(aiResponseRun, eq(aiResponseRun.id, aiFollowUpEvent.id))
+      .innerJoin(conversation, eq(conversation.id, aiFollowUpEvent.conversationId))
+      .innerJoin(channelIdentity, eq(channelIdentity.id, conversation.channelIdentityId))
+      .leftJoin(aiOperation, eq(aiOperation.id, aiFollowUpEvent.id))
+      .leftJoin(message, eq(message.id, aiResponseRun.outputMessageId))
+      .where(
+        and(
+          eq(aiFollowUpRule.workspaceId, input.workspaceId),
+          eq(aiFollowUpRule.memberId, input.memberId),
+          inArray(channelIdentity.channelId, channels),
+        ),
+      )
+      .orderBy(desc(aiFollowUpEvent.triggeredAt))
+      .limit(100)
+    return { rules, events }
+  })
 }
 
 export async function saveAiFollowUpRule(db: Database, input: FollowUpRuleInput) {
@@ -474,6 +502,7 @@ export async function previewAiFollowUpAudience(
     } catch {
       throw new AiMemberError('INVALID_CONFIGURATION')
     }
+    const channels = await visibleFollowUpChannels(tx, input)
     const current = await tx
       .select({ id: conversation.id, customerId: channelIdentity.customerId })
       .from(conversation)
@@ -490,6 +519,7 @@ export async function previewAiFollowUpAudience(
           eq(conversation.workspaceId, input.workspaceId),
           eq(conversation.assigneeMemberId, input.memberId),
           eq(conversation.status, 'OPEN'),
+          inArray(channelIdentity.channelId, channels),
         ),
       )
       .orderBy(asc(conversation.id))
@@ -505,6 +535,7 @@ export async function previewAiFollowUpAudience(
             conversationId: row.id,
             customerId: row.customerId,
             memberId: input.memberId,
+            sourceChannelIds: channels,
           },
           { ...EMPTY_AI_STOP_RULES, groups },
         ))

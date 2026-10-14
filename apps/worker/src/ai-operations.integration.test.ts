@@ -2,6 +2,13 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   aiOperation,
+  aiFollowUpEvent,
+  customer,
+  channelIdentity,
+  message,
+  transferConversation,
+  takeOverConversation,
+  customerPropertyValue,
   aiProviderAttempt,
   aiTestBatchItem,
   bootstrapWorkspace,
@@ -62,6 +69,172 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('intersects partial administrator and AI channels for follow-up events, preview and condition sources', async () => {
+    const f = await fixture()
+    const [human] = await db
+      .select()
+      .from(member)
+      .where(
+        eq(
+          member.workspaceUserAccessId,
+          (
+            await db
+              .select()
+              .from(workspaceUserAccess)
+              .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+          )[0].id,
+        ),
+      )
+    const channels = await db
+      .insert(channel)
+      .values(
+        ['A', 'B'].map((displayName) => ({
+          workspaceId: f.workspaceId,
+          provider: 'FACEBOOK_MESSENGER' as const,
+          displayName,
+        })),
+      )
+      .returning()
+    const grants = (memberId: string, channelIds: string[]) =>
+      setMemberChannelAccess(db, {
+        workspaceId: f.workspaceId,
+        actingUserId: f.userId,
+        memberId,
+        channelIds,
+      })
+    await grants(
+      human.id,
+      channels.map((c) => c.id),
+    )
+    await grants(
+      f.aiId,
+      channels.map((c) => c.id),
+    )
+    await publishAiMemberConfig(db, {
+      workspaceId: f.workspaceId,
+      memberId: f.aiId,
+      actingUserId: f.userId,
+      providerConfigured: true,
+    })
+    const ruleId = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/follow-ups`, 'POST', {
+          id: ruleId,
+          name: 'Follow-up',
+          enabled: true,
+          timer: 'AI_ASSIGNMENT',
+          delaySeconds: 60,
+          instructions: '',
+          groups: [],
+        })
+      ).status,
+    ).toBe(201)
+    const [person] = await db.insert(customer).values({ workspaceId: f.workspaceId }).returning()
+    const ids: string[] = []
+    for (const ch of channels) {
+      const [identity] = await db
+        .insert(channelIdentity)
+        .values({
+          workspaceId: f.workspaceId,
+          customerId: person.id,
+          channelId: ch.id,
+          externalUserId: crypto.randomUUID(),
+        })
+        .returning()
+      const [conv] = await db
+        .insert(conversation)
+        .values({
+          workspaceId: f.workspaceId,
+          channelIdentityId: identity.id,
+          queueReason: 'NEW_CONVERSATION',
+          routingQueuedAt: new Date(),
+        })
+        .returning()
+      const [inbound] = await db
+        .insert(message)
+        .values({
+          conversationId: conv.id,
+          channelId: ch.id,
+          direction: 'INBOUND',
+          senderType: 'CUSTOMER',
+          messageType: 'TEXT',
+          text: 'Hello',
+        })
+        .returning()
+      await db
+        .update(conversation)
+        .set({ lastCustomerMessageId: inbound.id, lastCustomerMessageAt: inbound.createdAt })
+        .where(eq(conversation.id, conv.id))
+      await takeOverConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: conv.id,
+        actingUserId: f.userId,
+      })
+      const assigned = await transferConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: conv.id,
+        actingUserId: f.userId,
+        targetMemberId: f.aiId,
+      })
+      if (!assigned.aiResponseRunId || !assigned.assignmentId)
+        throw new Error('Missing fixture assignment')
+      await db.insert(aiFollowUpEvent).values({
+        id: assigned.aiResponseRunId,
+        ruleId,
+        conversationId: conv.id,
+        ruleRevision: 1,
+        anchorId: assigned.assignmentId,
+        anchorAt: new Date(),
+        dueAt: new Date(),
+      })
+      ids.push(conv.id)
+    }
+    await db
+      .update(workspaceUserAccess)
+      .set({ role: 'ADMIN' })
+      .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+    await grants(human.id, [channels[0].id])
+    const events = (await (await f.call(`/${f.aiId}/follow-ups`)).json()) as {
+      events: { conversationId: string }[]
+    }
+    expect.soft(events.events.map((e) => e.conversationId)).toEqual([ids[0]])
+    expect
+      .soft(await (await f.call(`/${f.aiId}/follow-ups/preview`, 'POST', { groups: [] })).json())
+      .toMatchObject({ matches: [{ conversationId: ids[0] }], scanned: 1 })
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Customer need',
+        level: 'CUSTOMER',
+        type: 'TEXT',
+      })
+      .returning()
+    await db.insert(customerPropertyValue).values({
+      customerId: person.id,
+      definitionId: definition.id,
+      sourceChannelId: channels[1].id,
+      value: 'yes',
+    })
+    const groups = [[{ kind: 'PROPERTY', definitionId: definition.id, value: 'yes' }]]
+    expect(
+      await (await f.call(`/${f.aiId}/follow-ups/preview`, 'POST', { groups })).json(),
+    ).toMatchObject({ matches: [], scanned: 1 })
+    await grants(
+      human.id,
+      channels.map((c) => c.id),
+    )
+    const expanded = (await (
+      await f.call(`/${f.aiId}/follow-ups/preview`, 'POST', { groups })
+    ).json()) as { matches: unknown[] }
+    expect(expanded.matches).toHaveLength(2)
+    await grants(f.aiId, [channels[0].id])
+    const restrictedAi = (await (await f.call(`/${f.aiId}/follow-ups`)).json()) as {
+      events: { conversationId: string }[]
+    }
+    expect(restrictedAi.events.map((e) => e.conversationId)).toEqual([ids[0]])
+  })
   it('starts follow-up rules empty and saves a versioned immediate rule', async () => {
     const f = await fixture()
     const root = `/${f.aiId}/follow-ups`
