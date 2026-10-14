@@ -13,6 +13,11 @@ import {
   validateAiCollectedProperties,
 } from './ai-property-rules'
 import { type AiConversationContextMessage, normalizeAiReplyLanguage } from './ai-responses'
+import {
+  aiSelectedSkillInstructions,
+  aiSkillVariableInstructions,
+  selectedAiSkillId,
+} from './ai-skills'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES } from './ai-stop'
 import { readAiTestTagRules } from './ai-tag-rules'
 import { readAiToolSearchChunks } from './ai-tool-actions'
@@ -769,7 +774,7 @@ export async function createAiTest(
       kind: 'TEST',
       variableInput: await readAiTestVariableInput(tx, {
         workspaceId: input.workspaceId,
-        instructions: snapshot.instructions,
+        instructions: aiSkillVariableInstructions(snapshot),
         timeZone: snapshot.timeZone ?? 'UTC',
         text: input.text,
         customer: testContext?.customer,
@@ -827,7 +832,12 @@ async function authorizeTestSearch(tx: Transaction, input: TestSearchInput, allo
     if (error instanceof AiMemberError) return null
     throw error
   }
-  validateAiToolCalls(record.snapshot?.instructions ?? '', [input.call])
+  validateAiToolCalls(
+    record.snapshot
+      ? aiSelectedSkillInstructions(record.snapshot, selectedAiSkillId(record.output))
+      : '',
+    [input.call],
+  )
   const context = (record.output as { testContext?: AiTestContext } | null)?.testContext
   if (context) {
     const session = await lockTestSession(tx, { ...input, sessionId: context.sessionId })
@@ -964,7 +974,9 @@ export async function recordAiTestResult(
   await db.transaction(async (tx) => {
     const [record] = await tx.select().from(aiOperation).where(eq(aiOperation.id, input.id))
     validateAiToolCalls(
-      record?.snapshot?.instructions ?? '',
+      record?.snapshot
+        ? aiSelectedSkillInstructions(record.snapshot, selectedAiSkillId(record.output))
+        : '',
       (input.actions ?? []).map((a) => a.call),
     )
     if (record)
@@ -1063,6 +1075,7 @@ export async function recordAiTestResult(
           tagRules,
           variableInput: (record?.output as { variableInput?: AiVariableInput } | null)
             ?.variableInput,
+          skillSelection: (record?.output as { skillSelection?: unknown } | null)?.skillSelection,
         },
         chunkIds: input.chunkIds,
         state: 'COMPLETED',
