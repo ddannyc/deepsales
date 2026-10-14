@@ -13,6 +13,7 @@ import {
   publishAiMemberConfig,
   takeOverConversation,
   aiOperation,
+  aiProviderAttempt,
   createAiMember,
   createDatabase,
   member,
@@ -30,13 +31,14 @@ import { app, handleAiResponseBatch } from './index'
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
 const db = createDatabase(pool)
 const origin = 'https://tools.example.com'
+const replacementOrigin = 'https://replacement.example.com'
 const env = {
   APP_URL: 'http://localhost:8787',
   AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   BETTER_AUTH_SECRET: 'test-only-secret-that-is-at-least-32-characters',
   HYPERDRIVE: { connectionString: process.env.DATABASE_URL },
   TOKEN_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-  AI_TOOL_ALLOWED_ORIGINS: JSON.stringify([origin]),
+  AI_TOOL_ALLOWED_ORIGINS: JSON.stringify([origin, replacementOrigin]),
   AI_API_KEY: 'test-key',
   AI_BASE_URL: 'https://ai.example.com',
   EMBEDDING_PROVIDER: 'alibaba',
@@ -57,6 +59,122 @@ describe.skipIf(!process.env.DATABASE_URL)('External API tool configuration', ()
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it.each(['same-origin', 'changed-origin', 'explicit-replacement'] as const)(
+    'binds retained credentials to their original provider: %s',
+    async (change) => {
+      const f = await readyExternalWrite()
+      const nextOrigin = change === 'same-origin' ? origin : replacementOrigin
+      const saved = await f.call('plugins', 'POST', {
+        id: f.tool.pluginId,
+        revision: 1,
+        name: 'Updated API',
+        channelId: f.channelId,
+        origin: nextOrigin,
+        enabled: true,
+        auth: 'BEARER',
+        ...(change === 'explicit-replacement' ? { credential: 'replacement-credential' } : {}),
+      })
+      expect(saved.status).toBe(201)
+      expect(await saved.json()).toMatchObject({ configured: change !== 'changed-origin' })
+      const external = vi.fn(async (url: unknown, init?: RequestInit) => {
+        expect(String(url)).toBe(`${nextOrigin}/record`)
+        expect(new Headers(init?.headers).get('Authorization')).toBe(
+          change === 'explicit-replacement'
+            ? 'Bearer replacement-credential'
+            : 'Bearer fixture-private-credential',
+        )
+        return Response.json({ status: 'recorded' })
+      })
+      const normal = toolFetch(f.toolId, async () => Response.json({ status: 'recorded' }))
+      vi.stubGlobal('fetch', (url: unknown, init?: RequestInit) =>
+        [origin, replacementOrigin].some((value) => String(url).startsWith(value))
+          ? external(url, init)
+          : normal(url, init),
+      )
+      await handleAiResponseBatch(f.batch, f.liveEnv)
+      expect(external).toHaveBeenCalledTimes(change === 'changed-origin' ? 0 : 1)
+    },
+  )
+  it('reuses successful receipts and debug IDs across JSONB argument key reordering', async () => {
+    const f = await readyExternalWrite()
+    expect(
+      (
+        await f.call('external-tools', 'POST', {
+          ...f.tool,
+          revision: 1,
+          inputs: [
+            { name: 'zz', type: 'number', location: 'body', required: true },
+            { name: 'a', type: 'number', location: 'body', required: true },
+          ],
+        })
+      ).status,
+    ).toBe(201)
+    const debugId = crypto.randomUUID()
+    const debug = await f.call(`external-tools/${f.toolId}/debug`, 'POST', {
+      id: debugId,
+      values: { zz: 1, a: 2 },
+    })
+    expect(debug.status).toBe(200)
+    const original = (await debug.json()) as { id: string }
+    const replay = await f.call(`external-tools/${f.toolId}/debug`, 'POST', {
+      id: debugId,
+      values: { a: 2, zz: 1 },
+    })
+    expect(replay.status).toBe(200)
+    expect(await replay.json()).toMatchObject({ id: original.id })
+    const originalOrderReplay = await f.call(`external-tools/${f.toolId}/debug`, 'POST', {
+      id: debugId,
+      values: { zz: 1, a: 2 },
+    })
+    expect(originalOrderReplay.status).toBe(200)
+    expect(await originalOrderReplay.json()).toMatchObject({ id: original.id })
+    expect(
+      (
+        await f.call(`external-tools/${f.toolId}/debug`, 'POST', {
+          id: debugId,
+          values: { a: 2, zz: 9 },
+        })
+      ).status,
+    ).toBe(400)
+    expect(
+      await db.select().from(aiToolAction).where(eq(aiToolAction.operationId, debugId)),
+    ).toHaveLength(1)
+    const external = vi.fn(async () => Response.json({ status: 'recorded' }))
+    const normal = toolFetch(f.toolId, external)
+    let finalAttempts = 0
+    vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+      const response = await normal(url, init)
+      if (!String(url).endsWith('/chat/completions')) return response
+      const payload = (await response.json()) as { choices: { message: { content: string } }[] }
+      const decision = JSON.parse(payload.choices[0].message.content)
+      if (decision.toolCalls) {
+        decision.toolCalls[0].arguments.values = { zz: 1, a: 2 }
+        payload.choices[0].message.content = JSON.stringify(decision)
+      } else if (++finalAttempts === 1) {
+        return new Response('', { status: 503 })
+      }
+      return Response.json(payload)
+    })
+    await handleAiResponseBatch(f.batch, f.liveEnv)
+    expect(external).toHaveBeenCalledOnce()
+    const [action] = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, f.runId))
+    expect(action).toMatchObject({ state: 'SUCCEEDED', attemptCount: 1 })
+    await db
+      .update(aiResponseRun)
+      .set({ scheduledFor: new Date(Date.now() - 1000) })
+      .where(eq(aiResponseRun.id, f.runId))
+    await db
+      .update(aiProviderAttempt)
+      .set({ retryAt: new Date(0) })
+      .where(eq(aiProviderAttempt.operationId, f.runId))
+    await handleAiResponseBatch(f.batch, f.liveEnv)
+    expect(external).toHaveBeenCalledOnce()
+    const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, f.runId))
+    expect(run.state).toBe('COMPLETED')
+    const operations = await db.select().from(aiOperation).where(eq(aiOperation.id, f.runId))
+    expect(operations).toHaveLength(1)
+    expect(operations[0]).toMatchObject({ state: 'COMPLETED', charged: true })
+  })
   it('never authorizes a tool from another matching but unselected skill', async () => {
     const f = await readyExternalWrite()
     const first = crypto.randomUUID(),

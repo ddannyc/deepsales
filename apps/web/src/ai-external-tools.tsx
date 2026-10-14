@@ -389,7 +389,8 @@ export function AiExternalTools({
                 />
               </label>
               <p className="field-description">
-                只显示是否已配置。留空保留当前凭据，保存后不会回显。
+                只显示是否已配置。同一 API
+                地址留空保留凭据；更换地址会清除旧凭据，请填写新凭据。保存后不会回显。
               </p>
               <label>
                 <input

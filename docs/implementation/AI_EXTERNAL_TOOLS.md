@@ -39,7 +39,10 @@ AES-256-GCM implementation, random 12-byte IVs and version `v1`. External
 credentials additionally bind authenticated data to workspace/plugin identity.
 Existing Facebook ciphertext remains compatible. Configuration reads return only
 `configured`, never plaintext, ciphertext, IV or key versions. Blank edits retain
-the credential; explicit clearing removes it. Replacing the encryption key is an
+the credential only while the origin is unchanged; changing origin clears the
+old credential unless an explicit replacement is supplied. The new provider never
+receives a retained credential from the previous origin. Explicit clearing also
+removes the credential. Replacing the encryption key is an
 operator migration: back up and re-encrypt existing channel tokens and tool
 credentials before switching keys. Changing the secret alone cannot decrypt old
 data; no automatic key rotation or credential migration is claimed.
@@ -65,7 +68,8 @@ alone do not establish remote object ownership.
 Each stable action has one durable ledger slot and at most one external dispatch.
 The existing ordinal range 0–2 covers built-ins and external tools together for
 the entire logical turn, including retries and final generation. Successful
-replays make no new provider request. An expired in-flight action becomes UNKNOWN,
+replays compare typed argument maps independently of JSON object key order and
+make no new provider request. An expired in-flight action becomes UNKNOWN,
 never a new dispatch. There is no generic automatic external retry or invented
 provider idempotency header. Unknown actions pause dependent generation, and
 outstanding UNKNOWN actions block further external actions in that Conversation,

@@ -4,6 +4,7 @@ import {
   type ExternalRequestDefinition,
   validateExternalDefinition,
   validateExternalObjectScope,
+  sameExternalArguments,
 } from './ai-external-contracts'
 import { reserveAiOperation } from './ai-operations'
 import type { Database } from './database'
@@ -110,7 +111,11 @@ export async function saveExternalPlugin(db: Database, input: ExternalPluginInpu
       await managerPlugin(tx, input, input.id, channels)
       if (input.revision !== existing.revision) throw new AiMemberError('INVALID_REQUEST')
     } else if (input.revision !== undefined) throw new AiMemberError('INVALID_REQUEST')
-    const credential = input.auth === 'NONE' ? null : input.credential
+    const credential =
+      input.auth === 'NONE' ||
+      (input.credential === undefined && existing && existing.origin !== input.origin)
+        ? null
+        : input.credential
     const values = {
       name: input.name.trim(),
       channelId: input.channelId,
@@ -281,7 +286,7 @@ export async function debugExternalTool(
       if (
         existing.tool !== `external:${tool.id}` ||
         existing.definitionRevision !== tool.revision ||
-        JSON.stringify(existing.arguments) !== JSON.stringify(input.values)
+        !sameExternalArguments(existing.arguments, input.values)
       )
         throw new AiMemberError('INVALID_REQUEST')
       return existing
