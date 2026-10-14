@@ -1,7 +1,11 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  aiOperation,
   bootstrapWorkspace,
+  changeCustomerIdentity,
+  channel,
+  channelIdentity,
   claimKnowledgeDocument,
   completeKnowledgeDocument,
   connectFacebookPages,
@@ -10,7 +14,9 @@ import {
   createDatabase,
   createInlineKnowledgeDocument,
   createKnowledgeBase,
+  customer,
   getAiBudget,
+  getAiDiagnostics,
   knowledgeChunk,
   member,
   message,
@@ -154,6 +160,109 @@ describe.skipIf(!connectionString)('message translation routes', () => {
     expect(original.text).toBe('你好')
   })
 
+  it.each(['ai', 'human', 'source', 'unlink', 'applied', 'missing'] as const)(
+    'withholds cached variable suggestions after %s authorization or source changes',
+    async (change) => {
+      const f = await fixture()
+      const ai = await suggestionAi(f)
+      const [identity] = await db
+        .select({ id: channelIdentity.id, customerId: channelIdentity.customerId })
+        .from(channelIdentity)
+        .innerJoin(conversation, eq(conversation.channelIdentityId, channelIdentity.id))
+        .where(eq(conversation.id, f.conversationId))
+      const [shared] = await db
+        .insert(channel)
+        .values({
+          workspaceId: f.identity.workspaceId,
+          provider: 'FACEBOOK_MESSENGER',
+          displayName: 'Shared support',
+        })
+        .returning()
+      await db.insert(channelIdentity).values({
+        workspaceId: f.identity.workspaceId,
+        customerId: identity.customerId,
+        channelId: shared.id,
+        externalUserId: crypto.randomUUID(),
+      })
+      await db
+        .update(customer)
+        .set({ email: 'morgan@example.test', profileSourceChannelIds: [shared.id] })
+        .where(eq(customer.id, identity.customerId))
+      for (const memberId of [ai.id, f.memberId])
+        await setMemberChannelAccess(db, {
+          ...f.identity,
+          memberId,
+          channelIds: [f.channelId, shared.id],
+        })
+      await updateAiMemberConfig(db, {
+        ...f.identity,
+        memberId: ai.id,
+        instructions: 'Use {{customer.email}}.',
+      })
+      await publishAiMemberConfig(db, { ...f.identity, memberId: ai.id, providerConfigured: true })
+      const calls = vi.fn(async (url: RequestInfo | URL) =>
+        String(url).endsWith('/embeddings')
+          ? Response.json({ data: [{ index: 0, embedding: ai.vector }] })
+          : providerResponse('Use morgan@example.test.'),
+      )
+      vi.stubGlobal('fetch', calls)
+      const input = { id: crypto.randomUUID(), aiMemberId: ai.id }
+      expect((await f.call('suggestions', input)).status).toBe(200)
+      expect((await f.call('suggestions', input)).status).toBe(200)
+      await expect(getAiDiagnostics(db, { ...f.identity, id: input.id })).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      })
+      const reply = {
+        text: 'Use morgan@example.test.',
+        suggestionId: input.id,
+        clientKey: input.id,
+      }
+      if (change === 'applied') expect((await f.call('replies', reply)).status).toBe(201)
+      if (change === 'source')
+        await db
+          .update(customer)
+          .set({ email: 'changed@example.test', profileRevision: 1 })
+          .where(eq(customer.id, identity.customerId))
+      else if (change === 'missing')
+        await db.update(aiOperation).set({ output: null }).where(eq(aiOperation.id, input.id))
+      else if (change === 'unlink')
+        await changeCustomerIdentity(db, {
+          workspaceId: f.identity.workspaceId,
+          userId: f.identity.actingUserId,
+          conversationId: f.conversationId,
+          identityId: identity.id,
+          targetCustomerId: null,
+          expectedCustomerId: identity.customerId,
+          confirmed: true,
+        })
+      else
+        await setMemberChannelAccess(db, {
+          ...f.identity,
+          memberId: change === 'ai' ? ai.id : f.memberId,
+          channelIds: [f.channelId],
+        })
+      const replay = await f.call('suggestions', input)
+      expect(replay.status).toBe(400)
+      expect(await replay.text()).not.toContain('morgan@example.test')
+      expect(
+        (
+          await f.call('replies', {
+            text: 'Use morgan@example.test.',
+            suggestionId: input.id,
+            clientKey: input.id,
+          })
+        ).status,
+      ).toBe(400)
+      expect(calls).toHaveBeenCalledTimes(2)
+      expect(await getAiBudget(db, f.identity)).toMatchObject({ used: 1 })
+      if (change === 'applied') {
+        expect(
+          (await f.call('replies', { text: reply.text, clientKey: reply.clientKey })).status,
+        ).toBe(400)
+        expect(await f.outbound()).toMatchObject([{ deliveryState: 'PENDING' }])
+      } else expect(await f.outbound()).toEqual([])
+    },
+  )
   it('lets an authorized agent preview grounded suggestions, edit and confirm without AI takeover', async () => {
     const f = await fixture()
     const ai = await suggestionAi(f)
