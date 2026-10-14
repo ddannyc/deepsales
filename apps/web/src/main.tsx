@@ -85,6 +85,7 @@ import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 import { AiHandoffSettings } from './ai-handoff-settings'
 import { AiOperations } from './ai-operations'
+import { AiFollowUpSettings } from './ai-follow-up-settings'
 import { AiPropertySettings } from './ai-property-settings'
 import { AiSetupGuide } from './ai-setup-guide'
 import { type AiStopRules, AiStopSettings, emptyStopRules } from './ai-stop-settings'
@@ -4780,6 +4781,11 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
           </section>
         </aside>
       </div>
+      <AiFollowUpSettings
+        key={`follow-up:${workspace.id}:${memberId}`}
+        workspaceId={workspace.id}
+        memberId={memberId}
+      />
       <AiPropertySettings
         key={`tags:${workspace.id}:${memberId}`}
         workspaceId={workspace.id}

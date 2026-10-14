@@ -28,3 +28,5 @@ export * from './reply-content'
 export * from './reply-suggestions'
 export * from './schema'
 export * from './workspace'
+
+export * from './ai-follow-ups'

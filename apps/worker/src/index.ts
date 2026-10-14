@@ -82,6 +82,8 @@ import {
   listPendingFacebookInboundAttachmentIds,
   listPendingKnowledgeDocumentIds,
   listQueuedAiResponseRunIds,
+  listDueAiFollowUpConversations,
+  startAiFollowUp,
   listQueuedConversationIds,
   listReplyTemplates,
   listStaleAiResponseRuns,
@@ -3406,7 +3408,10 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       }
       snapshot = currentSnapshot
 
-      const configuredReason = detectConfiguredHandoff(claimed.inputMessages, currentSnapshot)
+      const configuredReason = detectConfiguredHandoff(
+        claimed.followUp ? [] : claimed.inputMessages,
+        currentSnapshot,
+      )
       if (configuredReason) {
         await completeAiHandoff(env, claimed, {
           reason: configuredReason,
@@ -3418,7 +3423,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
 
-      const inputMessages = claimed.inputMessages
+      const inputMessages = (claimed.followUp ? [] : claimed.inputMessages)
         .filter(({ text }) => Boolean(text?.trim()))
         .map(({ id, text }) => ({ id, text: text as string }))
       const inputSize = inputMessages.reduce((sum, { text }) => sum + Array.from(text).length, 0)
@@ -3461,7 +3466,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
                 workspaceId: claimed.workspaceId,
                 memberId: claimed.memberId,
                 configVersionId: claimed.configVersionId,
-                kind: 'LIVE_REPLY',
+                kind: claimed.followUp ? 'FOLLOW_UP' : 'LIVE_REPLY',
               },
               `CUSTOM_HANDOFF:${digest}`,
             )
@@ -3534,7 +3539,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
             workspaceId: claimed.workspaceId,
             memberId: claimed.memberId,
             configVersionId: claimed.configVersionId,
-            kind: 'LIVE_REPLY',
+            kind: claimed.followUp ? 'FOLLOW_UP' : 'LIVE_REPLY',
           },
           'STOP_HANDOFF',
         )
@@ -3592,7 +3597,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         queueMessage.ack()
         continue
       }
-      if (!inputMessages.length) {
+      if (!inputMessages.length && !claimed.followUp) {
         let result = await commitReply({ runId: claimed.id, text: '', unparsedInput: true })
         if (result?.kind === 'UNPARSED_FALLBACK_REQUIRED') {
           const fallbackFetch = meteredAiFetch(
@@ -3602,7 +3607,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
               workspaceId: claimed.workspaceId,
               memberId: claimed.memberId,
               configVersionId: claimed.configVersionId,
-              kind: 'LIVE_REPLY',
+              kind: claimed.followUp ? 'FOLLOW_UP' : 'LIVE_REPLY',
             },
             'UNPARSED_FALLBACK',
           )
@@ -3660,7 +3665,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         workspaceId: claimed.workspaceId,
         memberId: claimed.memberId,
         configVersionId: claimed.configVersionId,
-        kind: 'LIVE_REPLY',
+        kind: claimed.followUp ? 'FOLLOW_UP' : 'LIVE_REPLY',
       })
       const embeddingProvider = createAlibabaEmbeddingProvider(
         {
@@ -3720,6 +3725,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           : null,
         timeZone: currentSnapshot.timeZone,
         naturalToneEnabled: currentSnapshot.naturalToneEnabled,
+        proactiveEvent: claimed.followUp,
         customerMemoryInput: claimed.customerMemoryInput,
         propertyRules: claimed.propertyCollection.rules,
         tagRules: claimed.tagCollection.rules,
@@ -4523,6 +4529,26 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
 
 export async function handleMaintenanceBatch(batch: MessageBatch<unknown>, env: Bindings) {
   for (const queueMessage of batch.messages) {
+    const followUp = z
+      .object({
+        v: z.literal(1),
+        type: z.literal('ai.follow-up'),
+        conversationId: z.string().uuid(),
+      })
+      .strict()
+      .safeParse(queueMessage.body)
+    if (followUp.success) {
+      try {
+        const runId = await withDatabase(env, (db) =>
+          startAiFollowUp(db, followUp.data.conversationId),
+        )
+        if (runId) await enqueueAiResponseJob(env, runId)
+        queueMessage.ack()
+      } catch {
+        queueMessage.retry()
+      }
+      continue
+    }
     const memoryJob = customerMemoryJobSchema.safeParse(queueMessage.body)
     if (memoryJob.success) {
       try {
@@ -4575,6 +4601,12 @@ export async function handleScheduled(env: Bindings) {
 
   try {
     await pumpCampaigns(env, withDatabase)
+    if (env.MAINTENANCE_QUEUE) {
+      const conversations = await withDatabase(env, (db) => listDueAiFollowUpConversations(db))
+      for (const conversationId of conversations)
+        await env.MAINTENANCE_QUEUE.send({ v: 1, type: 'ai.follow-up', conversationId })
+    }
+
     await withDatabase(env, (db) => recoverAiOperations(db))
     const stale = await withDatabase(env, (db) => recoverStaleOutboundMessages(db))
     if (stale.length) {

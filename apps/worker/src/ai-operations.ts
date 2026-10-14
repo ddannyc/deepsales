@@ -12,6 +12,7 @@ import {
   createAiTestSession,
   createPersonaOperation,
   type Database,
+  deleteAiFollowUpRule,
   deleteAiHandoffRule,
   deleteAiPropertyRule,
   deleteAiQuestionSet,
@@ -25,17 +26,20 @@ import {
   KnowledgeError,
   listAiConfigVersions,
   listAiDiagnostics,
+  listAiFollowUpRules,
   listAiHandoffRules,
   listAiPropertyRules,
   listAiQuestionSets,
   listAiTagRules,
   listAiTestBatches,
+  previewAiFollowUpAudience,
   readAiTestBatch,
   readAiTestSession,
   recordAiBatchResult,
   recordAiTestResult,
   restoreAiConfigVersion,
   saveAiBudget,
+  saveAiFollowUpRule,
   saveAiHandoffRule,
   saveAiPropertyRule,
   saveAiQuestionSet,
@@ -48,6 +52,7 @@ import {
   AIOutputError,
   AIProviderError,
   aiHandoffConditionSchema,
+  aiStopRulesSchema,
   createAlibabaLlmProvider,
   isLlmProviderConfigurationUsable,
 } from './ai'
@@ -134,6 +139,38 @@ export function aiOperationsRoutes(
               .strict()
               .parse(body)
             return c.json({ rule: await saveAiPropertyRule(db, { ...memberInput, ...input }) }, 201)
+          }
+        }
+        if (action === 'follow-ups') {
+          if (segments[2] === 'preview' && c.req.method === 'POST') {
+            const input = z.object({ groups: aiStopRulesSchema.shape.groups }).strict().parse(body)
+            return c.json(await previewAiFollowUpAudience(db, { ...memberInput, ...input }))
+          }
+
+          if (c.req.method === 'GET') return c.json(await listAiFollowUpRules(db, memberInput))
+          if (c.req.method === 'DELETE') {
+            const input = z
+              .object({ id: uuid, revision: z.number().int().positive() })
+              .strict()
+              .parse(body)
+            await deleteAiFollowUpRule(db, { ...memberInput, ...input })
+            return c.json({ ok: true })
+          }
+          if (c.req.method === 'POST') {
+            const input = z
+              .object({
+                id: uuid,
+                revision: z.number().int().positive().optional(),
+                name: z.string().trim().min(1).max(100),
+                enabled: z.boolean(),
+                timer: z.enum(['LAST_AI_REPLY', 'AI_ASSIGNMENT']),
+                delaySeconds: z.number().int().min(1).max(2592000),
+                instructions: z.string().max(4000),
+                groups: aiStopRulesSchema.shape.groups,
+              })
+              .strict()
+              .parse(body)
+            return c.json({ rule: await saveAiFollowUpRule(db, { ...memberInput, ...input }) }, 201)
           }
         }
         if (action === 'tag-rules') {

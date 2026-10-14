@@ -111,6 +111,7 @@ export async function reserveAiOperation(
     id: string
     workspaceId: string
     kind:
+      | 'FOLLOW_UP'
       | 'LIVE_REPLY'
       | 'TEST'
       | 'KNOWLEDGE_INDEX'
@@ -1202,7 +1203,7 @@ export async function listAiDiagnostics(
   const page = result.rows.slice(0, 100)
   const last = page.at(-1)
   return {
-    runs: page.filter((r) => r.kind === 'LIVE_REPLY'),
+    runs: page.filter((r) => r.kind === 'LIVE_REPLY' || r.kind === 'FOLLOW_UP'),
     tests: page.filter((r) => r.kind === 'TEST'),
     nextCursor:
       result.rows.length > 100 && last ? { createdAt: last.createdAt, id: last.id } : null,

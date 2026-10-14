@@ -62,6 +62,44 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('starts follow-up rules empty and saves a versioned immediate rule', async () => {
+    const f = await fixture()
+    const root = `/${f.aiId}/follow-ups`
+    const empty = await f.call(root)
+    expect(empty.status).toBe(200)
+    expect(await empty.json()).toMatchObject({ rules: [] })
+    const id = crypto.randomUUID()
+    const saved = await f.call(root, 'POST', {
+      id,
+      name: 'Helpful check-in',
+      enabled: true,
+      timer: 'LAST_AI_REPLY',
+      delaySeconds: 60,
+      instructions: '',
+      groups: [],
+    })
+    expect(saved.status).toBe(201)
+    expect(await saved.json()).toMatchObject({
+      rule: { id, revision: 1, enabled: true, timer: 'LAST_AI_REPLY', delaySeconds: 60 },
+    })
+    expect(
+      (
+        await f.call(root, 'POST', {
+          id,
+          revision: 1,
+          name: 'Helpful check-in',
+          enabled: false,
+          timer: 'AI_ASSIGNMENT',
+          delaySeconds: 120,
+          instructions: '',
+          groups: [],
+        })
+      ).status,
+    ).toBe(201)
+    expect(await (await f.call(root)).json()).toMatchObject({
+      rules: [{ id, revision: 2, enabled: false }],
+    })
+  })
   it('manages controlled tag rules immediately and rejects foreign definitions', async () => {
     const f = await fixture()
     const [tag] = await db
