@@ -12,6 +12,52 @@ import {
   isLlmProviderConfigurationUsable,
 } from './ai'
 
+describe('ordered skill classification boundary', () => {
+  it('rejects unknown, duplicate and actionable classifier output', async () => {
+    const id = crypto.randomUUID()
+    let extra: object = { matchedSkillIds: [id] }
+    const provider = new AlibabaLlmProvider(
+      { apiKey: 'test', baseUrl: 'http://ai.test/v1' },
+      async () =>
+        Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Classified.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  ...extra,
+                }),
+              },
+            },
+          ],
+        }),
+    )
+    const input = {
+      instructions: '',
+      responseLanguage: 'English',
+      toolsDisabled: true,
+      skillConditions: [{ id, condition: 'Setup help' }],
+      messages: [{ id: crypto.randomUUID(), text: 'Start' }],
+      history: [],
+      knowledgeChunks: [],
+    }
+    expect(await provider.generateResponse(input)).toMatchObject({ matchedSkillIds: [id] })
+    for (const invalid of [
+      { matchedSkillIds: [crypto.randomUUID()] },
+      { matchedSkillIds: [id, id] },
+      { matchedSkillIds: [id], toolCalls: [{ tool: 'skip', arguments: {} }] },
+      { matchedSkillIds: [id], containsBusinessFacts: true },
+    ]) {
+      extra = invalid
+      await expect(provider.generateResponse(input)).rejects.toThrow()
+    }
+  })
+})
+
 describe('private customer memory output', () => {
   it('accepts only authorized typed property collection without extra provider calls', async () => {
     const id = crypto.randomUUID()

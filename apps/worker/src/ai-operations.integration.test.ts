@@ -71,6 +71,112 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('selects the first matching skill in the sandbox and simulates only its tools', async () => {
+    const f = await fixture()
+    const skills = [
+      {
+        id: crypto.randomUUID(),
+        name: 'First',
+        condition: 'Setup help',
+        instructions: 'SANDBOX_FIRST [[tool:record]]',
+      },
+      {
+        id: crypto.randomUUID(),
+        name: 'Second',
+        condition: 'Setup help',
+        instructions: 'SANDBOX_SECOND [[tool:skip]]',
+      },
+    ]
+    await f.configCall({ skills })
+    const calls = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = String(init?.body)
+      const classification = body.includes('skill_conditions')
+      if (!classification) {
+        expect(body).toContain('SANDBOX_FIRST')
+        expect(body).not.toContain('SANDBOX_SECOND')
+      }
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                handoffReason: null,
+                response: classification ? 'Classified.' : 'Selected sandbox skill.',
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                ...(classification
+                  ? { matchedSkillIds: [skills[1].id, skills[0].id] }
+                  : {
+                      toolCalls: [{ tool: 'record', arguments: { text: 'Simulated skill note' } }],
+                    }),
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', calls)
+    const input = { id: crypto.randomUUID(), source: 'DRAFT', text: 'Help with setup' }
+    const response = await f.call(`/${f.aiId}/test`, 'POST', input)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      operation: {
+        state: 'COMPLETED',
+        output: { skillSelection: { id: skills[0].id, name: 'First', configVersionId: null } },
+      },
+    })
+    expect((await f.call(`/${f.aiId}/test`, 'POST', input)).status).toBe(200)
+    expect(calls).toHaveBeenCalledTimes(2)
+    const actions = await db
+      .select()
+      .from(aiToolAction)
+      .where(eq(aiToolAction.operationId, input.id))
+    expect(actions).toMatchObject([{ tool: 'record', simulated: true, state: 'SUCCEEDED' }])
+    expect(
+      await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+    ).toEqual([])
+  })
+  it('terminates invalid sandbox skill classification without simulating an action', async () => {
+    const f = await fixture()
+    const skill = {
+      id: crypto.randomUUID(),
+      name: 'Controlled',
+      condition: 'Setup help',
+      instructions: 'Record setup [[tool:record]]',
+    }
+    expect((await f.configCall({ skills: [skill] })).status).toBe(200)
+    const calls = vi.fn(async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Classified.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                matchedSkillIds: [crypto.randomUUID()],
+              }),
+            },
+          },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', calls)
+    const input = { id: crypto.randomUUID(), source: 'DRAFT', text: 'Help with setup' }
+    const response = await f.call(`/${f.aiId}/test`, 'POST', input)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      operation: { state: 'FAILED', failureCode: 'INVALID_OUTPUT' },
+    })
+    expect((await f.call(`/${f.aiId}/test`, 'POST', input)).status).toBe(200)
+    expect(calls).toHaveBeenCalledTimes(1)
+    expect(
+      await db.select().from(aiToolAction).where(eq(aiToolAction.operationId, input.id)),
+    ).toEqual([])
+  })
   it('publishes ordered skills as an immutable configuration and restores only their draft', async () => {
     const f = await fixture()
     const [support] = await db

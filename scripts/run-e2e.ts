@@ -31,6 +31,7 @@ const e2eOwnerKeys = [
   'ai-properties',
   'ai-tags',
   'ai-tools',
+  'ai-skills',
   'ai-follow-ups',
   'campaigns',
   'lifecycle',
@@ -416,6 +417,32 @@ async function startFakeAI() {
                   handoffReason: null,
                   containsBusinessFacts: false,
                   usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        }),
+      )
+      return
+    }
+    if (
+      body.messages?.[0]?.content.startsWith(
+        'Classify only the administrator-defined skill conditions',
+      )
+    ) {
+      const classifier = JSON.parse(content) as { skill_conditions: { id: string }[] }
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Classified.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  matchedSkillIds: classifier.skill_conditions.map(({ id }) => id).reverse(),
                 }),
               },
             },

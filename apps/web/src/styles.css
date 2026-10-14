@@ -5184,3 +5184,10 @@ form {
 .customer-facts [role="alert"] {
   color: var(--destructive);
 }
+.ai-skills-list {
+  display: grid;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
