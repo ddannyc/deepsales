@@ -75,6 +75,278 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('skips an unparsed attachment once without changing ownership and accepts the next text input', async () => {
+    const f = await createFixture(db)
+    const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    await updateAiMemberConfig(db, { ...config, replyWaitEnabled: false })
+    await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+    await updateAiMemberConfig(db, {
+      ...config,
+      unparsedFallbackEnabled: true,
+      unparsedFallbackTexts: ['Unpublished phrase.'],
+    })
+    const received = await receiveUnparsedInput(db, f)
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    const fetcher = vi.fn()
+    vi.stubGlobal('fetch', fetcher)
+    const outbound = vi.fn()
+    const queued = queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })
+    await handleAiResponseBatch(
+      batch('ai', queued),
+      environment({ send: outbound } as unknown as Queue),
+    )
+    expect(queued.ack).toHaveBeenCalledOnce()
+    expect(fetcher).not.toHaveBeenCalled()
+    expect(outbound).not.toHaveBeenCalled()
+    expect(
+      await db
+        .select({ state: aiResponseRun.state, failureCode: aiResponseRun.failureCode })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, assigned.aiResponseRunId ?? '')),
+    ).toEqual([{ state: 'SKIPPED', failureCode: 'UNPARSED_INPUT' }])
+    expect(
+      await db
+        .select({
+          owner: conversation.assigneeMemberId,
+          constraint: conversation.routingConstraint,
+          stop: conversation.aiStopState,
+        })
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId)),
+    ).toEqual([{ owner: f.aiMemberId, constraint: 'ANY_MEMBER', stop: null }])
+    expect(
+      await db
+        .select()
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        ),
+    ).toHaveLength(0)
+    const next = await receiveContextInput(db, f, 'Hello again.')
+    expect(next.aiResponseRunId).toBeTruthy()
+    fetcher.mockImplementation(async (url: unknown) =>
+      String(url).endsWith('/embeddings')
+        ? Response.json({ data: [{ index: 0, embedding: vector() }] })
+        : Response.json({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    decision: 'ANSWER',
+                    response: 'Hello again.',
+                    handoffReason: null,
+                    containsBusinessFacts: false,
+                    usedChunkIds: [],
+                  }),
+                },
+              },
+            ],
+          }),
+    )
+    await handleAiResponseBatch(
+      batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: next.aiResponseRunId })),
+      environment({ send: outbound } as unknown as Queue),
+    )
+    expect(outbound).toHaveBeenCalledOnce()
+    expect(
+      await db
+        .select({ text: message.text })
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        ),
+    ).toEqual([{ text: 'Hello again.' }])
+  })
+  it.each([
+    'success',
+    'invalid',
+    'empty',
+    'retry',
+    'takeover',
+    'input',
+    'quota',
+    'handoff',
+    'stop',
+  ] as const)(
+    'handles unparsed fallback %s without confusing failures, skips or handoff',
+    async (mode) => {
+      const f = await createFixture(db)
+      const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+      await updateAiMemberConfig(db, {
+        ...config,
+        replyWaitEnabled: false,
+        automaticLanguageEnabled: true,
+        unparsedFallbackEnabled: true,
+        unparsedFallbackTexts: ['Please send text.', 'Could you describe this?'],
+        ...(mode === 'stop'
+          ? {
+              stopRules: {
+                groups: [[{ kind: 'REPLIES' as const, minimum: 0 }]],
+                periods: [],
+                endingText: '',
+                endingMediaAssetId: null,
+              },
+            }
+          : {}),
+      })
+      await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+      const received = await receiveUnparsedInput(db, f)
+      if (mode === 'quota')
+        await saveAiBudget(db, {
+          workspaceId: f.workspaceId,
+          actingUserId: f.ownerId,
+          monthlyLimit: 0,
+        })
+      if (mode === 'handoff') {
+        const [definition] = await db
+          .insert(customerPropertyDefinition)
+          .values({
+            workspaceId: f.workspaceId,
+            name: 'Needs specialist',
+            level: 'CONVERSATION',
+            type: 'TEXT',
+          })
+          .returning()
+        const profile = await getCustomerProfile(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+        })
+        await setCustomerProperty(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+          expectedCustomerId: profile.customer.id,
+          expectedRevision: 0,
+          definitionId: definition.id,
+          value: 'yes',
+          allowAutomaticUpdate: false,
+        })
+        await saveAiHandoffRule(db, {
+          ...config,
+          name: 'Specialist',
+          enabled: true,
+          condition: { kind: 'PROPERTY', definitionId: definition.id, value: 'yes' },
+        })
+      }
+      await db
+        .update(conversation)
+        .set({ aiReplyLanguage: 'es' })
+        .where(eq(conversation.id, received.conversationId))
+      const assigned = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: received.conversationId,
+      })
+      const provider = vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body))
+        expect(body.messages[0].content).toContain('language es')
+        expect(body.messages[1].content).toMatch(/Please send text|Could you describe this/)
+        if (mode === 'retry' && provider.mock.calls.length === 1)
+          return Response.json({}, { status: 503 })
+        if (mode === 'takeover')
+          await takeOverConversation(db, {
+            workspaceId: f.workspaceId,
+            conversationId: received.conversationId,
+            actingUserId: f.ownerId,
+          })
+        if (mode === 'input') await receiveContextInput(db, f, 'New text.')
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content:
+                  mode === 'invalid'
+                    ? '{broken'
+                    : JSON.stringify({
+                        decision: 'ANSWER',
+                        response: mode === 'empty' ? '' : 'Por favor usa un mensaje de texto.',
+                        handoffReason: null,
+                        containsBusinessFacts: false,
+                        usedChunkIds: [],
+                      }),
+              },
+            },
+          ],
+        })
+      })
+      vi.stubGlobal('fetch', provider)
+      const outbound = vi.fn()
+      const queued = queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })
+      await handleAiResponseBatch(
+        batch('ai', queued),
+        environment({ send: outbound } as unknown as Queue),
+      )
+      let selectedBeforeRetry: string | null = null
+      if (mode === 'retry') {
+        expect(queued.retry).toHaveBeenCalledOnce()
+        const [waiting] = await db
+          .select()
+          .from(aiResponseRun)
+          .where(eq(aiResponseRun.id, assigned.aiResponseRunId ?? ''))
+        selectedBeforeRetry = waiting.unparsedFallbackText
+        expect(selectedBeforeRetry).toBeTruthy()
+        await db
+          .update(aiProviderAttempt)
+          .set({ retryAt: new Date(0) })
+          .where(eq(aiProviderAttempt.operationId, assigned.aiResponseRunId ?? ''))
+        await handleAiResponseBatch(
+          batch('ai', queueMessage(queued.body)),
+          environment({ send: outbound } as unknown as Queue),
+        )
+      }
+      const [run] = await db
+        .select()
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.id, assigned.aiResponseRunId ?? ''))
+      const [current] = await db
+        .select()
+        .from(conversation)
+        .where(eq(conversation.id, received.conversationId))
+      if (mode === 'success' || mode === 'retry') {
+        expect(run).toMatchObject({ state: 'COMPLETED', failureCode: 'UNPARSED_FALLBACK' })
+        expect(['Please send text.', 'Could you describe this?']).toContain(
+          run.unparsedFallbackText,
+        )
+        expect(
+          await db
+            .select({ text: message.text })
+            .from(message)
+            .where(eq(message.id, run.outputMessageId ?? '')),
+        ).toEqual([{ text: 'Por favor usa un mensaje de texto.' }])
+        await handleAiResponseBatch(
+          batch('ai', queueMessage(queued.body)),
+          environment({ send: outbound } as unknown as Queue),
+        )
+        expect(provider).toHaveBeenCalledTimes(mode === 'retry' ? 2 : 1)
+        if (mode === 'retry') expect(run.unparsedFallbackText).toBe(selectedBeforeRetry)
+        expect(outbound).toHaveBeenCalledOnce()
+        expect(
+          (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+        ).toBe(1)
+      } else if (mode === 'takeover' || mode === 'input') {
+        expect(run.state).toBe('CANCELLED')
+        expect(run.outputMessageId).toBeNull()
+        expect(outbound).not.toHaveBeenCalled()
+      } else if (mode === 'stop') {
+        expect(provider).not.toHaveBeenCalled()
+        expect(run).toMatchObject({ state: 'CANCELLED', failureCode: 'AI_STOP_CONDITION' })
+        expect(current.aiStopState?.reason).toBe('CONDITION')
+      } else {
+        expect(run.state).toBe(mode === 'invalid' || mode === 'empty' ? 'FAILED' : 'HANDOFF')
+        expect(current.routingConstraint).toBe('HUMAN_ONLY')
+        if (mode !== 'invalid' && mode !== 'empty') expect(provider).not.toHaveBeenCalled()
+      }
+    },
+  )
   it.each(['none', 'manual', 'concurrent', 'rule', 'revoke', 'input', 'disabled'] as const)(
     'appends controlled tags and protects newer %s decisions',
     async (change) => {
@@ -3357,4 +3629,35 @@ function queueMessage(body: unknown) {
 
 function vector() {
   return Array.from({ length: 1_536 }, (_value, index) => (index === 0 ? 1 : 0))
+}
+
+async function receiveUnparsedInput(
+  db: ReturnType<typeof createDatabase>,
+  f: Awaited<ReturnType<typeof createFixture>>,
+) {
+  const at = new Date(Date.now() - 10_000)
+  const received = await processFacebookInbound(db, {
+    ingressId: crypto.randomUUID(),
+    pageId: f.pageId,
+    externalUserId: `customer-${f.ownerId}`,
+    externalMessageId: crypto.randomUUID(),
+    text: null,
+    attachments: [
+      {
+        kind: 'IMAGE',
+        filename: 'sample.png',
+        mimeType: 'image/png',
+        encryptedSourceUrl: 'cipher',
+        urlIv: 'iv',
+        tokenKeyVersion: 'v1',
+        expiresAt: new Date(Date.now() + 60_000),
+      },
+    ],
+    providerSentAt: at,
+    receivedAt: at,
+    payloadSha256: 'a'.repeat(64),
+    eventFragment: {},
+  })
+  if (received.kind !== 'created') throw new Error('Missing attachment input')
+  return received
 }
