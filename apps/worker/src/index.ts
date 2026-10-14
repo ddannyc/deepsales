@@ -405,6 +405,7 @@ const aiMemberConfigInput = z
       .max(10)
       .optional(),
     memoryEnabled: z.boolean().optional(),
+    tagsEnabled: z.boolean().optional(),
     replyWaitEnabled: z.boolean().optional(),
     adMappings: z
       .array(z.object({ adId: z.string().max(200), content: z.string().max(4000) }).strict())
@@ -3672,6 +3673,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         naturalToneEnabled: currentSnapshot.naturalToneEnabled,
         customerMemoryInput: claimed.customerMemoryInput,
         propertyRules: claimed.propertyCollection.rules,
+        tagRules: claimed.tagCollection.rules,
         instructions: currentSnapshot.instructions,
         responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,
@@ -3717,6 +3719,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           ? decision.languageSelection
           : undefined,
         collectedProperties: decision.collectedProperties,
+        appendedTags: decision.appendedTags,
       })
       await withDatabase(env, (db) =>
         finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),

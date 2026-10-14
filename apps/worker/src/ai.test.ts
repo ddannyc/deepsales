@@ -77,6 +77,54 @@ describe('private customer memory output', () => {
       await expect(provider.generateResponse(input)).rejects.toThrow()
     }
   })
+  it('allows only append operations from the authorized tag set', async () => {
+    const id = crypto.randomUUID()
+    let appendedTags: unknown = [id]
+    const provider = new AlibabaLlmProvider(
+      { apiKey: 'test', baseUrl: 'http://ai.test/v1' },
+      async () =>
+        Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Thank you.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  appendedTags,
+                }),
+              },
+            },
+          ],
+        }),
+    )
+    const input = {
+      instructions: '',
+      responseLanguage: 'English',
+      history: [],
+      messages: [],
+      knowledgeChunks: [],
+      tagRules: [
+        {
+          definitionId: id,
+          name: 'Follow up',
+          instructions: 'Explicit request',
+          level: 'CUSTOMER' as const,
+          id: crypto.randomUUID(),
+          revision: 1,
+        },
+      ],
+    }
+    expect(await provider.generateResponse(input)).toMatchObject({ appendedTags: [id] })
+    for (const invalid of [[crypto.randomUUID()], [id, id], [{ tagId: id, remove: true }]]) {
+      appendedTags = invalid
+      await expect(provider.generateResponse(input)).rejects.toThrow()
+    }
+    appendedTags = [id]
+    await expect(provider.generateResponse({ ...input, tagRules: [] })).rejects.toThrow()
+  })
   it('counts Unicode code points and rejects oversized or action-bearing summaries', async () => {
     let output: Record<string, unknown> = {
       decision: 'ANSWER',
