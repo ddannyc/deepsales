@@ -83,7 +83,7 @@ export async function externalToolRoute(
         origin: z.string().max(1000),
         enabled: z.boolean(),
         auth: z.enum(['NONE', 'BEARER']),
-        credential: z.string().min(1).max(4000).nullable().optional(),
+        credential: z.string().min(1).max(4000).regex(/^[^\r\n]+$/).nullable().optional(),
       })
       .strict()
       .parse(body)

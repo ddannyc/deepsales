@@ -19,3 +19,5 @@ LLM_PROVIDER=alibaba
 LLM_MODEL=qwen3.8-flash
 AI_RETRIEVAL_MAX_DISTANCE=0.35
 AI_DEBOUNCE_SECONDS=2
+# Exact trusted public HTTPS origins, JSON array. Empty disables external tool egress.
+AI_TOOL_ALLOWED_ORIGINS=[]

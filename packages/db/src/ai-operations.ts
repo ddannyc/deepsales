@@ -21,6 +21,7 @@ import {
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES } from './ai-stop'
 import { readAiTestTagRules } from './ai-tag-rules'
 import { readAiToolSearchChunks } from './ai-tool-actions'
+import { checkExternalTestResults } from './ai-external-actions'
 import { type AiToolCall, validateAiToolCalls } from './ai-tools'
 import { readAiTestVariableInput } from './ai-variable-values'
 import type { AiVariableInput } from './ai-variables'
@@ -809,7 +810,11 @@ type TestSearchInput = Identity & {
   call: Extract<AiToolCall, { tool: 'search' }>
 }
 
-async function authorizeTestSearch(tx: Transaction, input: TestSearchInput, allowUnknown = false) {
+export async function authorizeAiTestTool(
+  tx: Transaction,
+  input: Omit<TestSearchInput, 'call'> & { call: AiToolCall },
+  allowUnknown = false,
+) {
   await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for share`)
   const [record] = await tx
     .select()
@@ -849,7 +854,7 @@ async function authorizeTestSearch(tx: Transaction, input: TestSearchInput, allo
 
 export async function claimAiTestSearchAction(db: Database, input: TestSearchInput) {
   return db.transaction(async (tx) => {
-    const record = await authorizeTestSearch(tx, input)
+    const record = await authorizeAiTestTool(tx, input)
     if (!record) return null
     if (!Number.isInteger(input.ordinal) || input.ordinal < 0 || input.ordinal > 2)
       throw new AiMemberError('INVALID_REQUEST')
@@ -902,7 +907,7 @@ export async function finishAiTestSearchAction(
   input: TestSearchInput & { chunkIds?: string[]; failure?: 'FAILED' | 'UNKNOWN' },
 ) {
   return db.transaction(async (tx) => {
-    const record = await authorizeTestSearch(tx, input, Boolean(input.failure))
+    const record = await authorizeAiTestTool(tx, input, Boolean(input.failure))
     const [action] = await tx
       .select()
       .from(aiToolAction)
@@ -969,6 +974,7 @@ export async function recordAiTestResult(
     output: unknown
     chunkIds: string[]
     actions?: { call: AiToolCall; chunkIds?: string[] }[]
+    actingUserId?: string
   },
 ) {
   await db.transaction(async (tx) => {
@@ -981,6 +987,19 @@ export async function recordAiTestResult(
     )
     if (record)
       await tx.execute(sql`select id from ${workspace} where id = ${record.workspaceId} for share`)
+    if (input.actions?.some((action) => action.call.tool === 'external')) {
+      if (!record?.memberId || !input.actingUserId) throw new AiMemberError('INVALID_REQUEST')
+      await assertAiManager(tx, record.workspaceId, input.actingUserId)
+      if (
+        !(await checkExternalTestResults(tx, {
+          workspaceId: record.workspaceId,
+          memberId: record.memberId,
+          actingUserId: input.actingUserId,
+          id: record.id,
+        }))
+      )
+        throw new AiMemberError('INVALID_CONFIGURATION')
+    }
     const context = (record?.output as { testContext?: AiTestContext } | null)?.testContext
     const propertyRules =
       (record?.output as { propertyRules?: AiPropertyCollection['rules'] } | null)?.propertyRules ??

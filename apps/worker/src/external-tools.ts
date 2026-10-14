@@ -108,18 +108,18 @@ export async function callExternalTool(
           signal: controller.signal,
         })
         if (response.status >= 300 && response.status < 400) {
-          await response.body?.cancel()
+          void response.body?.cancel().catch(() => {})
           throw new ExternalToolError('EXTERNAL_REDIRECT')
         }
         if (!response.ok) {
-          await response.body?.cancel()
+          void response.body?.cancel().catch(() => {})
           throw new ExternalToolError('EXTERNAL_HTTP_ERROR')
         }
         if (
           !/^application\/json(?:\s*;|$)/i.test(response.headers.get('content-type') ?? '') ||
           !response.body
         ) {
-          await response.body?.cancel()
+          void response.body?.cancel().catch(() => {})
           throw new ExternalToolError('EXTERNAL_RESPONSE_INVALID')
         }
         reader = response.body.getReader()
@@ -131,7 +131,7 @@ export async function callExternalTool(
           size += next.value.byteLength
           if (size > 65536) {
             controller.abort()
-            await reader.cancel()
+            void reader.cancel().catch(() => {})
             throw new ExternalToolError('EXTERNAL_RESPONSE_TOO_LARGE')
           }
           chunks.push(next.value)
@@ -164,6 +164,13 @@ export async function callExternalTool(
         }
         if (JSON.stringify(result).length > 8000)
           throw new ExternalToolError('EXTERNAL_RESPONSE_TOO_LARGE')
+        if (
+          credential &&
+          Object.values(result).some(
+            (value) => typeof value === 'string' && value.includes(credential),
+          )
+        )
+          throw new ExternalToolError('EXTERNAL_RESPONSE_INVALID')
         return result
       })(),
     ])
@@ -173,7 +180,11 @@ export async function callExternalTool(
   } finally {
     clearTimeout(timeout)
     controller.abort()
-    await reader?.cancel().catch(() => {})
-    reader?.releaseLock()
+    void reader?.cancel().catch(() => {})
+    try {
+      reader?.releaseLock()
+    } catch {
+      /* The bounded operation may still have a pending read. */
+    }
   }
 }

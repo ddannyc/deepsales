@@ -48,7 +48,14 @@ export function AiInstructionInsert({
   useEffect(() => {
     const controller = new AbortController()
     void load(controller.signal)
-    return () => controller.abort()
+    const changed = () => {
+      void load(controller.signal)
+    }
+    window.addEventListener('ai-tools.changed', changed)
+    return () => {
+      controller.abort()
+      window.removeEventListener('ai-tools.changed', changed)
+    }
   }, [load])
   return (
     <div className="form-field">

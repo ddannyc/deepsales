@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import { readAiFollowUpAuthorization } from './ai-follow-ups'
+import { checkExternalActionResults } from './ai-external-actions'
 import {
   type AiHandoffEvaluation,
   matchAiHandoffRule,
@@ -762,6 +763,7 @@ export async function commitAiResponse(
     languageSelection?: { language: string; explicitSwitch: boolean } | null
     appendedTags?: string[]
     collectedProperties?: AiCollectedProperty[]
+    usedToolActionIds?: string[]
   },
 ): Promise<CommitAiResponseResult> {
   let text = input.text.trim()
@@ -1167,6 +1169,18 @@ export async function commitAiResponse(
       }
     }
     if (!stopReason && !input.stopCheckOnly) {
+      if (!(await checkExternalActionResults(tx, run.id, input.usedToolActionIds))) {
+        await tx
+          .update(aiResponseRun)
+          .set({
+            state: 'CANCELLED',
+            failureCode: 'EXTERNAL_AUTHORIZATION_CHANGED',
+            completedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(aiResponseRun.id, run.id))
+        return null
+      }
       const context = {
         workspaceId: current.workspaceId,
         memberId: run.memberId,

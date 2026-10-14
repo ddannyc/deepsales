@@ -87,6 +87,7 @@ import { AiHandoffSettings } from './ai-handoff-settings'
 import { AiInstructionInsert } from './ai-instruction-insert'
 import { AiOperations } from './ai-operations'
 import { AiFollowUpSettings } from './ai-follow-up-settings'
+import { AiExternalTools } from './ai-external-tools'
 import { AiPropertySettings } from './ai-property-settings'
 import { AiSetupGuide } from './ai-setup-guide'
 import { type AiStopRules, AiStopSettings, emptyStopRules } from './ai-stop-settings'
@@ -4818,6 +4819,11 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
       </div>
       <AiFollowUpSettings
         key={`follow-up:${workspace.id}:${memberId}`}
+        workspaceId={workspace.id}
+        memberId={memberId}
+      />
+      <AiExternalTools
+        key={`external:${workspace.id}:${memberId}`}
         workspaceId={workspace.id}
         memberId={memberId}
       />
