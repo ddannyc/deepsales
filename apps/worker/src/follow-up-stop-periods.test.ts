@@ -68,6 +68,16 @@ describe('follow-up stop interval invalidation', () => {
       ),
     ).toBe(true)
   })
+  it('does not invent a weekly occurrence when the only elapsed one was skipped by DST', () => {
+    expect(
+      hasAiStopPeriodBetween(
+        rules(0, '02:10', '02:20'),
+        'America/New_York',
+        new Date('2026-03-07T05:00Z'),
+        new Date('2026-03-15T05:00Z'),
+      ),
+    ).toBe(false)
+  })
   it('recognizes both copies of a repeated autumn stop hour', () => {
     const r = rules(0, '01:10', '01:20')
     expect(

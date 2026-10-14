@@ -148,10 +148,11 @@ function matchesStopPeriod(rules: AiStopRules, parts: Intl.DateTimeFormatPart[])
   return rules.periods.some((p) => p.day === day && p.start <= time && time < p.end)
 }
 
-// Scan at most eight days by hour; only offset-changing hours need minute resolution.
+// Two weekly occurrences cover a DST-skipped occurrence. Only offset-changing hours
+// need minute resolution; even long downtime scans at most fifteen days.
 export function hasAiStopPeriodBetween(rules: AiStopRules, timeZone: string, from: Date, to: Date) {
   if (!rules.periods.length || to < from) return false
-  if (to.getTime() - from.getTime() >= 8 * 86400000) return true
+  if (to.getTime() - from.getTime() >= 15 * 86400000) return true
   const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone,
     year: 'numeric',
