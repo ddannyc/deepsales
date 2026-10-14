@@ -2,7 +2,7 @@ import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { AiResponseError, commitAiResponse } from './ai-responses'
 import { aiSelectedSkillInstructions, selectedAiSkillId } from './ai-skills'
 import { instructionTools, validateAiToolCalls, type AiToolCall } from './ai-tools'
-import { readAiViewerChannelIds, AiMemberError } from './ai-members'
+import { readAiViewerChannelIds } from './ai-members'
 import { validValue, validateExternalArguments } from './ai-external-contracts'
 import { authorizeAiTestTool } from './ai-operations'
 import type { Database } from './database'
@@ -420,14 +420,6 @@ export async function simulateExternalTestAction(
       (row) => row.tool.id === input.call.arguments.definitionId,
     )
     if (!definition) return null
-    try {
-      validateExternalArguments(
-        { ...definition.tool, origin: definition.origin },
-        input.call.arguments.values,
-      )
-    } catch {
-      throw new AiMemberError('INVALID_REQUEST')
-    }
     const [existing] = await tx
       .select()
       .from(aiToolAction)
@@ -438,6 +430,15 @@ export async function simulateExternalTestAction(
         existing.simulated
         ? existing
         : null
+    let validArguments = true
+    try {
+      validateExternalArguments(
+        { ...definition.tool, origin: definition.origin },
+        input.call.arguments.values,
+      )
+    } catch {
+      validArguments = false
+    }
     // This branch has no credential columns, decryption or network callback.
     const result = Object.fromEntries(
       definition.tool.output.map((field) => [
@@ -456,12 +457,20 @@ export async function simulateExternalTestAction(
         definitionRevision: definition.tool.revision,
         arguments: input.call.arguments.values,
         simulated: true,
-        state: 'SUCCEEDED',
-        result,
+        state: validArguments ? 'SUCCEEDED' : 'FAILED',
+        result: validArguments ? result : null,
+        failureCode: validArguments ? null : 'EXTERNAL_ARGUMENTS_INVALID',
         startedAt: new Date(),
         completedAt: new Date(),
       })
       .returning()
+    if (!validArguments)
+      await tx
+        .update(aiOperation)
+        .set({ state: 'FAILED', failureCode: 'EXTERNAL_ARGUMENTS_INVALID', updatedAt: new Date() })
+        .where(
+          and(eq(aiOperation.id, input.id), inArray(aiOperation.state, ['RESERVED', 'STARTED'])),
+        )
     return action
   })
 }
