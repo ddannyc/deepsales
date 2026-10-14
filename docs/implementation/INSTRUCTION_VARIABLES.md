@@ -32,6 +32,15 @@ suggestions intersect the AI's access with the requesting human's access and
 recheck before completing. Test sessions and batch retries build the same typed
 inputs from their simulated facts and never read live contacts for variables.
 
+Completed suggestions retain their variable snapshot in the existing private
+AI operation output. Cached reads and send confirmation, including client-key
+replays, recheck those sources and both members' channel grants. Changed,
+unlinked or unavailable sources make the cached suggestion invalid; missing
+provenance on older variable-based suggestions also invalidates them. Replaying
+the old ID does not call the model again or consume another logical charge.
+Already committed messages remain in the delivery ledger and are not cancelled.
+Suggestion operations are not exposed by the diagnostic endpoint.
+
 Migration `0048_instruction_variables.sql` adds the independent nullable input
 snapshot to existing runs. Apply it separately before deployment. The insertion
 component exposes only implemented variables; tool insertion belongs to its
