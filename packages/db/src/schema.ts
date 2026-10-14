@@ -1089,6 +1089,8 @@ export const aiToolAction = pgTable(
     definitionRevision: integer('definition_revision').default(1).notNull(),
     arguments: jsonb().$type<Record<string, unknown>>().notNull(),
     simulated: boolean().default(false).notNull(),
+    attemptCount: integer('attempt_count').default(0).notNull(),
+    retryAt: timestamp('retry_at', { withTimezone: true }),
     state: text()
       .$type<'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED' | 'UNKNOWN'>()
       .default('PENDING')
@@ -1102,6 +1104,7 @@ export const aiToolAction = pgTable(
   (t) => [
     uniqueIndex('ai_tool_action_operation_ordinal_idx').on(t.operationId, t.ordinal),
     check('ai_tool_action_ordinal', sql`${t.ordinal} between 0 and 2`),
+    check('ai_tool_action_attempt_count', sql`${t.attemptCount} between 0 and 3`),
     check(
       'ai_tool_action_state',
       sql`${t.state} in ('PENDING','RUNNING','SUCCEEDED','FAILED','CANCELLED','UNKNOWN')`,
