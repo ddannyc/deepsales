@@ -1972,6 +1972,8 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/suggestions
       )
       const decision = await llm.generateResponse({
         instructions: record.snapshot.instructions,
+        variableInput: context.variableInput,
+        now: new Date(context.variableInput.capturedAt),
         responseLanguage: record.snapshot.responseLanguage,
         timeZone: record.snapshot.timeZone,
         naturalToneEnabled: record.snapshot.naturalToneEnabled,
@@ -1991,6 +1993,7 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/suggestions
         id: record.id,
         text: grounded.response,
         chunkIds: grounded.usedChunkIds,
+        variableInput: context.variableInput,
       })
       await finishAiOperation(db, { operationId: record.id, state: 'COMPLETED' })
       return c.json({ suggestion: publicSuggestion(suggestion) })
@@ -3723,6 +3726,8 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         customerMemoryInput: claimed.customerMemoryInput,
         propertyRules: claimed.propertyCollection.rules,
         tagRules: claimed.tagCollection.rules,
+        variableInput: claimed.variableInput,
+        now: new Date(claimed.variableInput.capturedAt),
         instructions: currentSnapshot.instructions,
         responseLanguage: currentSnapshot.responseLanguage,
         messages: inputMessages,

@@ -84,6 +84,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '#
 import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 import { AiHandoffSettings } from './ai-handoff-settings'
+import { AiInstructionInsert } from './ai-instruction-insert'
 import { AiOperations } from './ai-operations'
 import { AiPropertySettings } from './ai-property-settings'
 import { AiSetupGuide } from './ai-setup-guide'
@@ -4227,6 +4228,36 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                 发布前需要填写。说明 AI 应如何回答客户问题。
               </span>
             </label>
+            <AiInstructionInsert
+              workspaceId={workspace.id}
+              memberId={memberId}
+              disabled={busy}
+              onInsert={(token) => {
+                const textarea = document.getElementById('ai-instructions')
+                const start =
+                  textarea instanceof HTMLTextAreaElement
+                    ? textarea.selectionStart
+                    : draft.instructions.length
+                const end = textarea instanceof HTMLTextAreaElement ? textarea.selectionEnd : start
+                setDraft((current) =>
+                  current
+                    ? {
+                        ...current,
+                        instructions:
+                          current.instructions.slice(0, start) +
+                          token +
+                          current.instructions.slice(end),
+                      }
+                    : current,
+                )
+                requestAnimationFrame(() => {
+                  if (textarea instanceof HTMLTextAreaElement) {
+                    textarea.focus()
+                    textarea.setSelectionRange(start + token.length, start + token.length)
+                  }
+                })
+              }}
+            />
             <div className="switch-field">
               <div>
                 <span className="form-field-label" id="ai-auto-language-label">
