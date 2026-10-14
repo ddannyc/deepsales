@@ -5,7 +5,11 @@ import { selectedAiSkillId } from './ai-skills'
 import { readAiRunToolInstructions, readAiToolSlotCount } from './ai-tool-authorization'
 import { instructionTools, validateAiToolCalls, type AiToolCall } from './ai-tools'
 import { readAiViewerChannelIds } from './ai-members'
-import { validValue, validateExternalArguments } from './ai-external-contracts'
+import {
+  validValue,
+  validateExternalArguments,
+  sameExternalArguments,
+} from './ai-external-contracts'
 import { authorizeAiTestTool } from './ai-operations'
 import type { Database } from './database'
 import {
@@ -153,7 +157,7 @@ export async function claimAiExternalAction(db: Database, input: ExternalActionI
     if (existing) {
       if (
         existing.tool !== `external:${input.call.arguments.definitionId}` ||
-        JSON.stringify(existing.arguments) !== JSON.stringify(input.call.arguments.values)
+        !sameExternalArguments(existing.arguments, input.call.arguments.values)
       )
         throw new AiResponseError('INVALID_REQUEST')
       if (existing.state === 'FAILED' && existing.retryAt) {

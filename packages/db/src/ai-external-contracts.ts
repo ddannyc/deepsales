@@ -1,4 +1,15 @@
 export type ExternalValue = string | number | boolean | null
+// Arguments are flat typed primitive maps; JSONB object key order is not identity.
+export function sameExternalArguments(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>,
+) {
+  const keys = Object.keys(left)
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => Object.hasOwn(right, key) && left[key] === right[key])
+  )
+}
 export type ExternalInput = {
   name: string
   type: 'string' | 'number' | 'boolean'
