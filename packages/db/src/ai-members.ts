@@ -1,5 +1,6 @@
 import { and, desc, eq, sql } from 'drizzle-orm'
 import { assertAiHandoffReferences, readEnabledAiHandoffRules } from './ai-handoff-rules'
+import { type AiSkill, normalizeAiSkills } from './ai-skills'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES, normalizeAiStopRules } from './ai-stop'
 import { instructionTools } from './ai-tools'
 import { instructionVariableKeys } from './ai-variables'
@@ -66,6 +67,7 @@ export async function readAiViewerChannelIds(
 }
 
 export type AiMemberConfig = {
+  skills: AiSkill[]
   stopRules: AiStopRules
   unparsedFallbackEnabled: boolean
   unparsedFallbackTexts: string[]
@@ -97,6 +99,7 @@ export type AiMemberConfig = {
 }
 
 export type UpdateAiMemberConfigInput = {
+  skills?: AiSkill[]
   stopRules?: AiStopRules
   unparsedFallbackEnabled?: boolean
   unparsedFallbackTexts?: string[]
@@ -163,6 +166,7 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
         automaticLanguageEnabled: draft.automaticLanguageEnabled ?? false,
         timeZone: draft.timeZone ?? 'UTC',
         instructions: draft.instructions ?? '',
+        skills: draft.skills ?? [],
         responseLanguage: draft.responseLanguage ?? '',
         knowledgeBaseId: draft.knowledgeBaseId ?? null,
         handoffOnCustomerRequest: draft.handoffOnCustomerRequest ?? true,
@@ -234,6 +238,7 @@ export async function publishAiMemberConfig(
     try {
       instructionVariableKeys(config.instructions)
       instructionTools(config.instructions)
+      normalizeAiSkills(config.skills)
       await assertAiStopReferences(tx, input.workspaceId, config.stopRules)
       await assertAiHandoffReferences(
         tx,
@@ -252,6 +257,7 @@ export async function publishAiMemberConfig(
       automaticLanguageEnabled: config.automaticLanguageEnabled,
       timeZone: config.timeZone,
       instructions: config.instructions,
+      skills: config.skills,
       responseLanguage: config.responseLanguage,
       knowledgeBaseId: config.knowledgeBaseId,
       handoffOnCustomerRequest: config.handoffOnCustomerRequest,
@@ -333,6 +339,7 @@ async function selectAiMemberConfig(
       automaticLanguageEnabled: aiMemberConfig.automaticLanguageEnabled,
       timeZone: aiMemberConfig.timeZone,
       instructions: aiMemberConfig.instructions,
+      skills: aiMemberConfig.skills,
       responseLanguage: aiMemberConfig.responseLanguage,
       knowledgeBaseId: aiMemberConfig.knowledgeBaseId,
       handoffOnCustomerRequest: aiMemberConfig.handoffOnCustomerRequest,
@@ -363,6 +370,7 @@ async function selectAiMemberConfig(
     memberDisplayName: row.memberDisplayName,
     memberStatus: row.memberStatus,
     instructions: row.instructions ?? '',
+    skills: row.skills ?? [],
     unparsedFallbackEnabled: row.unparsedFallbackEnabled ?? false,
     unparsedFallbackTexts: row.unparsedFallbackTexts ?? [],
     splitRepliesEnabled: row.splitRepliesEnabled ?? false,
@@ -490,6 +498,7 @@ export async function restoreAiConfigVersion(
       .update(aiMemberConfig)
       .set({
         ...version.snapshot,
+        skills: version.snapshot.skills ?? [],
         stopRules: version.snapshot.stopRules ?? EMPTY_AI_STOP_RULES,
         unparsedFallbackEnabled: version.snapshot.unparsedFallbackEnabled ?? false,
         unparsedFallbackTexts: version.snapshot.unparsedFallbackTexts ?? [],
@@ -511,6 +520,14 @@ export async function restoreAiConfigVersion(
 }
 
 function normalizeDraft(input: UpdateAiMemberConfigInput) {
+  let skills: AiSkill[] | undefined
+  if (input.skills !== undefined) {
+    try {
+      skills = normalizeAiSkills(input.skills)
+    } catch {
+      throw new AiMemberError('INVALID_REQUEST', 'Invalid skills')
+    }
+  }
   if (
     input.unparsedFallbackEnabled !== undefined &&
     typeof input.unparsedFallbackEnabled !== 'boolean'
@@ -548,6 +565,7 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
     input.handoffKeywords === undefined ? undefined : normalizeKeywords(input.handoffKeywords)
   return {
     stopRules,
+    skills,
     instructions,
     unparsedFallbackEnabled: input.unparsedFallbackEnabled,
     unparsedFallbackTexts:
@@ -609,6 +627,7 @@ function defaultConfig(memberId: string) {
     automaticLanguageEnabled: false,
     timeZone: 'UTC',
     memberId,
+    skills: [] as AiSkill[],
     instructions: '',
     responseLanguage: '',
     knowledgeBaseId: null,

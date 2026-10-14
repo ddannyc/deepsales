@@ -1,0 +1,1 @@
+ALTER TABLE "ai_member_config" ADD COLUMN "skills" jsonb DEFAULT '[]'::jsonb NOT NULL;

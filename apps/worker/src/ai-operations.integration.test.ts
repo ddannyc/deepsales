@@ -71,6 +71,56 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('publishes ordered skills as an immutable configuration and restores only their draft', async () => {
+    const f = await fixture()
+    const [support] = await db
+      .insert(channel)
+      .values({
+        workspaceId: f.workspaceId,
+        provider: 'FACEBOOK_MESSENGER',
+        displayName: 'Support',
+      })
+      .returning()
+    await setMemberChannelAccess(db, {
+      workspaceId: f.workspaceId,
+      actingUserId: f.userId,
+      memberId: f.aiId,
+      channelIds: [support.id],
+    })
+    const skills = [
+      {
+        id: crypto.randomUUID(),
+        name: 'Setup',
+        condition: 'The customer asks how to start.',
+        instructions: 'Offer the setup guide. [[tool:search]]',
+      },
+      {
+        id: crypto.randomUUID(),
+        name: 'General',
+        condition: 'The customer asks for help.',
+        instructions: 'Give a concise grounded answer.',
+      },
+    ]
+    expect((await f.configCall({ skills })).status).toBe(200)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiId, actingUserId: f.userId }
+    const draft = await getAiMemberConfig(db, identity)
+    expect(draft).toMatchObject({ skills, publishedSnapshot: null })
+    const published = await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    const versionId = published.publishedVersionId
+    expect(published.publishedSnapshot).toMatchObject({ skills })
+    expect((await f.configCall({ skills: [...skills].reverse() })).status).toBe(200)
+    expect((await getAiMemberConfig(db, identity)).publishedSnapshot).toMatchObject({ skills })
+    const restored = await f.call(`/${f.aiId}/restore`, 'POST', { versionId })
+    expect(restored.status).toBe(200)
+    expect(await restored.json()).toMatchObject({
+      config: { skills, publishedVersionId: versionId },
+    })
+    expect((await f.configCall({ skills: [skills[0], skills[0]] })).status).toBe(400)
+    expect(
+      (await f.configCall({ skills: [{ ...skills[0], instructions: '{{unknown.variable}}' }] }))
+        .status,
+    ).toBe(400)
+  })
   it.each(['viewer', 'ai'] as const)(
     'withholds live tool diagnostics when %s loses the source channel, including administrators',
     async (revoked) => {
