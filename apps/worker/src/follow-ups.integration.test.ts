@@ -5,6 +5,7 @@ import {
   aiExternalTool,
   aiToolAction,
   listInternalNotes,
+  listAiFollowUpRules,
   aiFollowUpEvent,
   aiFollowUpRule,
   aiResponseRun,
@@ -167,124 +168,200 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       ],
     })
 
-  it('retries a safe read within the same follow-up budget without repeating its successful first action', async () => {
-    const f = await ready('LAST_AI_REPLY')
-    const pluginId = crypto.randomUUID(),
-      toolId = crypto.randomUUID()
-    await db.insert(aiExternalPlugin).values({
-      id: pluginId,
-      workspaceId: f.workspaceId,
-      memberId: f.aiMemberId,
-      channelId: f.channelId,
-      name: 'Status API',
-      origin: 'https://tools.example.com',
-      enabled: true,
-      auth: 'NONE',
-    })
-    await db.insert(aiExternalTool).values({
-      id: toolId,
-      pluginId,
-      name: 'Status',
-      description: 'Read status',
-      enabled: true,
-      method: 'GET',
-      path: '/status',
-      effect: 'READ',
-      output: [{ name: 'status', path: ['status'], type: 'string' }],
-      objectScope: '',
-    })
-    await db
-      .update(aiFollowUpRule)
-      .set({ instructions: `[[tool:record]] [[tool:external:${toolId}]]` })
-      .where(eq(aiFollowUpRule.id, f.rule.id))
-    const job = await trigger(f)
-    if (!job) throw new Error('Missing follow-up')
-    const external = vi.fn(async () =>
-      external.mock.calls.length === 1
-        ? Response.json({}, { status: 503 })
-        : Response.json({ status: 'ready' }),
-    )
-    vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
-      if (String(url).startsWith('https://tools.example.com')) return external()
-      if (String(url).endsWith('/embeddings'))
-        return Response.json({ data: [{ index: 0, embedding: vector() }] })
-      const prompt = JSON.parse(String(init?.body))
-        .messages.map((item: { content: string }) => item.content)
-        .join('\n') as string
-      const results = JSON.parse(prompt.match(/EXTERNAL_RESULT_VALUES: ([^\n]+)/)?.[1] ?? '[]') as {
-        actionId: string
-      }[]
-      return Response.json({
-        choices: [
-          {
-            message: {
-              content: JSON.stringify({
-                decision: 'ANSWER',
-                response: results.length ? 'Status: ready.' : 'Checking status.',
-                handoffReason: null,
-                containsBusinessFacts: results.length > 0,
-                usedChunkIds: [],
-                ...(results.length
-                  ? { usedToolActionIds: results.map((item) => item.actionId) }
-                  : {
-                      toolCalls: [
-                        {
-                          tool: 'record',
-                          arguments: { text: 'Follow-up requested a status check.' },
-                        },
-                        { tool: 'external', arguments: { definitionId: toolId, values: {} } },
-                      ],
-                    }),
-              }),
-            },
-          },
-        ],
+  it.each(['recover', 'exhaust', 'takeover', 'unknown'] as const)(
+    'bounds safe read recovery and preserves successful receipts (%s)',
+    async (mode) => {
+      const f = await ready('LAST_AI_REPLY')
+      const pluginId = crypto.randomUUID(),
+        toolId = crypto.randomUUID()
+      await db.insert(aiExternalPlugin).values({
+        id: pluginId,
+        workspaceId: f.workspaceId,
+        memberId: f.aiMemberId,
+        channelId: f.channelId,
+        name: 'Status API',
+        origin: 'https://tools.example.com',
+        enabled: true,
+        auth: 'NONE',
       })
-    })
-    const env = { ...f.env, AI_TOOL_ALLOWED_ORIGINS: '["https://tools.example.com"]' }
-    const queued = queueMessage(job)
-    await handleAiResponseBatch(batch('ai', queued), env)
-    expect(queued.retry).toHaveBeenCalledOnce()
-    expect(f.outbound).not.toHaveBeenCalled()
-    const before = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, job.runId))
-    expect(before.map((action) => [action.ordinal, action.state])).toEqual(
-      expect.arrayContaining([
-        [0, 'SUCCEEDED'],
-        [1, 'FAILED'],
-      ]),
-    )
-    // Test clock advances only the durable backoff; action/once/charge identities stay fixed.
-    await db.execute(
-      sql`update ai_tool_action set retry_at = ${new Date(0)} where run_id = ${job.runId}`,
-    )
-    await handleAiResponseBatch(batch('ai', queueMessage(job)), env)
-    await handleAiResponseBatch(batch('ai', queueMessage(job)), env)
-    const after = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, job.runId))
-    expect(after.map((action) => action.id).sort()).toEqual(
-      before.map((action) => action.id).sort(),
-    )
-    expect(after.every((action) => action.state === 'SUCCEEDED')).toBe(true)
-    expect(external).toHaveBeenCalledTimes(2)
-    expect(
-      (
-        await listInternalNotes(db, {
-          workspaceId: f.workspaceId,
-          userId: f.ownerId,
-          conversationId: f.conversationId,
-        })
-      ).notes,
-    ).toHaveLength(1)
-    expect(f.outbound).toHaveBeenCalledOnce()
-    expect(
-      (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
-    ).toBe(1)
-    expect(
+      await db.insert(aiExternalTool).values({
+        id: toolId,
+        pluginId,
+        name: 'Status',
+        description: 'Read status',
+        enabled: true,
+        method: mode === 'unknown' ? 'POST' : 'GET',
+        path: '/status',
+        effect: mode === 'unknown' ? 'WRITE' : 'READ',
+        fixed:
+          mode === 'unknown'
+            ? [{ name: 'recordId', location: 'body', value: 'configured-record' }]
+            : [],
+        output: [{ name: 'status', path: ['status'], type: 'string' }],
+        objectScope:
+          mode === 'unknown'
+            ? JSON.stringify({
+                policy: 'FIXED_CONFIG',
+                description: 'Fixed configured support record.',
+                targets: [{ name: 'recordId', location: 'body' }],
+              })
+            : '',
+      })
       await db
-        .select()
-        .from(aiFollowUpEvent)
-        .where(eq(aiFollowUpEvent.conversationId, f.conversationId)),
-    ).toHaveLength(1)
-  })
+        .update(aiFollowUpRule)
+        .set({ instructions: `[[tool:record]] [[tool:external:${toolId}]]` })
+        .where(eq(aiFollowUpRule.id, f.rule.id))
+      const job = await trigger(f)
+      if (!job) throw new Error('Missing follow-up')
+      const external = vi.fn(async () => {
+        if (mode === 'unknown') throw new Error('Response lost after dispatch')
+        if (external.mock.calls.length === 1 || mode === 'exhaust')
+          return Response.json({}, { status: 503 })
+        if (mode === 'takeover')
+          await takeOverConversation(db, {
+            workspaceId: f.workspaceId,
+            conversationId: f.conversationId,
+            actingUserId: f.ownerId,
+          })
+        return Response.json({ status: 'ready' })
+      })
+      vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+        if (String(url).startsWith('https://tools.example.com')) return external()
+        if (String(url).endsWith('/embeddings'))
+          return Response.json({ data: [{ index: 0, embedding: vector() }] })
+        const prompt = JSON.parse(String(init?.body))
+          .messages.map((item: { content: string }) => item.content)
+          .join('\n') as string
+        const results = JSON.parse(
+          prompt.match(/EXTERNAL_RESULT_VALUES: ([^\n]+)/)?.[1] ?? '[]',
+        ) as {
+          actionId: string
+        }[]
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: results.length ? 'Status: ready.' : 'Checking status.',
+                  handoffReason: null,
+                  containsBusinessFacts: results.length > 0,
+                  usedChunkIds: [],
+                  ...(results.length
+                    ? { usedToolActionIds: results.map((item) => item.actionId) }
+                    : {
+                        toolCalls: [
+                          {
+                            tool: 'record',
+                            arguments: { text: 'Follow-up requested a status check.' },
+                          },
+                          { tool: 'external', arguments: { definitionId: toolId, values: {} } },
+                        ],
+                      }),
+                }),
+              },
+            },
+          ],
+        })
+      })
+      const env = { ...f.env, AI_TOOL_ALLOWED_ORIGINS: '["https://tools.example.com"]' }
+      const queued = queueMessage(job)
+      await handleAiResponseBatch(batch('ai', queued), env)
+      if (mode === 'unknown') {
+        await handleAiResponseBatch(batch('ai', queueMessage(job)), env)
+        expect(queued.retry).not.toHaveBeenCalled()
+        expect(f.outbound).not.toHaveBeenCalled()
+        expect(external).toHaveBeenCalledOnce()
+        expect(
+          await db.select().from(aiToolAction).where(eq(aiToolAction.runId, job.runId)),
+        ).toMatchObject(
+          expect.arrayContaining([
+            expect.objectContaining({ ordinal: 0, state: 'SUCCEEDED', attemptCount: 1 }),
+            expect.objectContaining({ ordinal: 1, state: 'UNKNOWN', attemptCount: 1 }),
+          ]),
+        )
+        const [operation] = await db.select().from(aiOperation).where(eq(aiOperation.id, job.runId))
+        expect(operation).toMatchObject({ state: 'UNKNOWN', charged: true })
+        expect(
+          (
+            await listInternalNotes(db, {
+              workspaceId: f.workspaceId,
+              userId: f.ownerId,
+              conversationId: f.conversationId,
+            })
+          ).notes,
+        ).toHaveLength(1)
+        const history = await listAiFollowUpRules(db, f.identity)
+        expect(history.events.find((event) => event.id === job.runId)).toMatchObject({
+          partialCompletion: true,
+          operationState: 'UNKNOWN',
+        })
+        return
+      }
+      expect(queued.retry).toHaveBeenCalledOnce()
+      expect(f.outbound).not.toHaveBeenCalled()
+      const before = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, job.runId))
+      expect(before.map((action) => [action.ordinal, action.state])).toEqual(
+        expect.arrayContaining([
+          [0, 'SUCCEEDED'],
+          [1, 'FAILED'],
+        ]),
+      )
+      // Test clock advances only the durable backoff; action/once/charge identities stay fixed.
+      await db.execute(
+        sql`update ai_tool_action set retry_at = ${new Date(0)} where run_id = ${job.runId} and retry_at is not null`,
+      )
+      await handleAiResponseBatch(batch('ai', queueMessage(job)), env)
+      await handleAiResponseBatch(batch('ai', queueMessage(job)), env)
+      const after = await db.select().from(aiToolAction).where(eq(aiToolAction.runId, job.runId))
+      expect(after.map((action) => action.id).sort()).toEqual(
+        before.map((action) => action.id).sort(),
+      )
+      expect(after.reduce((count, action) => count + action.attemptCount, 0)).toBe(3)
+      expect(after.every((action) => action.state === 'SUCCEEDED')).toBe(mode !== 'exhaust')
+      expect(external).toHaveBeenCalledTimes(2)
+      expect(
+        (
+          await listInternalNotes(db, {
+            workspaceId: f.workspaceId,
+            userId: f.ownerId,
+            conversationId: f.conversationId,
+          })
+        ).notes,
+      ).toHaveLength(1)
+      expect(f.outbound).toHaveBeenCalledTimes(mode === 'recover' ? 1 : 0)
+      const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, job.runId))
+      expect(run.state).toBe(
+        mode === 'recover' ? 'COMPLETED' : mode === 'exhaust' ? 'FAILED' : 'CANCELLED',
+      )
+      if (mode === 'takeover') {
+        const history = await listAiFollowUpRules(db, f.identity)
+        expect(history.events.find((event) => event.id === job.runId)).toMatchObject({
+          partialCompletion: true,
+          actions: expect.arrayContaining([
+            {
+              id: expect.any(String),
+              tool: 'record',
+              state: 'SUCCEEDED',
+              failureCode: null,
+              retryAt: null,
+              attemptCount: 1,
+            },
+          ]),
+        })
+        expect(JSON.stringify(history.events)).not.toContain('Follow-up requested a status check.')
+      }
+      expect(
+        (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
+      ).toBe(1)
+      expect(
+        await db
+          .select()
+          .from(aiFollowUpEvent)
+          .where(eq(aiFollowUpEvent.conversationId, f.conversationId)),
+      ).toHaveLength(1)
+    },
+  )
   it('rejects unknown variable and unavailable tool references when saving an immediate rule', async () => {
     const f = await ready('LAST_AI_REPLY')
     for (const instructions of [
@@ -362,6 +439,85 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
     expect(
       (await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.ownerId })).used,
     ).toBe(1)
+  })
+  it('withholds changed rule-only variable sources without creating an ordinary recovery reply', async () => {
+    const f = await ready('LAST_AI_REPLY', 'Use {{customer.properties}}. [[tool:record]]')
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({
+        workspaceId: f.workspaceId,
+        name: 'Context preference',
+        level: 'CUSTOMER',
+        type: 'TEXT',
+      })
+      .returning()
+    const profile = await getCustomerProfile(db, {
+      workspaceId: f.workspaceId,
+      conversationId: f.conversationId,
+      userId: f.ownerId,
+    })
+    const property = {
+      workspaceId: f.workspaceId,
+      conversationId: f.conversationId,
+      userId: f.ownerId,
+      expectedCustomerId: profile.customer.id,
+      definitionId: definition.id,
+      allowAutomaticUpdate: false,
+    }
+    await setCustomerProperty(db, { ...property, expectedRevision: 0, value: 'email' })
+    const job = await trigger(f)
+    if (!job) throw new Error('Missing follow-up')
+    const before = await db
+      .select({ id: aiResponseRun.id })
+      .from(aiResponseRun)
+      .where(eq(aiResponseRun.conversationId, f.conversationId))
+    vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith('/embeddings'))
+        return Response.json({ data: [{ index: 0, embedding: vector() }] })
+      expect(String(init?.body)).toContain('email')
+      await setCustomerProperty(db, { ...property, expectedRevision: 1, value: 'phone' })
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'A tailored follow-up.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                toolCalls: [{ tool: 'record', arguments: { text: 'Stale source' } }],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    await handleAiResponseBatch(batch('ai', queueMessage(job)), f.env)
+    expect(f.outbound).not.toHaveBeenCalled()
+    expect(
+      await db
+        .select({ id: aiResponseRun.id })
+        .from(aiResponseRun)
+        .where(eq(aiResponseRun.conversationId, f.conversationId)),
+    ).toEqual(before)
+    const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, job.runId))
+    expect(run).toMatchObject({
+      state: 'CANCELLED',
+      cancellationReason: 'PROPERTY_COLLECTION_CHANGED',
+    })
+    expect(await db.select().from(aiToolAction).where(eq(aiToolAction.runId, job.runId))).toEqual(
+      [],
+    )
+    expect(
+      (
+        await listInternalNotes(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: f.conversationId,
+        })
+      ).notes,
+    ).toHaveLength(0)
   })
   it.each(['LAST_AI_REPLY', 'AI_ASSIGNMENT'] as const)(
     'authorizes one independent %s event and deduplicates scheduling and delivery',

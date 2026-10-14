@@ -18,3 +18,18 @@ Replaying a successful receipt consumes no new slot. A safe read retry keeps the
 same event, operation, action ID and ordinal, with durable 30/120-second backoff
 or a longer provider delay. Uncertain dispatched writes remain paused and cannot
 be retried automatically. Provider model-attempt and cost metrics remain separate.
+
+The test bench can select a saved rule, including a disabled one. It freezes that
+rule's revision and requirements for the simulated turn, rechecks the current
+rule and tool authorization before effects/results, and retains the existing
+session-clear generation guard. The entered text is past context rather than a
+new customer input. Sandbox writes are simulated; testing never consumes a live
+once event. Tool catalogs and mapped external reads retain the existing viewer
+and AI channel intersection.
+
+Event history exposes action IDs, tool kinds, states, reserved counts and retry
+times under the already-authorized parent event. It omits arguments and results.
+If an action succeeds and later input, ownership, stop or rule changes prevent
+the message, history explains partial completion. The successful receipt remains;
+it is neither rolled back nor executed again. A changed variable source cancels
+the original follow-up without manufacturing an ordinary customer-reply run.

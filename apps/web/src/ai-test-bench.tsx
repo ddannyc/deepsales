@@ -37,6 +37,7 @@ type Turn = {
     kind?: string
     decision?: { response?: string }
     skillSelection?: { id: string | null; name: string | null; configVersionId: string | null }
+    followUpTest?: { ruleId: string; name: string; revision: number }
   } | null
   chunkIds: string[]
 }
@@ -86,6 +87,8 @@ export function AiTestBench({
   const [turns, setTurns] = useState<Turn[]>([])
   const [question, setQuestion] = useState('')
   const [simulatedRule, setSimulatedRule] = useState('NONE')
+  const [followUpRule, setFollowUpRule] = useState('NONE')
+  const [followUpRules, setFollowUpRules] = useState<{ id: string; name: string }[]>([])
   const [busy, setBusy] = useState(false)
   const [clearing, setClearing] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -99,16 +102,19 @@ export function AiTestBench({
     setLoading(true)
     void Promise.all([
       request<Options>(`/api/workspaces/${workspaceId}/inbox-filter-options`),
+      request<{ rules: { id: string; name: string }[] }>(`${root}/follow-ups`),
       saved
         ? request<{ session: Session; turns: Turn[] }>(`${root}/sessions/${saved}`)
         : Promise.resolve(undefined),
     ])
-      .then(([definitions, data]) => {
+      .then(([definitions, followUps, data]) => {
         if (disposed) return
         setOptions(definitions)
+        setFollowUpRules(followUps.rules)
         if (data) {
           setSession(data.session)
           setTurns(data.turns)
+          setFollowUpRule(data.turns.at(-1)?.output?.followUpTest?.ruleId ?? 'NONE')
           setCustomer(data.session.customer)
           setSource(
             data.session.source === 'VERSION'
@@ -163,6 +169,7 @@ export function AiTestBench({
         text: question,
         sessionId: active.id,
         generation: active.generation,
+        followUpRuleId: followUpRule === 'NONE' ? undefined : followUpRule,
       })
       const data = await request<{ session: Session; turns: Turn[] }>(
         `${root}/sessions/${active.id}`,
@@ -197,6 +204,7 @@ export function AiTestBench({
       setTurns([])
       setCustomer(emptyCustomer())
       setSimulatedRule('NONE')
+      setFollowUpRule('NONE')
       setQuestion('')
       requestId.current = crypto.randomUUID()
       sessionId.current = crypto.randomUUID()
@@ -259,6 +267,27 @@ export function AiTestBench({
             ? session.customer.language || session.snapshot.responseLanguage
             : session.snapshot.responseLanguage}
           。更换配置或模拟资料前请清空测试。
+        </p>
+      )}
+      <label className="field" htmlFor={`${prefix}-follow-up`}>
+        回访规则（可选）
+        <Select value={followUpRule} disabled={frozen} onValueChange={setFollowUpRule}>
+          <SelectTrigger id={`${prefix}-follow-up`} aria-label="回访规则（可选）">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="NONE">普通回复测试</SelectItem>
+            {followUpRules.map((rule) => (
+              <SelectItem key={rule.id} value={rule.id}>
+                {rule.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </label>
+      {followUpRule !== 'NONE' && (
+        <p className="field-description">
+          模拟所选已保存规则；可测试停用规则，不触发真实回访、不消耗真实会话的一次机会。
         </p>
       )}
       <details>
@@ -402,6 +431,11 @@ export function AiTestBench({
               }[turn.state] ?? turn.state}
             </StatusBadge>
             {turn.output?.decision?.response && <p>测试 AI：{turn.output.decision.response}</p>}
+            {turn.output?.followUpTest && (
+              <p>
+                回访规则：{turn.output.followUpTest.name} · 修订 {turn.output.followUpTest.revision}
+              </p>
+            )}
             {turn.output?.skillSelection && (
               <p>命中技能：{turn.output.skillSelection.name ?? '未命中，使用普通回复'}</p>
             )}

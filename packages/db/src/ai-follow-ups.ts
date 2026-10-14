@@ -20,6 +20,7 @@ import {
   aiMemberConfig,
   aiOperation,
   aiResponseRun,
+  aiToolAction,
   channel,
   channelIdentity,
   conversation,
@@ -32,6 +33,47 @@ import {
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0]
 type Identity = { workspaceId: string; memberId: string; actingUserId: string }
 type Rule = typeof aiFollowUpRule.$inferSelect
+export type AiFollowUpTestContext = {
+  ruleId: string
+  revision: number
+  name: string
+  instructions: string
+}
+
+// Testing a disabled saved rule is allowed; this does not create or consume an event.
+export async function readAiFollowUpTestContext(tx: Tx, input: Identity & { ruleId: string }) {
+  await getAiMemberConfig(tx, input)
+  const [rule] = await tx
+    .select()
+    .from(aiFollowUpRule)
+    .where(
+      and(
+        eq(aiFollowUpRule.id, input.ruleId),
+        eq(aiFollowUpRule.workspaceId, input.workspaceId),
+        eq(aiFollowUpRule.memberId, input.memberId),
+        isNull(aiFollowUpRule.deletedAt),
+      ),
+    )
+    .for('share')
+  if (!rule) throw new AiMemberError('NOT_FOUND')
+  await assertExternalToolReferences(tx, { ...input, instructions: rule.instructions })
+  return {
+    ruleId: rule.id,
+    revision: rule.revision,
+    name: rule.name,
+    instructions: rule.instructions,
+  }
+}
+
+export async function checkAiFollowUpTestContext(
+  tx: Tx,
+  input: Identity,
+  frozen: AiFollowUpTestContext,
+) {
+  const current = await readAiFollowUpTestContext(tx, { ...input, ruleId: frozen.ruleId })
+  if (current.revision !== frozen.revision || current.instructions !== frozen.instructions)
+    throw new AiMemberError('INVALID_CONFIGURATION')
+}
 export type FollowUpRuleInput = Identity & {
   id: string
   revision?: number
@@ -89,7 +131,42 @@ export async function listAiFollowUpRules(db: Database, input: Identity) {
       )
       .orderBy(desc(aiFollowUpEvent.triggeredAt))
       .limit(100)
-    return { rules, events }
+    const actions = events.length
+      ? await tx
+          .select({
+            id: aiToolAction.id,
+            runId: aiToolAction.runId,
+            tool: aiToolAction.tool,
+            state: aiToolAction.state,
+            failureCode: aiToolAction.failureCode,
+            retryAt: aiToolAction.retryAt,
+            attemptCount: aiToolAction.attemptCount,
+          })
+          .from(aiToolAction)
+          .where(
+            and(
+              inArray(
+                aiToolAction.runId,
+                events.map((event) => event.id),
+              ),
+              eq(aiToolAction.simulated, false),
+            ),
+          )
+      : []
+    return {
+      rules,
+      events: events.map((event) => {
+        const eventActions = actions
+          .filter((action) => action.runId === event.id)
+          .map(({ runId: _runId, ...action }) => action)
+        return {
+          ...event,
+          actions: eventActions,
+          partialCompletion:
+            !event.outputMessageId && eventActions.some((action) => action.state === 'SUCCEEDED'),
+        }
+      }),
+    }
   })
 }
 

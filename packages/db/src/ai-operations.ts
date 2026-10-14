@@ -1,3 +1,9 @@
+import { aiToolInstructions } from './ai-tools'
+import {
+  type AiFollowUpTestContext,
+  readAiFollowUpTestContext,
+  checkAiFollowUpTestContext,
+} from './ai-follow-ups'
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm'
 import { assertAiHandoffReferences, readEnabledAiHandoffRules } from './ai-handoff-rules'
 import {
@@ -141,6 +147,7 @@ export async function reserveAiOperation(
     now?: Date
     text?: string
     snapshot?: AiMemberRuntimeSnapshot
+    followUpTest?: AiFollowUpTestContext
     testContext?: AiTestContext
     tagRules?: import('./schema').AiTagCollection['rules']
     variableInput?: AiVariableInput
@@ -224,6 +231,7 @@ export async function reserveAiOperation(
           ? {
               handoffContext: input.handoffContext,
               testContext: input.testContext,
+              followUpTest: input.followUpTest,
               propertyRules: input.propertyRules,
               variableInput: input.variableInput,
               tagRules: input.tagRules,
@@ -663,6 +671,7 @@ export async function createAiTest(
   input: TestConfiguration & {
     id: string
     text: string
+    followUpRuleId?: string
     sessionId?: string
     generation?: number
     simulatedHandoffFacts?: {
@@ -769,13 +778,20 @@ export async function createAiTest(
         history: bounded,
       }
     }
+    const followUpTest = input.followUpRuleId
+      ? await readAiFollowUpTestContext(tx, { ...input, ruleId: input.followUpRuleId })
+      : undefined
     const operation = await reserveAiOperation(tx, {
       id: input.id,
       workspaceId: input.workspaceId,
       kind: 'TEST',
+      followUpTest,
       variableInput: await readAiTestVariableInput(tx, {
         workspaceId: input.workspaceId,
-        instructions: aiSkillVariableInstructions(snapshot),
+        instructions: aiToolInstructions(
+          aiSkillVariableInstructions(snapshot),
+          followUpTest?.instructions,
+        ),
         timeZone: snapshot.timeZone ?? 'UTC',
         text: input.text,
         customer: testContext?.customer,
@@ -792,6 +808,11 @@ export async function createAiTest(
         : [],
       testContext,
     })
+    if (
+      ((operation.output as { followUpTest?: AiFollowUpTestContext } | null)?.followUpTest
+        ?.ruleId ?? null) !== (followUpTest?.ruleId ?? null)
+    )
+      throw new AiMemberError('INVALID_REQUEST')
     if (session && !session.operationIds.includes(operation.id)) {
       if (!operation.wasCreated) throw new AiMemberError('INVALID_REQUEST')
       await tx
@@ -837,9 +858,15 @@ export async function authorizeAiTestTool(
     if (error instanceof AiMemberError) return null
     throw error
   }
+  const followUpTest = (record.output as { followUpTest?: AiFollowUpTestContext } | null)
+    ?.followUpTest
+  if (followUpTest) await checkAiFollowUpTestContext(tx, input, followUpTest)
   validateAiToolCalls(
     record.snapshot
-      ? aiSelectedSkillInstructions(record.snapshot, selectedAiSkillId(record.output))
+      ? aiToolInstructions(
+          aiSelectedSkillInstructions(record.snapshot, selectedAiSkillId(record.output)),
+          followUpTest?.instructions,
+        )
       : '',
     [input.call],
   )
@@ -979,9 +1006,26 @@ export async function recordAiTestResult(
 ) {
   await db.transaction(async (tx) => {
     const [record] = await tx.select().from(aiOperation).where(eq(aiOperation.id, input.id))
+    const followUpTest = (record?.output as { followUpTest?: AiFollowUpTestContext } | null)
+      ?.followUpTest
+    if (followUpTest && record?.memberId) {
+      if (!input.actingUserId) throw new AiMemberError('FORBIDDEN')
+      await checkAiFollowUpTestContext(
+        tx,
+        {
+          workspaceId: record.workspaceId,
+          memberId: record.memberId,
+          actingUserId: input.actingUserId,
+        },
+        followUpTest,
+      )
+    }
     validateAiToolCalls(
       record?.snapshot
-        ? aiSelectedSkillInstructions(record.snapshot, selectedAiSkillId(record.output))
+        ? aiToolInstructions(
+            aiSelectedSkillInstructions(record.snapshot, selectedAiSkillId(record.output)),
+            followUpTest?.instructions,
+          )
         : '',
       (input.actions ?? []).map((a) => a.call),
     )
@@ -1094,6 +1138,7 @@ export async function recordAiTestResult(
           tagRules,
           variableInput: (record?.output as { variableInput?: AiVariableInput } | null)
             ?.variableInput,
+          followUpTest,
           skillSelection: (record?.output as { skillSelection?: unknown } | null)?.skillSelection,
         },
         chunkIds: input.chunkIds,

@@ -49,10 +49,27 @@ export async function executeAiTest(
         propertyRules?: import('@deepsales/db').AiPropertyCollection['rules']
       } | null
     )?.propertyRules ?? []
-  const history = (testContext?.history ?? []).map((item) => ({
-    ...item,
-    createdAt: new Date(item.createdAt),
-  }))
+  const followUpTest = (
+    operation.output as { followUpTest?: import('@deepsales/db').AiFollowUpTestContext } | null
+  )?.followUpTest
+  const history: AiResponseInput['history'] = [
+    ...(testContext?.history ?? []).map((item) => ({
+      ...item,
+      createdAt: new Date(item.createdAt),
+    })),
+    ...(followUpTest
+      ? [
+          {
+            id: input.id,
+            text: input.text,
+            direction: 'INBOUND' as const,
+            origin: 'CUSTOMER' as const,
+            senderMemberId: null,
+            createdAt: operation.createdAt,
+          },
+        ]
+      : []),
+  ]
   const context = (
     operation.output as {
       handoffContext: {
@@ -78,6 +95,7 @@ export async function executeAiTest(
   if (deterministic) {
     await saveResult({
       id: input.id,
+      actingUserId,
       chunkIds: [],
       output: {
         kind: 'HANDOFF',
@@ -141,7 +159,7 @@ export async function executeAiTest(
         'Only classify the listed handoff conditions. If none matches return ANSWER with response "No condition matched.". Do not answer questions or hand off for other reasons.',
       responseLanguage: snapshot.responseLanguage,
       timeZone: snapshot.timeZone,
-      messages: [{ id: input.id, text: input.text }],
+      messages: followUpTest ? [] : [{ id: input.id, text: input.text }],
       history,
       simulatedCustomer: testContext?.customer,
       knowledgeChunks: [],
@@ -150,6 +168,7 @@ export async function executeAiTest(
     if (matchedHandoffRuleId(decision, semanticRules)) {
       await saveResult({
         id: input.id,
+        actingUserId,
         chunkIds: [],
         output: {
           kind: 'HANDOFF',
@@ -188,7 +207,7 @@ export async function executeAiTest(
       timeZone: snapshot.timeZone,
       variableInput,
       skillConditions: snapshot.skills.map(({ id, condition }) => ({ id, condition })),
-      messages: [{ id: input.id, text: input.text }],
+      messages: followUpTest ? [] : [{ id: input.id, text: input.text }],
       history,
       knowledgeChunks: [],
       simulatedCustomer: testContext?.customer,
@@ -226,6 +245,9 @@ export async function executeAiTest(
     fetcher,
   )
   const responseInput: AiResponseInput = {
+    proactiveEvent: followUpTest
+      ? { ruleId: followUpTest.ruleId, instructions: followUpTest.instructions }
+      : null,
     externalTools: (
       await readAiExternalCatalog(db, {
         workspaceId,
@@ -243,7 +265,7 @@ export async function executeAiTest(
     naturalToneEnabled: snapshot.naturalToneEnabled,
     instructions: responseInstructions,
     responseLanguage: snapshot.responseLanguage,
-    messages: [{ id: input.id, text: input.text }],
+    messages: followUpTest ? [] : [{ id: input.id, text: input.text }],
     history,
     simulatedCustomer: testContext?.customer,
     propertyRules,

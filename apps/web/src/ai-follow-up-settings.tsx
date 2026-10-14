@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { AiInstructionInsert } from './ai-instruction-insert'
 import { Button } from '#components/ui/button'
 import { Input } from '#components/ui/input'
 import { Switch } from '#components/ui/switch'
@@ -44,6 +45,15 @@ type Event = {
   outputMessageId: string | null
   deliveryState: string | null
   deliveryFailureCode: string | null
+  partialCompletion?: boolean
+  actions?: {
+    id: string
+    tool: string
+    state: string
+    failureCode: string | null
+    retryAt: string | null
+    attemptCount: number
+  }[]
 }
 const fresh = (): Rule => ({
   id: crypto.randomUUID(),
@@ -267,6 +277,31 @@ export function AiFollowUpSettings({
           <p className="field-description">
             留空时根据授权当前会话生成，事实仍需知识依据。发送接口成功不代表实际送达或已读。新输入、接管、关闭、停止及规则修改会取消未提交回访；已提交消息继续按送达状态处理。
           </p>
+          <AiInstructionInsert
+            workspaceId={workspaceId}
+            memberId={memberId}
+            disabled={busy}
+            immediate
+            onInsert={(token) => {
+              const textarea = document.getElementById('follow-up-instructions')
+              const start =
+                textarea instanceof HTMLTextAreaElement
+                  ? textarea.selectionStart
+                  : draft.instructions.length
+              const end = textarea instanceof HTMLTextAreaElement ? textarea.selectionEnd : start
+              setDraft({
+                ...draft,
+                instructions:
+                  draft.instructions.slice(0, start) + token + draft.instructions.slice(end),
+              })
+              requestAnimationFrame(() => {
+                if (textarea instanceof HTMLTextAreaElement) {
+                  textarea.focus()
+                  textarea.setSelectionRange(start + token.length, start + token.length)
+                }
+              })
+            }}
+          />
           <AiStopSettings
             workspaceId={workspaceId}
             audienceOnly
@@ -318,39 +353,95 @@ export function AiFollowUpSettings({
       </p>
       {data?.events.length === 0 && <p>尚未触发回访。</p>}
       {data?.events.map((event) => (
-        <p key={event.id}>
-          {data.rules.find((rule) => rule.id === event.ruleId)?.name ?? '已删除规则'} · 会话{' '}
-          {event.conversationId.slice(0, 8)} ·{' '}
-          <StatusBadge
-            tone={
-              event.operationState === 'UNKNOWN' ||
+        <div key={event.id} data-testid={`follow-up-event-${event.id}`}>
+          <p>
+            {data.rules.find((rule) => rule.id === event.ruleId)?.name ?? '已删除规则'} · 会话{' '}
+            {event.conversationId.slice(0, 8)} ·{' '}
+            <StatusBadge
+              tone={
+                event.operationState === 'UNKNOWN' ||
+                event.deliveryFailureCode === 'AMBIGUOUS_DELIVERY'
+                  ? 'warning'
+                  : event.deliveryState === 'FAILED' || event.state === 'FAILED'
+                    ? 'destructive'
+                    : event.deliveryState === 'SENT'
+                      ? 'success'
+                      : event.state === 'HANDOFF'
+                        ? 'warning'
+                        : ['QUEUED', 'GENERATING', 'COMPLETED'].includes(event.state)
+                          ? 'info'
+                          : 'neutral'
+              }
+            >
+              {event.operationState === 'UNKNOWN' ||
               event.deliveryFailureCode === 'AMBIGUOUS_DELIVERY'
-                ? 'warning'
-                : event.deliveryState === 'FAILED' || event.state === 'FAILED'
-                  ? 'destructive'
+                ? '结果不明，已暂停'
+                : event.deliveryState === 'FAILED'
+                  ? '发送失败，详见会话'
                   : event.deliveryState === 'SENT'
-                    ? 'success'
-                    : event.state === 'HANDOFF'
-                      ? 'warning'
-                      : ['QUEUED', 'GENERATING', 'COMPLETED'].includes(event.state)
-                        ? 'info'
-                        : 'neutral'
-            }
-          >
-            {event.operationState === 'UNKNOWN' ||
-            event.deliveryFailureCode === 'AMBIGUOUS_DELIVERY'
-              ? '结果不明，已暂停'
-              : event.deliveryState === 'FAILED'
-                ? '发送失败，详见会话'
-                : event.deliveryState === 'SENT'
-                  ? '发送接口已确认成功'
-                  : (states[event.state] ?? event.state)}
-          </StatusBadge>{' '}
-          · {new Date(event.triggeredAt).toLocaleString()}
-          {event.failureCode
-            ? ` · ${{ FOLLOW_UP_INELIGIBLE: '回访资格或锚点已变化', FOLLOW_UP_RULE_CHANGED: '规则已修改或删除', NEW_CUSTOMER_MESSAGE: '客户已发送新消息', AI_PROVIDER_ERROR: '模型服务失败', INVALID_OUTPUT: '模型输出无效', QUOTA_EXHAUSTED: '额度已耗尽' }[event.failureCode] ?? event.failureCode}`
-            : ''}
-        </p>
+                    ? '发送接口已确认成功'
+                    : (states[event.state] ?? event.state)}
+            </StatusBadge>{' '}
+            · {new Date(event.triggeredAt).toLocaleString()}
+            {event.failureCode
+              ? ` · ${{ FOLLOW_UP_INELIGIBLE: '回访资格或锚点已变化', FOLLOW_UP_RULE_CHANGED: '规则已修改或删除', NEW_CUSTOMER_MESSAGE: '客户已发送新消息', AI_PROVIDER_ERROR: '模型服务失败', INVALID_OUTPUT: '模型输出无效', QUOTA_EXHAUSTED: '额度已耗尽' }[event.failureCode] ?? event.failureCode}`
+              : ''}
+          </p>
+          {event.partialCompletion && (
+            <p className="field-description">
+              已完成部分动作，本轮消息未提交。已成功动作不会撤回或重复执行。
+            </p>
+          )}
+          {!!event.actions?.length && (
+            <details>
+              <summary>工具动作（{event.actions.length}）</summary>
+              {event.actions.map((action) => (
+                <p key={action.id}>
+                  {action.tool.startsWith('external:')
+                    ? '外部工具'
+                    : ((
+                        {
+                          record: '记录内部备注',
+                          search: '检索知识',
+                          skip: '单轮跳过',
+                          handoff: '转人工',
+                          send_media: '发送私有素材',
+                        } as Record<string, string>
+                      )[action.tool] ?? action.tool)}{' '}
+                  <StatusBadge
+                    tone={
+                      action.state === 'SUCCEEDED'
+                        ? 'success'
+                        : action.state === 'UNKNOWN'
+                          ? 'warning'
+                          : action.state === 'FAILED'
+                            ? 'destructive'
+                            : 'neutral'
+                    }
+                  >
+                    {(
+                      {
+                        SUCCEEDED: '成功',
+                        FAILED: '失败',
+                        UNKNOWN: '结果不明，已暂停',
+                        CANCELLED: '已取消',
+                        RUNNING: '执行中',
+                        PENDING: '等待执行',
+                      } as Record<string, string>
+                    )[action.state] ?? action.state}
+                  </StatusBadge>{' '}
+                  <small>
+                    调用 ID：{action.id} · 已预留执行次数：{action.attemptCount}
+                    {action.failureCode ? ` · ${action.failureCode}` : ''}
+                    {action.retryAt
+                      ? ` · 下次可重试：${new Date(action.retryAt).toLocaleString()}`
+                      : ''}
+                  </small>
+                </p>
+              ))}
+            </details>
+          )}
+        </div>
       ))}
       <AlertDialog
         open={Boolean(deleting)}
