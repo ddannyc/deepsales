@@ -159,7 +159,7 @@ import { aiOperationsRoutes } from './ai-operations'
 import { meteredAiFetch } from './ai-usage'
 import { createAuth } from './auth'
 import type { Bindings } from './bindings'
-import { campaignRoutes, pumpCampaigns } from './campaigns'
+import { campaignRoutes, campaignTickSchema, pumpCampaigns } from './campaigns'
 import { customerMemoryJobSchema, processCustomerMemoryJob } from './customer-memory'
 import {
   createFacebookAdapter,
@@ -4460,6 +4460,12 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
         }),
       )
       await publishInboxChange(env, claimed.workspaceId, job.data.messageId, 'message.changed')
+      if (campaignDelivery && env.MAINTENANCE_QUEUE) {
+        await env.MAINTENANCE_QUEUE.send(
+          { v: 1, type: 'campaign.tick' },
+          { delaySeconds: Math.min(43_200, campaignDelivery.intervalSeconds) },
+        ).catch(() => undefined)
+      }
       queueMessage.ack()
     } catch (error) {
       const providerFailure = redactedFacebookFailure(error, [
@@ -4494,7 +4500,17 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
             releaseOutboundMessage(db, {
               messageId: claimed.id,
               attemptId: claimed.attemptId,
-              attempt,
+              attempt: campaignDelivery
+                ? {
+                    ...attempt,
+                    retryNotBefore: new Date(
+                      Math.max(
+                        Date.now() + (claimed.attemptNumber === 1 ? 30_000 : 120_000),
+                        attempt.retryNotBefore?.getTime() ?? 0,
+                      ),
+                    ),
+                  }
+                : attempt,
             }),
           )
         } catch {}
@@ -4528,6 +4544,15 @@ export async function handleOutboundBatch(batch: MessageBatch<unknown>, env: Bin
 
 export async function handleMaintenanceBatch(batch: MessageBatch<unknown>, env: Bindings) {
   for (const queueMessage of batch.messages) {
+    if (campaignTickSchema.safeParse(queueMessage.body).success) {
+      try {
+        await pumpCampaigns(env, withDatabase)
+        queueMessage.ack()
+      } catch {
+        queueMessage.retry()
+      }
+      continue
+    }
     const memoryJob = customerMemoryJobSchema.safeParse(queueMessage.body)
     if (memoryJob.success) {
       try {

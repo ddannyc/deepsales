@@ -30,6 +30,7 @@ const e2eOwnerKeys = [
   'customer-memory',
   'ai-properties',
   'ai-tags',
+  'campaigns',
   'lifecycle',
   'facebook',
   'inbox',

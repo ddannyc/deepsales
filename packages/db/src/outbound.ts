@@ -351,11 +351,21 @@ export async function claimOutboundMessage(
     if (!claimed) return null
 
     const [lastAttempt] = await tx
-      .select({ attemptNumber: deliveryAttempt.attemptNumber })
+      .select({
+        attemptNumber: deliveryAttempt.attemptNumber,
+        retryNotBefore: deliveryAttempt.retryNotBefore,
+      })
       .from(deliveryAttempt)
       .where(eq(deliveryAttempt.messageId, current.id))
       .orderBy(desc(deliveryAttempt.attemptNumber))
       .limit(1)
+
+    if (lastAttempt?.retryNotBefore && lastAttempt.retryNotBefore > now)
+      throw new ReplyError(
+        'RETRY_LATER',
+        'Provider retry deadline has not elapsed',
+        lastAttempt.retryNotBefore.getTime() - now.getTime(),
+      )
 
     const [attempt] = await tx
       .insert(deliveryAttempt)
@@ -396,6 +406,7 @@ export async function releaseOutboundMessage(
     attemptId: string
     attempt?: {
       httpStatus?: number | null
+      retryNotBefore?: Date | null
       code?: number | null
       subcode?: number | null
       type?: string | null
@@ -424,6 +435,7 @@ export async function releaseOutboundMessage(
       .update(deliveryAttempt)
       .set({
         httpStatus: input.attempt?.httpStatus ?? null,
+        retryNotBefore: input.attempt?.retryNotBefore ?? null,
         code: input.attempt?.code ?? null,
         subcode: input.attempt?.subcode ?? null,
         type: input.attempt?.type ?? null,
