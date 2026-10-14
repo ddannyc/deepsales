@@ -193,6 +193,30 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
     )
     expect(await (await f.call(`/${f.aiId}/property-rules`)).json()).toEqual({ rules: [] })
   })
+  it('validates unpublished attachment fallback choices and defaults to single-turn skip', async () => {
+    const f = await fixture()
+    expect(
+      await getAiMemberConfig(db, {
+        workspaceId: f.workspaceId,
+        memberId: f.aiId,
+        actingUserId: f.userId,
+      }),
+    ).toMatchObject({ unparsedFallbackEnabled: false, unparsedFallbackTexts: [] })
+    const saved = await f.configCall({
+      unparsedFallbackEnabled: true,
+      unparsedFallbackTexts: ['Please send text.', 'Could you describe this?'],
+    })
+    expect(saved.status).toBe(200)
+    expect(await saved.json()).toMatchObject({
+      config: {
+        unparsedFallbackEnabled: true,
+        unparsedFallbackTexts: ['Please send text.', 'Could you describe this?'],
+        publishedSnapshot: null,
+      },
+    })
+    expect((await f.configCall({ unparsedFallbackTexts: [''] })).status).toBe(400)
+    expect((await f.configCall({ unparsedFallbackEnabled: 'true' })).status).toBe(400)
+  })
   it('keeps customer memory disabled by default and enables it only after explicit publication', async () => {
     const f = await fixture()
     expect(

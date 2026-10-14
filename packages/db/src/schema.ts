@@ -145,6 +145,7 @@ export const aiResponseRunState = pgEnum('ai_response_run_state', [
   'GENERATING',
   'COMPLETED',
   'HANDOFF',
+  'SKIPPED',
   'CANCELLED',
   'FAILED',
 ])
@@ -838,6 +839,7 @@ export const aiResponseRun = pgTable(
       summary: string
       sourceChannelIds: string[]
     }>(),
+    unparsedFallbackText: text('unparsed_fallback_text'),
     propertyCollection: jsonb('property_collection').$type<AiPropertyCollection>(),
     advertisingContext: jsonb('advertising_context').$type<AdvertisingContext>(),
     contextMessageIds: uuid('context_message_ids').array(),
@@ -1047,6 +1049,8 @@ export const knowledgeBase = pgTable(
 
 export type AiMemberRuntimeSnapshot = {
   stopRules?: AiStopRules
+  unparsedFallbackEnabled?: boolean
+  unparsedFallbackTexts?: string[]
   splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
@@ -1116,6 +1120,8 @@ export const aiMemberConfig = pgTable('ai_member_config', {
     .$type<AiStopRules>()
     .default({ groups: [], periods: [], endingText: '', endingMediaAssetId: null })
     .notNull(),
+  unparsedFallbackEnabled: boolean('unparsed_fallback_enabled').default(false).notNull(),
+  unparsedFallbackTexts: jsonb('unparsed_fallback_texts').$type<string[]>().default([]).notNull(),
   splitRepliesEnabled: boolean('split_replies_enabled').default(false).notNull(),
   automaticLanguageEnabled: boolean('automatic_language_enabled').default(false).notNull(),
   timeZone: text('time_zone').default('UTC').notNull(),

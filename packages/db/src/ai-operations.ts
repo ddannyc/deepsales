@@ -416,6 +416,8 @@ export async function resolveTestConfiguration(
   if (input.source === 'DRAFT' && config.knowledgeBaseId)
     snapshot = {
       stopRules: config.stopRules,
+      unparsedFallbackEnabled: config.unparsedFallbackEnabled,
+      unparsedFallbackTexts: config.unparsedFallbackTexts,
       splitRepliesEnabled: config.splitRepliesEnabled,
       automaticLanguageEnabled: config.automaticLanguageEnabled,
       timeZone: config.timeZone,
