@@ -56,7 +56,7 @@ export function AiPropertySettings({
       fetch(root),
       fetch(`/api/workspaces/${workspaceId}/inbox-filter-options`),
     ])
-    if (!r.ok || !d.ok) throw new Error('读取属性采集失败，请重新加载。')
+    if (!r.ok || !d.ok) throw new Error('读取规则失败，请重新加载。')
     const [data, options] = await Promise.all([r.json(), d.json()])
     if (request !== loadRequest.current) return
     setRules(data.rules)
@@ -92,7 +92,7 @@ export function AiPropertySettings({
       await load()
       if (rule === draft && !remove) setDraft({ instructions: '', enabled: true })
       setDeleting(undefined)
-      setStatus(remove ? '采集规则已删除，立即生效。' : '采集规则已保存，立即生效。')
+      setStatus(remove ? `${action}规则已删除，立即生效。` : `${action}规则已保存，立即生效。`)
     } catch (e) {
       setError(e instanceof Error ? e.message : '操作失败，请重试。')
     } finally {
@@ -113,12 +113,12 @@ export function AiPropertySettings({
         disabled={busy}
         onClick={() => void load().catch((e) => setError(e.message))}
       >
-        重新加载采集规则
+        重新加载{action}规则
       </Button>
       {error && <p role="alert">{error}</p>}
       {status && <p role="status">{status}</p>}
       {!definitions ? (
-        <p role="status">正在读取属性…</p>
+        <p role="status">正在读取{field}…</p>
       ) : (
         <>
           {!rules.length && (
@@ -129,7 +129,7 @@ export function AiPropertySettings({
           {rules.map((rule) => (
             <div className="runtime-panel" key={rule.id}>
               <strong>
-                {definitions.find((d) => d.id === rule.definitionId)?.name ?? '属性已失效'}
+                {definitions.find((d) => d.id === rule.definitionId)?.name ?? `${field}已失效`}
               </strong>
               <Switch
                 aria-label={`启用${action} ${definitions.find((d) => d.id === rule.definitionId)?.name ?? '失效定义'}`}
@@ -170,13 +170,19 @@ export function AiPropertySettings({
               disabled={busy}
             >
               <SelectTrigger id={`${prefix}-field`}>
-                <SelectValue placeholder="选择已有属性" />
+                <SelectValue placeholder={`选择已有${field}`} />
               </SelectTrigger>
               <SelectContent>
                 {definitions.map((d) => (
                   <SelectItem key={d.id} value={d.id}>
                     {d.name} · {d.level === 'CUSTOMER' ? '客户级' : '会话级'} ·{' '}
-                    {d.type === 'NUMBER' ? '数字' : d.type === 'OPTION' ? '选项' : '文本'}
+                    {kind === 'property'
+                      ? d.type === 'NUMBER'
+                        ? '数字'
+                        : d.type === 'OPTION'
+                          ? '选项'
+                          : '文本'
+                      : ''}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -200,7 +206,7 @@ export function AiPropertySettings({
                 disabled={busy}
                 onClick={() => setDraft({ instructions: '', enabled: true })}
               >
-                取消编辑采集
+                取消编辑{action}
               </Button>
             )}
           </form>
@@ -214,9 +220,9 @@ export function AiPropertySettings({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>删除采集规则？</AlertDialogTitle>
+            <AlertDialogTitle>删除{action}规则？</AlertDialogTitle>
             <AlertDialogDescription>
-              删除后立即停止该字段的自动采集，已有属性值和历史保留。
+              删除后立即停止该规则，已有{field}和来源保留。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -228,7 +234,7 @@ export function AiPropertySettings({
                 if (deleting) void save(deleting, true)
               }}
             >
-              确认删除采集规则
+              确认删除{action}规则
             </AlertDialogAction>
           </AlertDialogFooter>
           {error && <p role="alert">{error}</p>}
