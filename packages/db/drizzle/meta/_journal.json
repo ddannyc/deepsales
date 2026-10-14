@@ -358,6 +358,20 @@
       "when": 1791947833309,
       "tag": "0050_ai_tool_actions",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1791951249599,
+      "tag": "0051_ai_skills",
+      "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1791951452622,
+      "tag": "0052_external_tools",
+      "breakpoints": true
     }
   ]
 }

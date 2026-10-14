@@ -30,7 +30,10 @@ const e2eOwnerKeys = [
   'customer-memory',
   'ai-properties',
   'ai-tags',
+  'ai-tools',
+  'ai-skills',
   'ai-follow-ups',
+  'ai-external-tools',
   'campaigns',
   'lifecycle',
   'facebook',
@@ -185,6 +188,7 @@ function workerBindings(baseUrl: string, facebookGraphBaseUrl: string, aiBaseUrl
     EMBEDDING_DIMENSIONS: '1536',
     LLM_PROVIDER: 'alibaba',
     LLM_MODEL: 'qwen3.8-flash',
+    AI_TOOL_ALLOWED_ORIGINS: '["https://tools.example.com"]',
   }
 }
 
@@ -423,7 +427,56 @@ async function startFakeAI() {
       )
       return
     }
+    if (
+      body.messages?.[0]?.content.startsWith(
+        'Classify only the administrator-defined skill conditions',
+      )
+    ) {
+      const classifier = JSON.parse(content) as { skill_conditions: { id: string }[] }
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Classified.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  matchedSkillIds: classifier.skill_conditions.map(({ id }) => id).reverse(),
+                }),
+              },
+            },
+          ],
+        }),
+      )
+      return
+    }
     const current = /<customer_messages>([\s\S]*?)<\/customer_messages>/.exec(content)?.[1] ?? ''
+    if (current.includes('Run internal note tool')) {
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Simulated note recorded.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  toolCalls: [
+                    { tool: 'record', arguments: { text: 'Sandbox-only internal note.' } },
+                  ],
+                }),
+              },
+            },
+          ],
+        }),
+      )
+      return
+    }
     if (current.includes('What help can you offer?')) {
       response.end(JSON.stringify({ choices: [{ message: { content: 'invalid JSON' } }] }))
       return

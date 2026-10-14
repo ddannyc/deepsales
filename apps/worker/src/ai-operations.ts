@@ -49,6 +49,9 @@ import {
   saveAiTagRule,
 } from '@deepsales/db'
 import { Hono } from 'hono'
+import { externalToolRoute } from './external-tool-routes'
+import { ExternalToolError } from './external-tools'
+import { readAiExternalCatalog } from '@deepsales/db'
 import { z } from 'zod'
 import {
   AI_PERSONA_SAFETY_SUFFIX,
@@ -119,11 +122,20 @@ export function aiOperationsRoutes(
           )
         if (!uuid.safeParse(resource).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
+        const external = await externalToolRoute(c, db, memberInput, action, segments, body)
+        if (external) return external
         if (action === 'variables' && c.req.method === 'GET') {
           await getAiMemberConfig(db, memberInput)
           return c.json({
             variables: AI_VARIABLES,
-            tools: BUILTIN_AI_TOOLS,
+            tools: [
+              ...BUILTIN_AI_TOOLS,
+              ...(await readAiExternalCatalog(db, memberInput)).map((row) => ({
+                id: `external:${row.tool.id}`,
+                label: row.tool.name,
+                description: row.tool.description,
+              })),
+            ],
             positions: ['instructions'],
             missing: null,
           })
@@ -262,6 +274,7 @@ export function aiOperationsRoutes(
                   withDb,
                   claimed.operation,
                   (result) => recordAiBatchResult(db, { ...batchInput, attempt }, result),
+                  session.user.id,
                   `BATCH:${attempt}`,
                 )
               }
@@ -548,8 +561,13 @@ export function aiOperationsRoutes(
           if (!test.created)
             return c.json(await getAiDiagnostics(db, { ...identity, id: test.operation.id }))
           try {
-            await executeAiTest(db, c.env, withDb, test.operation, (result) =>
-              recordAiTestResult(db, result),
+            await executeAiTest(
+              db,
+              c.env,
+              withDb,
+              test.operation,
+              (result) => recordAiTestResult(db, result),
+              session.user.id,
             )
           } catch (error) {
             await finishAiOperation(db, {
@@ -571,6 +589,7 @@ export function aiOperationsRoutes(
         }
         return c.json({ error: { code: 'NOT_FOUND' } }, 404)
       } catch (error) {
+        if (error instanceof ExternalToolError) return c.json({ error: { code: error.code } }, 400)
         if (error instanceof AiUsageError) return c.json({ error: { code: error.code } }, 409)
         if (error instanceof z.ZodError) return c.json({ error: { code: 'INVALID_REQUEST' } }, 400)
         if (error instanceof AiMemberError)

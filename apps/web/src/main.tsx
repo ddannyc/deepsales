@@ -85,8 +85,10 @@ import { Textarea } from '#components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '#components/ui/tooltip'
 import { AiHandoffSettings } from './ai-handoff-settings'
 import { AiInstructionInsert } from './ai-instruction-insert'
+import { AiSkillsEditor, type AiSkillDraft } from './ai-skills-editor'
 import { AiOperations } from './ai-operations'
 import { AiFollowUpSettings } from './ai-follow-up-settings'
+import { AiExternalTools } from './ai-external-tools'
 import { AiPropertySettings } from './ai-property-settings'
 import { AiSetupGuide } from './ai-setup-guide'
 import { type AiStopRules, AiStopSettings, emptyStopRules } from './ai-stop-settings'
@@ -312,6 +314,7 @@ type KnowledgeDocument = {
 }
 
 type AiMemberRuntimeSnapshot = {
+  skills?: AiSkillDraft[]
   stopRules?: AiStopRules
   unparsedFallbackEnabled?: boolean
   unparsedFallbackTexts?: string[]
@@ -335,6 +338,7 @@ type AiMemberRuntimeSnapshot = {
 }
 
 type AiMemberConfig = {
+  skills: AiSkillDraft[]
   stopRules: AiStopRules
   unparsedFallbackEnabled: boolean
   unparsedFallbackTexts: string[]
@@ -367,6 +371,7 @@ type AiMemberConfig = {
 
 type AiMemberDraft = Pick<
   AiMemberConfig,
+  | 'skills'
   | 'instructions'
   | 'responseLanguage'
   | 'knowledgeBaseId'
@@ -4263,6 +4268,15 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
                 })
               }}
             />
+            <AiSkillsEditor
+              skills={draft.skills}
+              workspaceId={workspace.id}
+              memberId={memberId}
+              disabled={busy}
+              onChange={(skills) =>
+                setDraft((current) => (current ? { ...current, skills } : current))
+              }
+            />
             <div className="switch-field">
               <div>
                 <span className="form-field-label" id="ai-auto-language-label">
@@ -4821,6 +4835,11 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
         workspaceId={workspace.id}
         memberId={memberId}
       />
+      <AiExternalTools
+        key={`external:${workspace.id}:${memberId}`}
+        workspaceId={workspace.id}
+        memberId={memberId}
+      />
       <AiPropertySettings
         key={`tags:${workspace.id}:${memberId}`}
         workspaceId={workspace.id}
@@ -4845,6 +4864,7 @@ function AiMemberPage({ workspace, memberId }: { workspace: Workspace; memberId:
 function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntimeSnapshot) {
   return (
     JSON.stringify([
+      left.skills ?? [],
       left.instructions,
       left.responseLanguage,
       left.knowledgeBaseId,
@@ -4867,6 +4887,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
       left.stopRules ?? emptyStopRules,
     ]) ===
     JSON.stringify([
+      right.skills ?? [],
       right.instructions,
       right.responseLanguage,
       right.knowledgeBaseId,
@@ -4893,6 +4914,7 @@ function sameAiDraft(left: AiMemberDraft, right: AiMemberDraft | AiMemberRuntime
 
 function aiDraftFromConfig(config: AiMemberConfig): AiMemberDraft {
   return {
+    skills: config.skills ?? [],
     instructions: config.instructions,
     stopRules: config.stopRules ?? emptyStopRules,
     naturalToneEnabled: config.naturalToneEnabled ?? false,

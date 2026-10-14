@@ -14,22 +14,40 @@ export const BUILTIN_AI_TOOLS = [
   },
 ] as const
 export type BuiltinAiTool = (typeof BUILTIN_AI_TOOLS)[number]['id']
+export type AiToolReference = BuiltinAiTool | `external:${string}`
 export type AiToolCall =
+  | { tool: 'external'; arguments: { definitionId: string; values: Record<string, unknown> } }
   | { tool: 'handoff'; arguments: Record<string, never> }
   | { tool: 'skip'; arguments: Record<string, never> }
   | { tool: 'record'; arguments: { text: string } }
   | { tool: 'search'; arguments: { query: string } }
   | { tool: 'send_media'; arguments: { assetId: string } }
 
-export function instructionTools(instructions: string): BuiltinAiTool[] {
+export function instructionTools(instructions: string): AiToolReference[] {
   const ids = [...instructions.matchAll(/\[\[tool:([^\]]+)\]\]/g)].map((match) => match[1])
-  if (ids.some((id) => !BUILTIN_AI_TOOLS.some((tool) => tool.id === id)))
+  if (
+    ids.some(
+      (id) =>
+        !BUILTIN_AI_TOOLS.some((tool) => tool.id === id) &&
+        !/^external:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          id,
+        ),
+    )
+  )
     throw new Error('Unknown tool reference')
-  return [...new Set(ids)] as BuiltinAiTool[]
+  return [...new Set(ids)] as AiToolReference[]
 }
 export function validateAiToolCalls(instructions: string, calls: AiToolCall[]) {
   const allowed = instructionTools(instructions)
-  if (calls.length > 3 || calls.some((call) => !allowed.includes(call.tool)))
+  if (
+    calls.length > 3 ||
+    calls.some(
+      (call) =>
+        !allowed.includes(
+          call.tool === 'external' ? `external:${call.arguments.definitionId}` : call.tool,
+        ),
+    )
+  )
     throw new Error('Unauthorized tool')
   if (
     calls.some(

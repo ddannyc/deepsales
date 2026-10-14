@@ -1,13 +1,21 @@
+import { readAiExternalCatalog, simulateExternalTestAction } from '@deepsales/db'
 import {
+  aiSelectedSkillInstructions,
+  recordAiSkillSelection,
   type AiHandoffCondition,
   type AiTestContext,
+  AiUsageError,
   type aiOperation,
+  claimAiTestSearchAction,
   type Database,
+  finishAiTestSearchAction,
   KnowledgeError,
   matchesAiCondition,
   type recordAiTestResult,
 } from '@deepsales/db'
 import {
+  AIOutputError,
+  type AiResponseInput,
   aiMemberRuntimeSnapshotSchema,
   applyHandoffPolicy,
   createAlibabaEmbeddingProvider,
@@ -25,6 +33,7 @@ export async function executeAiTest(
   withDb: <T>(env: Bindings, work: (db: Database) => Promise<T>) => Promise<T>,
   operation: typeof aiOperation.$inferSelect,
   saveResult: (result: Parameters<typeof recordAiTestResult>[1]) => Promise<void>,
+  actingUserId: string,
   stage: string = 'LLM',
 ) {
   const input = { id: operation.id, text: operation.input ?? '' }
@@ -151,7 +160,52 @@ export async function executeAiTest(
       return
     }
   }
-  let chunks: Awaited<ReturnType<typeof retrieveKnowledgeChunks>> = []
+  let responseInstructions = snapshot.instructions
+  if (snapshot.skills.length) {
+    const matcher = createAlibabaLlmProvider(
+      {
+        provider: env.LLM_PROVIDER,
+        apiKey: env.AI_API_KEY,
+        baseUrl: env.AI_BASE_URL,
+        model: env.LLM_MODEL,
+      },
+      meteredAiFetch(
+        (work) => withDb(env, work),
+        {
+          id: input.id,
+          workspaceId,
+          memberId: operation.memberId ?? undefined,
+          kind: 'TEST',
+          configVersionId: operation.configVersionId,
+        },
+        `SKILL_MATCH:${stage}`,
+      ),
+    )
+    const match = await matcher.generateResponse({
+      instructions: '',
+      toolsDisabled: true,
+      responseLanguage: snapshot.responseLanguage,
+      timeZone: snapshot.timeZone,
+      variableInput,
+      skillConditions: snapshot.skills.map(({ id, condition }) => ({ id, condition })),
+      messages: [{ id: input.id, text: input.text }],
+      history,
+      knowledgeChunks: [],
+      simulatedCustomer: testContext?.customer,
+    })
+    const selected = await withDb(env, (database) =>
+      recordAiSkillSelection(database, {
+        workspaceId,
+        memberId: operation.memberId as string,
+        operationId: operation.id,
+        actingUserId,
+        matchedSkillIds: match.matchedSkillIds ?? [],
+      }),
+    )
+    if (selected.kind === 'BLOCKED') return
+    responseInstructions = aiSelectedSkillInstructions(snapshot, selected.selection.id)
+  }
+  let chunks: AiResponseInput['knowledgeChunks'] = []
   try {
     chunks = await retrieveKnowledgeChunks(db, embedding, env, {
       workspaceId,
@@ -171,11 +225,23 @@ export async function executeAiTest(
     },
     fetcher,
   )
-  const decision = await llm.generateResponse({
+  const responseInput: AiResponseInput = {
+    externalTools: (
+      await readAiExternalCatalog(db, {
+        workspaceId,
+        memberId: operation.memberId ?? '',
+        actingUserId,
+      })
+    ).map((row) => ({
+      id: row.tool.id,
+      name: row.tool.name,
+      description: row.tool.description,
+      inputs: row.tool.inputs,
+    })),
     automaticLanguageEnabled: snapshot.automaticLanguageEnabled,
     timeZone: snapshot.timeZone,
     naturalToneEnabled: snapshot.naturalToneEnabled,
-    instructions: snapshot.instructions,
+    instructions: responseInstructions,
     responseLanguage: snapshot.responseLanguage,
     messages: [{ id: input.id, text: input.text }],
     history,
@@ -190,25 +256,192 @@ export async function executeAiTest(
       ? testContext?.customer.language || undefined
       : undefined,
     knowledgeChunks: chunks,
-  })
+  }
+  let decision = await llm.generateResponse(responseInput)
   const replyConfig = {
     ...snapshot,
     responseLanguage: snapshot.automaticLanguageEnabled
       ? (decision.languageSelection?.language ?? snapshot.responseLanguage)
       : snapshot.responseLanguage,
   }
-  const result = applyHandoffPolicy(
+  const mediaCall = decision.toolCalls?.find((call) => call.tool === 'send_media')
+  if (mediaCall && decision.mediaAssetId && decision.mediaAssetId !== mediaCall.arguments.assetId)
+    throw new AIOutputError()
+  let result = applyHandoffPolicy(
     enforceGrounding(
-      decision,
+      mediaCall ? { ...decision, mediaAssetId: mediaCall.arguments.assetId } : decision,
       chunks.map(({ id }) => id),
       replyConfig,
       chunks,
     ).decision,
     replyConfig,
   )
+  const calls = 'toolCalls' in result.decision ? (result.decision.toolCalls ?? []) : []
+  const terminal = calls.at(-1)?.tool
+  const externalResults: NonNullable<AiResponseInput['externalResults']> = []
+  const actions: NonNullable<Parameters<typeof recordAiTestResult>[1]['actions']> = []
+  const searches: {
+    ordinal: number
+    call: Extract<NonNullable<typeof decision.toolCalls>[number], { tool: 'search' }>
+    chunks: AiResponseInput['knowledgeChunks']
+  }[] = []
+  for (const [ordinal, call] of calls.entries()) {
+    if (call.tool === 'external') {
+      if (!operation.memberId) throw new AIOutputError()
+      const action = await simulateExternalTestAction(db, {
+        workspaceId,
+        memberId: operation.memberId,
+        actingUserId,
+        id: operation.id,
+        ordinal,
+        call,
+      })
+      if (!action?.result) return
+      actions.push({ call })
+      externalResults.push({
+        actionId: action.id,
+        values: action.result as Record<string, import('@deepsales/db').ExternalValue>,
+      })
+      continue
+    }
+    if (call.tool !== 'search') {
+      actions.push({ call })
+      continue
+    }
+    if (!operation.memberId) throw new AIOutputError()
+    const actionInput = {
+      workspaceId,
+      memberId: operation.memberId,
+      actingUserId,
+      id: operation.id,
+      ordinal,
+      call,
+    }
+    const claimed = await claimAiTestSearchAction(db, actionInput)
+    if (!claimed) return
+    const toolFetch = meteredAiFetch(
+      (work) => withDb(env, work),
+      {
+        id: operation.id,
+        workspaceId,
+        memberId: operation.memberId ?? undefined,
+        kind: 'TEST',
+        configVersionId: operation.configVersionId,
+      },
+      `${stage}:TOOL:${ordinal}`,
+    )
+    const provider = createAlibabaEmbeddingProvider(
+      {
+        provider: env.EMBEDDING_PROVIDER,
+        apiKey: env.AI_API_KEY,
+        baseUrl: env.AI_BASE_URL,
+        model: env.EMBEDDING_MODEL,
+        dimensions: env.EMBEDDING_DIMENSIONS,
+      },
+      toolFetch,
+    )
+    let found = claimed.chunks
+    try {
+      if (!found) {
+        const retrieved = await retrieveKnowledgeChunks(db, provider, env, {
+          workspaceId,
+          knowledgeBaseId: snapshot.knowledgeBaseId,
+          query: call.arguments.query,
+        })
+        found = await finishAiTestSearchAction(db, {
+          ...actionInput,
+          chunkIds: retrieved.map((chunk) => chunk.id),
+        })
+      }
+    } catch (error) {
+      await finishAiTestSearchAction(db, {
+        ...actionInput,
+        failure:
+          error instanceof AiUsageError && error.code === 'OPERATION_PAUSED' ? 'UNKNOWN' : 'FAILED',
+      })
+      throw error
+    }
+    if (!found) return
+    searches.push({ ordinal, call, chunks: found })
+    actions.push({ call, chunkIds: found.map((chunk) => chunk.id) })
+    chunks = [
+      ...found,
+      ...chunks.filter((chunk) => !found.some((result) => result.id === chunk.id)),
+    ].slice(0, 6)
+  }
+  if (
+    calls.some((call) => call.tool === 'search' || call.tool === 'external') &&
+    !['skip', 'handoff', 'send_media'].includes(terminal ?? '')
+  ) {
+    const finalFetch = meteredAiFetch(
+      (work) => withDb(env, work),
+      {
+        id: operation.id,
+        workspaceId,
+        memberId: operation.memberId ?? undefined,
+        kind: 'TEST',
+        configVersionId: operation.configVersionId,
+      },
+      `${stage}:TOOLS_REPLY`,
+    )
+    decision = await createAlibabaLlmProvider(
+      {
+        provider: env.LLM_PROVIDER,
+        apiKey: env.AI_API_KEY,
+        baseUrl: env.AI_BASE_URL,
+        model: env.LLM_MODEL,
+      },
+      finalFetch,
+    ).generateResponse({
+      ...responseInput,
+      knowledgeChunks: chunks,
+      toolsDisabled: true,
+      toolResults: calls.map((call) => ({ tool: call.tool, state: 'SUCCEEDED' })),
+      externalResults,
+    })
+    for (const search of searches) {
+      if (!operation.memberId) throw new AIOutputError()
+      const current = await finishAiTestSearchAction(db, {
+        workspaceId,
+        memberId: operation.memberId,
+        actingUserId,
+        id: operation.id,
+        ordinal: search.ordinal,
+        call: search.call,
+      })
+      if (!current) return
+      if (JSON.stringify(current) !== JSON.stringify(search.chunks)) throw new AIOutputError()
+    }
+    result = applyHandoffPolicy(
+      enforceGrounding(
+        decision,
+        chunks.map((chunk) => chunk.id),
+        replyConfig,
+        chunks,
+        externalResults.map((result) => result.actionId),
+      ).decision,
+      replyConfig,
+    )
+  }
+  if (terminal === 'handoff')
+    result = {
+      kind: 'HANDOFF',
+      decision: {
+        ...decision,
+        decision: 'HANDOFF',
+        handoffReason: 'UNABLE_TO_ANSWER',
+        response: '模拟转人工；不会分配或发送。',
+      },
+    }
   await saveResult({
     id: input.id,
-    output: { ...result, handoffContext: context },
+    actingUserId,
+    output: {
+      ...result,
+      ...(terminal === 'skip' ? { kind: 'SKIPPED' } : {}),
+      handoffContext: context,
+    },
+    actions,
     chunkIds: chunks.map(({ id }) => id),
   })
 }

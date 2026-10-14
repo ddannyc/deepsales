@@ -1,30 +1,29 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
-import { AiMemberError, getAiMemberConfig } from './ai-members'
+import { AiMemberError, getAiMemberConfig, readAiViewerChannelIds } from './ai-members'
 import {
   assertAiStopReferences,
   EMPTY_AI_STOP_RULES,
-  isAiStopPeriod,
   hasAiStopPeriodBetween,
+  isAiStopPeriod,
   matchesAiStopCondition,
   normalizeAiStopRules,
 } from './ai-stop'
 import type { Database } from './database'
 import { facebookReplyWindowOpen } from './facebook'
 import {
-  aiFollowUpRule,
+  type AiStopCondition,
   aiFollowUpEvent,
-  aiResponseRun,
-  aiOperation,
+  aiFollowUpRule,
   aiMemberConfig,
+  aiOperation,
+  aiResponseRun,
+  channel,
   channelIdentity,
   conversation,
-  message,
   member,
   memberChannelAccess,
-  channel,
+  message,
   workspace,
-  workspaceUserAccess,
-  type AiStopCondition,
 } from './schema'
 
 type Tx = Parameters<Parameters<Database['transaction']>[0]>[0]
@@ -41,31 +40,11 @@ export type FollowUpRuleInput = Identity & {
   groups: AiStopCondition[][]
 }
 
-async function visibleFollowUpChannels(db: Database | Tx, input: Identity) {
-  const rows = await db
-    .select({ id: channel.id })
-    .from(member)
-    .innerJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
-    .innerJoin(memberChannelAccess, eq(memberChannelAccess.memberId, member.id))
-    .innerJoin(channel, eq(channel.id, memberChannelAccess.channelId))
-    .where(
-      and(
-        eq(workspaceUserAccess.workspaceId, input.workspaceId),
-        eq(workspaceUserAccess.userId, input.actingUserId),
-        eq(member.status, 'ACTIVE'),
-        eq(channel.workspaceId, input.workspaceId),
-        eq(channel.status, 'ACTIVE'),
-        sql`exists (select 1 from member_channel_access ai_grant where ai_grant.member_id = ${input.memberId} and ai_grant.channel_id = ${channel.id})`,
-      ),
-    )
-  return rows.map((row) => row.id)
-}
-
 export async function listAiFollowUpRules(db: Database, input: Identity) {
   return db.transaction(async (tx) => {
     await getAiMemberConfig(tx, input)
     await tx.execute(sql`select id from ${workspace} where id = ${input.workspaceId} for update`)
-    const channels = await visibleFollowUpChannels(tx, input)
+    const channels = await readAiViewerChannelIds(tx, input)
     const rules = await tx
       .select()
       .from(aiFollowUpRule)
@@ -502,7 +481,7 @@ export async function previewAiFollowUpAudience(
     } catch {
       throw new AiMemberError('INVALID_CONFIGURATION')
     }
-    const channels = await visibleFollowUpChannels(tx, input)
+    const channels = await readAiViewerChannelIds(tx, input)
     const current = await tx
       .select({ id: conversation.id, customerId: channelIdentity.customerId })
       .from(conversation)

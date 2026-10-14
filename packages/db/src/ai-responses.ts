@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm'
 import { readAiFollowUpAuthorization } from './ai-follow-ups'
+import { checkExternalActionResults } from './ai-external-actions'
 import {
   type AiHandoffEvaluation,
   matchAiHandoffRule,
@@ -11,6 +12,7 @@ import {
   readAiPropertyCollection,
   sameAiPropertyRules,
 } from './ai-property-rules'
+import { aiSkillVariableInstructions } from './ai-skills'
 import {
   assertAiStopReferences,
   EMPTY_AI_STOP_RULES,
@@ -541,7 +543,7 @@ export async function claimAiResponseRun(
       workspaceId: current.workspaceId,
       conversationId: current.conversationId,
       memberId: current.memberId,
-      instructions: snapshot?.instructions ?? '',
+      instructions: snapshot ? aiSkillVariableInstructions(snapshot) : '',
       timeZone: snapshot?.timeZone ?? 'UTC',
       context: variableContext,
       now,
@@ -747,12 +749,13 @@ export type CommitAiResponseResult =
   | null
 
 export async function commitAiResponse(
-  db: Database,
+  db: Database | Transaction,
   input: {
     runId: string
     text: string
     unparsedInput?: boolean
     stopCheckOnly?: boolean
+    toolSkip?: boolean
     checkHandoffBeforeStop?: boolean
     handoffEvaluation?: AiHandoffEvaluation
     now?: Date
@@ -760,12 +763,14 @@ export async function commitAiResponse(
     languageSelection?: { language: string; explicitSwitch: boolean } | null
     appendedTags?: string[]
     collectedProperties?: AiCollectedProperty[]
+    usedToolActionIds?: string[]
   },
 ): Promise<CommitAiResponseResult> {
   let text = input.text.trim()
   if (
     !input.stopCheckOnly &&
-    ((!text && !input.unparsedInput) || text.length > MAX_AI_RESPONSE_TEXT_LENGTH)
+    ((!text && !input.unparsedInput && !input.toolSkip) ||
+      text.length > MAX_AI_RESPONSE_TEXT_LENGTH)
   ) {
     throw new AiResponseError('INVALID_REQUEST', 'AI response text is invalid')
   }
@@ -879,7 +884,7 @@ export async function commitAiResponse(
         workspaceId: current.workspaceId,
         conversationId: current.id,
         memberId: run.memberId,
-        instructions: run.configSnapshot?.instructions ?? '',
+        instructions: run.configSnapshot ? aiSkillVariableInstructions(run.configSnapshot) : '',
         timeZone: run.configSnapshot?.timeZone ?? 'UTC',
         context: String(run.variableInput.values['conversation.context'] ?? ''),
         now: new Date(run.variableInput.capturedAt),
@@ -1046,6 +1051,18 @@ export async function commitAiResponse(
           .where(eq(conversation.id, current.id))
       if (input.stopCheckOnly) return { kind: 'CONTINUE' as const }
     }
+    if (!stopReason && input.toolSkip) {
+      await tx
+        .update(aiResponseRun)
+        .set({
+          state: 'SKIPPED',
+          failureCode: 'TOOL_SKIP',
+          completedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(aiResponseRun.id, run.id))
+      return { kind: 'SKIPPED', workspaceId: current.workspaceId, conversationId: current.id }
+    }
     if (!stopReason && input.unparsedInput) {
       if (!run.configSnapshot?.unparsedFallbackEnabled) {
         await tx
@@ -1152,6 +1169,18 @@ export async function commitAiResponse(
       }
     }
     if (!stopReason && !input.stopCheckOnly) {
+      if (!(await checkExternalActionResults(tx, run.id, input.usedToolActionIds))) {
+        await tx
+          .update(aiResponseRun)
+          .set({
+            state: 'CANCELLED',
+            failureCode: 'EXTERNAL_AUTHORIZATION_CHANGED',
+            completedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(aiResponseRun.id, run.id))
+        return null
+      }
       const context = {
         workspaceId: current.workspaceId,
         memberId: run.memberId,

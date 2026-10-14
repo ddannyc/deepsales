@@ -1,18 +1,15 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  aiOperation,
   aiFollowUpEvent,
-  customer,
-  channelIdentity,
-  message,
-  transferConversation,
-  takeOverConversation,
-  customerPropertyValue,
+  aiOperation,
   aiProviderAttempt,
+  aiResponseRun,
   aiTestBatchItem,
+  aiToolAction,
   bootstrapWorkspace,
   channel,
+  channelIdentity,
   claimKnowledgeDocument,
   completeKnowledgeDocument,
   conversation,
@@ -20,7 +17,9 @@ import {
   createDatabase,
   createInlineKnowledgeDocument,
   createKnowledgeBase,
+  customer,
   customerPropertyDefinition,
+  customerPropertyValue,
   customerTagDefinition,
   getAiAnalytics,
   getAiMemberConfig,
@@ -28,8 +27,11 @@ import {
   listAiDiagnostics,
   mediaAsset,
   member,
+  message,
   publishAiMemberConfig,
   setMemberChannelAccess,
+  takeOverConversation,
+  transferConversation,
   updateAiMemberConfig,
   workspaceUserAccess,
 } from '@deepsales/db'
@@ -69,6 +71,460 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('selects the first matching skill in the sandbox and simulates only its tools', async () => {
+    const f = await fixture()
+    const skills = [
+      {
+        id: crypto.randomUUID(),
+        name: 'First',
+        condition: 'Setup help',
+        instructions: 'SANDBOX_FIRST [[tool:record]]',
+      },
+      {
+        id: crypto.randomUUID(),
+        name: 'Second',
+        condition: 'Setup help',
+        instructions: 'SANDBOX_SECOND [[tool:skip]]',
+      },
+    ]
+    await f.configCall({ skills })
+    const calls = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const body = String(init?.body)
+      const classification = body.includes('skill_conditions')
+      if (!classification) {
+        expect(body).toContain('SANDBOX_FIRST')
+        expect(body).not.toContain('SANDBOX_SECOND')
+      }
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                handoffReason: null,
+                response: classification ? 'Classified.' : 'Selected sandbox skill.',
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                ...(classification
+                  ? { matchedSkillIds: [skills[1].id, skills[0].id] }
+                  : {
+                      toolCalls: [{ tool: 'record', arguments: { text: 'Simulated skill note' } }],
+                    }),
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', calls)
+    const input = { id: crypto.randomUUID(), source: 'DRAFT', text: 'Help with setup' }
+    const response = await f.call(`/${f.aiId}/test`, 'POST', input)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      operation: {
+        state: 'COMPLETED',
+        output: { skillSelection: { id: skills[0].id, name: 'First', configVersionId: null } },
+      },
+    })
+    expect((await f.call(`/${f.aiId}/test`, 'POST', input)).status).toBe(200)
+    expect(calls).toHaveBeenCalledTimes(2)
+    const actions = await db
+      .select()
+      .from(aiToolAction)
+      .where(eq(aiToolAction.operationId, input.id))
+    expect(actions).toMatchObject([{ tool: 'record', simulated: true, state: 'SUCCEEDED' }])
+    expect(
+      await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+    ).toEqual([])
+  })
+  it('terminates invalid sandbox skill classification without simulating an action', async () => {
+    const f = await fixture()
+    const skill = {
+      id: crypto.randomUUID(),
+      name: 'Controlled',
+      condition: 'Setup help',
+      instructions: 'Record setup [[tool:record]]',
+    }
+    expect((await f.configCall({ skills: [skill] })).status).toBe(200)
+    const calls = vi.fn(async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Classified.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                matchedSkillIds: [crypto.randomUUID()],
+              }),
+            },
+          },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', calls)
+    const input = { id: crypto.randomUUID(), source: 'DRAFT', text: 'Help with setup' }
+    const response = await f.call(`/${f.aiId}/test`, 'POST', input)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      operation: { state: 'FAILED', failureCode: 'INVALID_OUTPUT' },
+    })
+    expect((await f.call(`/${f.aiId}/test`, 'POST', input)).status).toBe(200)
+    expect(calls).toHaveBeenCalledTimes(1)
+    expect(
+      await db.select().from(aiToolAction).where(eq(aiToolAction.operationId, input.id)),
+    ).toEqual([])
+  })
+  it('publishes ordered skills as an immutable configuration and restores only their draft', async () => {
+    const f = await fixture()
+    const [support] = await db
+      .insert(channel)
+      .values({
+        workspaceId: f.workspaceId,
+        provider: 'FACEBOOK_MESSENGER',
+        displayName: 'Support',
+      })
+      .returning()
+    await setMemberChannelAccess(db, {
+      workspaceId: f.workspaceId,
+      actingUserId: f.userId,
+      memberId: f.aiId,
+      channelIds: [support.id],
+    })
+    const skills = [
+      {
+        id: crypto.randomUUID(),
+        name: 'Setup',
+        condition: 'The customer asks how to start.',
+        instructions: 'Offer the setup guide. [[tool:search]]',
+      },
+      {
+        id: crypto.randomUUID(),
+        name: 'General',
+        condition: 'The customer asks for help.',
+        instructions: 'Give a concise grounded answer.',
+      },
+    ]
+    expect((await f.configCall({ skills })).status).toBe(200)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiId, actingUserId: f.userId }
+    const draft = await getAiMemberConfig(db, identity)
+    expect(draft).toMatchObject({ skills, publishedSnapshot: null })
+    const published = await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    const versionId = published.publishedVersionId
+    expect(published.publishedSnapshot).toMatchObject({ skills })
+    expect((await f.configCall({ skills: [...skills].reverse() })).status).toBe(200)
+    expect((await getAiMemberConfig(db, identity)).publishedSnapshot).toMatchObject({ skills })
+    const restored = await f.call(`/${f.aiId}/restore`, 'POST', { versionId })
+    expect(restored.status).toBe(200)
+    expect(await restored.json()).toMatchObject({
+      config: { skills, publishedVersionId: versionId },
+    })
+    expect((await f.configCall({ skills: [skills[0], skills[0]] })).status).toBe(400)
+    expect(
+      (await f.configCall({ skills: [{ ...skills[0], instructions: '{{unknown.variable}}' }] }))
+        .status,
+    ).toBe(400)
+  })
+  it.each(['viewer', 'ai'] as const)(
+    'withholds live tool diagnostics when %s loses the source channel, including administrators',
+    async (revoked) => {
+      const f = await fixture()
+      const [human] = await db
+        .select({ id: member.id })
+        .from(member)
+        .innerJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
+        .where(eq(workspaceUserAccess.workspaceId, f.workspaceId))
+      const channels = await db
+        .insert(channel)
+        .values(
+          ['Source', 'Other'].map((displayName) => ({
+            workspaceId: f.workspaceId,
+            provider: 'FACEBOOK_MESSENGER' as const,
+            displayName,
+          })),
+        )
+        .returning()
+      for (const memberId of [human.id, f.aiId])
+        await setMemberChannelAccess(db, {
+          workspaceId: f.workspaceId,
+          actingUserId: f.userId,
+          memberId,
+          channelIds: channels.map((c) => c.id),
+        })
+      const [person] = await db.insert(customer).values({ workspaceId: f.workspaceId }).returning()
+      const [identity] = await db
+        .insert(channelIdentity)
+        .values({
+          workspaceId: f.workspaceId,
+          customerId: person.id,
+          channelId: channels[0].id,
+          externalUserId: crypto.randomUUID(),
+        })
+        .returning()
+      const [conv] = await db
+        .insert(conversation)
+        .values({
+          workspaceId: f.workspaceId,
+          channelIdentityId: identity.id,
+          assigneeMemberId: f.aiId,
+        })
+        .returning()
+      const [inbound] = await db
+        .insert(message)
+        .values({
+          conversationId: conv.id,
+          channelId: channels[0].id,
+          direction: 'INBOUND',
+          senderType: 'CUSTOMER',
+          messageType: 'TEXT',
+          text: 'Hello',
+        })
+        .returning()
+      const id = crypto.randomUUID()
+      await db.insert(aiResponseRun).values({
+        id,
+        conversationId: conv.id,
+        memberId: f.aiId,
+        inputFirstMessageId: inbound.id,
+        inputLastMessageId: inbound.id,
+        scheduledFor: new Date(),
+        state: 'SKIPPED',
+      })
+      await db.insert(aiOperation).values({
+        id,
+        workspaceId: f.workspaceId,
+        memberId: f.aiId,
+        kind: 'LIVE_REPLY',
+        period: '2026-10',
+        state: 'COMPLETED',
+      })
+      await db.insert(aiToolAction).values({
+        workspaceId: f.workspaceId,
+        memberId: f.aiId,
+        operationId: id,
+        runId: id,
+        ordinal: 0,
+        tool: 'record',
+        arguments: { text: 'Private note value.' },
+        state: 'SUCCEEDED',
+        result: { noteId: crypto.randomUUID() },
+      })
+      const visible = await f.call(`/${id}/diagnostics`)
+      expect(visible.status).toBe(200)
+      const body = (await visible.json()) as { actions: Record<string, unknown>[] }
+      expect(body.actions).toMatchObject([{ tool: 'record', state: 'SUCCEEDED' }])
+      expect(body.actions[0]).not.toHaveProperty('arguments')
+      expect(body.actions[0]).not.toHaveProperty('result')
+      expect(await (await f.call(`/${f.aiId}/runs`)).json()).toMatchObject({ runs: [{ id }] })
+      await setMemberChannelAccess(db, {
+        workspaceId: f.workspaceId,
+        actingUserId: f.userId,
+        memberId: revoked === 'viewer' ? human.id : f.aiId,
+        channelIds: [channels[1].id],
+      })
+      const hidden = await f.call(`/${id}/diagnostics`)
+      expect(hidden.status).toBe(404)
+      expect(JSON.stringify(await hidden.json())).not.toContain(id)
+      expect(await (await f.call(`/${f.aiId}/runs`)).json()).toMatchObject({ runs: [] })
+    },
+  )
+  it.each(['success', 'unknown', 'clear'] as const)(
+    'consumes search results in a grounded sandbox answer and records simulated actions (%s)',
+    async (mode) => {
+      const f = await fixture()
+      await f.configCall({ instructions: '[[tool:search]]' })
+      const doc = await createInlineKnowledgeDocument(db, {
+        workspaceId: f.workspaceId,
+        knowledgeBaseId: f.baseId,
+        createdByUserId: f.userId,
+        name: 'Calibration',
+        text: 'Press Start to calibrate.',
+      })
+      const claim = await claimKnowledgeDocument(db, { documentId: doc.id })
+      if (!claim) throw new Error('No claim')
+      const vector = (axis: number) => Array.from({ length: 1536 }, (_, i) => (i === axis ? 1 : 0))
+      await completeKnowledgeDocument(db, {
+        documentId: doc.id,
+        processingStartedAt: claim.processingStartedAt,
+        workspaceId: f.workspaceId,
+        knowledgeBaseId: f.baseId,
+        contentSha256: 'b'.repeat(64),
+        embeddingMetadata: {
+          provider: 'alibaba',
+          model: 'qwen3.7-text-embedding',
+          dimensions: 1536,
+        },
+        chunks: [{ text: 'Press Start to calibrate.', embedding: vector(1) }],
+      })
+      const [chunk] = await db
+        .select()
+        .from(knowledgeChunk)
+        .where(eq(knowledgeChunk.knowledgeDocumentId, doc.id))
+      let generations = 0
+      const id = crypto.randomUUID()
+      const sessionId = crypto.randomUUID()
+      if (mode === 'clear')
+        expect(
+          (
+            await f.call(`/${f.aiId}/sessions`, 'POST', {
+              id: sessionId,
+              source: 'DRAFT',
+              customer: { properties: [], tags: [], source: '', language: '', memory: '' },
+            })
+          ).status,
+        ).toBe(201)
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: unknown, init?: RequestInit) => {
+          const body = String(init?.body)
+          if (String(url).endsWith('/embeddings')) {
+            if (body.includes('calibration procedure')) {
+              const [claim] = await db
+                .select()
+                .from(aiToolAction)
+                .where(eq(aiToolAction.operationId, id))
+              expect(claim).toMatchObject({ tool: 'search', state: 'RUNNING', simulated: true })
+              if (mode === 'unknown') throw new Error('Connection lost')
+              if (mode === 'clear')
+                await f.call(`/${f.aiId}/sessions/${sessionId}/clear`, 'POST', { generation: 1 })
+            }
+            return Response.json({
+              data: [
+                { index: 0, embedding: vector(body.includes('calibration procedure') ? 1 : 0) },
+              ],
+            })
+          }
+          generations++
+          if (generations === 2) expect(body).toContain('Press Start to calibrate.')
+          return Response.json({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify(
+                    generations === 1
+                      ? {
+                          decision: 'ANSWER',
+                          response: 'Checking.',
+                          handoffReason: null,
+                          containsBusinessFacts: false,
+                          usedChunkIds: [],
+                          toolCalls: [
+                            { tool: 'search', arguments: { query: 'calibration procedure' } },
+                          ],
+                        }
+                      : {
+                          decision: 'ANSWER',
+                          response: 'Press Start to calibrate.',
+                          handoffReason: null,
+                          containsBusinessFacts: true,
+                          usedChunkIds: [chunk.id],
+                        },
+                  ),
+                },
+              },
+            ],
+          })
+        }),
+      )
+      const response = await f.call(`/${f.aiId}/test`, 'POST', {
+        id,
+        source: 'DRAFT',
+        text: 'How do I get started?',
+        ...(mode === 'clear' ? { sessionId, generation: 1 } : {}),
+      })
+      expect(response.status).toBe(200)
+      if (mode !== 'success') {
+        const [action] = await db
+          .select()
+          .from(aiToolAction)
+          .where(eq(aiToolAction.operationId, id))
+        expect(action).toMatchObject({ state: mode === 'clear' ? 'CANCELLED' : 'UNKNOWN' })
+        if (mode === 'clear') expect(action.failureCode).toBe('TEST_CLEARED')
+        expect(generations).toBe(1)
+        expect(
+          await db.select().from(aiProviderAttempt).where(eq(aiProviderAttempt.operationId, id)),
+        ).toHaveLength(3)
+        return
+      }
+      expect(await response.json()).toMatchObject({
+        operation: {
+          output: { kind: 'ANSWER', decision: { response: 'Press Start to calibrate.' } },
+        },
+        actions: [{ tool: 'search', simulated: true, state: 'SUCCEEDED' }],
+      })
+      expect(generations).toBe(2)
+    },
+  )
+  it.each(['record', 'skip', 'handoff'] as const)(
+    'simulates %s with a stable action receipt and no production writes',
+    async (tool) => {
+      const f = await fixture()
+      await f.configCall({ instructions: `[[tool:${tool}]]` })
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: unknown) => {
+          expect(String(url)).toMatch(/^https:\/\/ai\.example\.com\//)
+          return String(url).endsWith('/embeddings')
+            ? Response.json({
+                data: [
+                  {
+                    index: 0,
+                    embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)),
+                  },
+                ],
+              })
+            : Response.json({
+                choices: [
+                  {
+                    message: {
+                      content: JSON.stringify({
+                        decision: 'ANSWER',
+                        response: tool === 'record' ? 'Recorded in simulation.' : '',
+                        handoffReason: null,
+                        containsBusinessFacts: false,
+                        usedChunkIds: [],
+                        toolCalls: [
+                          {
+                            tool,
+                            arguments: tool === 'record' ? { text: 'Sandbox-only note.' } : {},
+                          },
+                        ],
+                      }),
+                    },
+                  },
+                ],
+              })
+        }),
+      )
+      const id = crypto.randomUUID()
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await f.call(`/${f.aiId}/test`, 'POST', {
+          id,
+          source: 'DRAFT',
+          text: 'Try the configured tool.',
+        })
+        expect(response.status).toBe(200)
+        expect(await response.json()).toMatchObject({
+          actions: [{ tool, state: 'SUCCEEDED', simulated: true }],
+        })
+      }
+      expect(
+        await db.select().from(aiToolAction).where(eq(aiToolAction.operationId, id)),
+      ).toHaveLength(1)
+      expect(
+        await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+      ).toHaveLength(0)
+      expect(
+        (
+          await db.execute(
+            sql`select count(*)::int as count from conversation_internal_note where author_member_id = ${f.aiId}`,
+          )
+        ).rows,
+      ).toEqual([{ count: 0 }])
+    },
+  )
   it('intersects partial administrator and AI channels for follow-up events, preview and condition sources', async () => {
     const f = await fixture()
     const [human] = await db
@@ -1785,6 +2241,7 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   })
   it('cancels an in-flight test durably and rejects old generations and concurrent new turns', async () => {
     const f = await fixture()
+    await f.configCall({ instructions: '[[tool:record]]' })
     const sessionId = crypto.randomUUID()
     expect(
       (
@@ -1815,6 +2272,7 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
                 content: JSON.stringify({
                   decision: 'ANSWER',
                   response: 'Late answer',
+                  toolCalls: [{ tool: 'record', arguments: { text: 'Late simulated note.' } }],
                   handoffReason: null,
                   containsBusinessFacts: false,
                   usedChunkIds: [],
@@ -1852,6 +2310,9 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
       session: { customer: { memory: '' } },
       turns: [],
     })
+    expect(
+      await db.select().from(aiToolAction).where(eq(aiToolAction.operationId, input.id)),
+    ).toHaveLength(0)
     expect((await f.call(`/${f.aiId}/test`, 'POST', input)).status).toBe(400)
     const other = await fixture()
     expect((await other.call(`/${f.aiId}/sessions/${sessionId}`)).status).toBe(404)
@@ -1991,80 +2452,92 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
     expect((await f.call(root)).status).toBe(403)
     expect((await f.call(`${root}/${rule.id}`, 'DELETE', { revision: 2 })).status).toBe(403)
   })
-  it('previews a grounded private asset in the sandbox without creating a conversation or sending', async () => {
-    const f = await fixture()
-    const assetId = crypto.randomUUID()
-    await db.insert(mediaAsset).values({
-      id: assetId,
-      workspaceId: f.workspaceId,
-      title: 'Guide',
-      filename: 'guide.pdf',
-      kind: 'FILE',
-      mimeType: 'application/pdf',
-      byteSize: 12,
-      sha256: 'a'.repeat(64),
-      storageKey: 'test/guide',
-      inLibrary: true,
-    })
-    const doc = await createInlineKnowledgeDocument(db, {
-      workspaceId: f.workspaceId,
-      knowledgeBaseId: f.baseId,
-      createdByUserId: f.userId,
-      name: 'Guide',
-      text: 'Setup instructions.',
-      mediaAssetId: assetId,
-    })
-    const claim = await claimKnowledgeDocument(db, { documentId: doc.id })
-    if (!claim) throw new Error('Description not claimed')
-    const vector = Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0))
-    await completeKnowledgeDocument(db, {
-      documentId: doc.id,
-      processingStartedAt: claim.processingStartedAt,
-      workspaceId: f.workspaceId,
-      knowledgeBaseId: f.baseId,
-      contentSha256: 'b'.repeat(64),
-      embeddingMetadata: { provider: 'alibaba', model: 'qwen3.7-text-embedding', dimensions: 1536 },
-      chunks: [{ text: 'Setup instructions.', embedding: vector }],
-    })
-    const [chunk] = await db
-      .select()
-      .from(knowledgeChunk)
-      .where(eq(knowledgeChunk.knowledgeDocumentId, doc.id))
-    const calls = vi.fn(async (url: RequestInfo | URL) =>
-      String(url).endsWith('/embeddings')
-        ? Response.json({ data: [{ index: 0, embedding: vector }] })
-        : Response.json({
-            choices: [
-              {
-                message: {
-                  content: JSON.stringify({
-                    decision: 'ANSWER',
-                    response: 'Here is the guide.',
-                    handoffReason: null,
-                    containsBusinessFacts: false,
-                    usedChunkIds: [chunk.id],
-                    mediaAssetId: assetId,
-                  }),
+  it.each(['legacy', 'tool'] as const)(
+    'previews a grounded private asset in the sandbox without creating a conversation or sending (%s)',
+    async (mode) => {
+      const f = await fixture()
+      if (mode === 'tool') await f.configCall({ instructions: '[[tool:send_media]]' })
+      const assetId = crypto.randomUUID()
+      await db.insert(mediaAsset).values({
+        id: assetId,
+        workspaceId: f.workspaceId,
+        title: 'Guide',
+        filename: 'guide.pdf',
+        kind: 'FILE',
+        mimeType: 'application/pdf',
+        byteSize: 12,
+        sha256: 'a'.repeat(64),
+        storageKey: 'test/guide',
+        inLibrary: true,
+      })
+      const doc = await createInlineKnowledgeDocument(db, {
+        workspaceId: f.workspaceId,
+        knowledgeBaseId: f.baseId,
+        createdByUserId: f.userId,
+        name: 'Guide',
+        text: 'Setup instructions.',
+        mediaAssetId: assetId,
+      })
+      const claim = await claimKnowledgeDocument(db, { documentId: doc.id })
+      if (!claim) throw new Error('Description not claimed')
+      const vector = Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0))
+      await completeKnowledgeDocument(db, {
+        documentId: doc.id,
+        processingStartedAt: claim.processingStartedAt,
+        workspaceId: f.workspaceId,
+        knowledgeBaseId: f.baseId,
+        contentSha256: 'b'.repeat(64),
+        embeddingMetadata: {
+          provider: 'alibaba',
+          model: 'qwen3.7-text-embedding',
+          dimensions: 1536,
+        },
+        chunks: [{ text: 'Setup instructions.', embedding: vector }],
+      })
+      const [chunk] = await db
+        .select()
+        .from(knowledgeChunk)
+        .where(eq(knowledgeChunk.knowledgeDocumentId, doc.id))
+      const calls = vi.fn(async (url: RequestInfo | URL) =>
+        String(url).endsWith('/embeddings')
+          ? Response.json({ data: [{ index: 0, embedding: vector }] })
+          : Response.json({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      decision: 'ANSWER',
+                      response: 'Here is the guide.',
+                      handoffReason: null,
+                      containsBusinessFacts: false,
+                      usedChunkIds: [chunk.id],
+                      ...(mode === 'legacy'
+                        ? { mediaAssetId: assetId }
+                        : {
+                            toolCalls: [{ tool: 'send_media', arguments: { assetId } }],
+                          }),
+                    }),
+                  },
                 },
-              },
-            ],
-          }),
-    )
-    vi.stubGlobal('fetch', calls)
-    const result = await f.call(`/${f.aiId}/test`, 'POST', {
-      id: crypto.randomUUID(),
-      source: 'DRAFT',
-      text: 'Send the guide.',
-    })
-    expect(result.status).toBe(200)
-    expect(await result.json()).toMatchObject({
-      operation: { state: 'COMPLETED', output: { decision: { mediaAssetId: assetId } } },
-    })
-    expect(
-      await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
-    ).toEqual([])
-    expect(calls).toHaveBeenCalledTimes(2)
-  })
+              ],
+            }),
+      )
+      vi.stubGlobal('fetch', calls)
+      const result = await f.call(`/${f.aiId}/test`, 'POST', {
+        id: crypto.randomUUID(),
+        source: 'DRAFT',
+        text: 'Send the guide.',
+      })
+      expect(result.status).toBe(200)
+      expect(await result.json()).toMatchObject({
+        operation: { state: 'COMPLETED', output: { decision: { mediaAssetId: assetId } } },
+      })
+      expect(
+        await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+      ).toEqual([])
+      expect(calls).toHaveBeenCalledTimes(2)
+    },
+  )
   it('isolates idempotent tests, retains diagnostics and feedback, and rejects unauthorized reads', async () => {
     const f = await fixture()
     const calls = vi.fn(async () =>
