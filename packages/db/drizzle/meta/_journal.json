@@ -372,6 +372,13 @@
       "when": 1791951452622,
       "tag": "0052_external_tools",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1791953742431,
+      "tag": "0053_tool_read_retry",
+      "breakpoints": true
     }
   ]
 }
