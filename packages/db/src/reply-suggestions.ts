@@ -1,5 +1,7 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import type { AiConversationContextMessage } from './ai-responses'
+import { readAiVariableInput, sameAiVariableSources } from './ai-variable-values'
+import type { AiVariableInput } from './ai-variables'
 import type { Database } from './database'
 import { assertInboxConversationAccess } from './inbox'
 import { ReplyError } from './outbound'
@@ -222,13 +224,27 @@ export async function readReplySuggestionContext(db: Database, input: Identity &
           origin: item.senderType === 'CUSTOMER' ? 'CUSTOMER' : (item.memberType ?? 'HUMAN'),
         })
     }
-    return { record, messages: [{ id: latest.id, text: latest.text }], history }
+    const variableInput = await readAiVariableInput(tx, {
+      workspaceId: input.workspaceId,
+      conversationId: input.conversationId,
+      memberId: record.aiMemberId,
+      viewerMemberId: viewer.memberId,
+      instructions: record.snapshot.instructions,
+      timeZone: record.snapshot.timeZone ?? 'UTC',
+      context: [...history.map((m) => m.text), latest.text].join('\n'),
+    })
+    return { record, messages: [{ id: latest.id, text: latest.text }], history, variableInput }
   })
 }
 
 export async function completeReplySuggestion(
   db: Database,
-  input: Identity & { id: string; text: string; chunkIds: string[] },
+  input: Identity & {
+    id: string
+    text: string
+    chunkIds: string[]
+    variableInput?: AiVariableInput
+  },
 ) {
   return db.transaction(async (tx) => {
     const { viewer, channelId } = await authorize(tx, input)
@@ -247,6 +263,20 @@ export async function completeReplySuggestion(
     await assertAiAccess(tx, input.workspaceId, channelId, record.aiMemberId)
     if ((await latestSuggestionInput(tx, input.conversationId))?.id !== record.inputMessageId)
       throw new ReplyError('INVALID_REQUEST', 'Suggestion is stale')
+    if (input.variableInput) {
+      const currentVariables = await readAiVariableInput(tx, {
+        workspaceId: input.workspaceId,
+        conversationId: input.conversationId,
+        memberId: record.aiMemberId,
+        viewerMemberId: viewer.memberId,
+        instructions: record.snapshot.instructions,
+        timeZone: record.snapshot.timeZone ?? 'UTC',
+        context: String(input.variableInput.values['conversation.context'] ?? ''),
+        now: new Date(input.variableInput.capturedAt),
+      })
+      if (!sameAiVariableSources(input.variableInput, currentVariables))
+        throw new ReplyError('INVALID_REQUEST', 'Suggestion variables are stale')
+    }
     if (!input.text.trim() || input.text.length > 2000 || input.chunkIds.length > 6)
       throw new ReplyError('INVALID_REQUEST')
     if (

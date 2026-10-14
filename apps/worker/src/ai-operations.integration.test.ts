@@ -2,6 +2,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   aiOperation,
+  aiProviderAttempt,
   aiTestBatchItem,
   bootstrapWorkspace,
   channel,
@@ -61,6 +62,101 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('resolves test instruction variables only from the simulated customer', async () => {
+    const f = await fixture()
+    await f.configCall({
+      instructions:
+        'Use {{customer.name}} {{customer.language}} {{customer.properties}} {{system.timeZone}}.',
+    })
+    const [definition] = await db
+      .insert(customerPropertyDefinition)
+      .values({ workspaceId: f.workspaceId, name: 'Quantity', level: 'CUSTOMER', type: 'NUMBER' })
+      .returning()
+    const sessionId = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/sessions`, 'POST', {
+          id: sessionId,
+          source: 'DRAFT',
+          customer: {
+            properties: [{ definitionId: definition.id, value: 2 }],
+            tags: [],
+            source: '',
+            language: 'en',
+            memory: '',
+          },
+        })
+      ).status,
+    ).toBe(201)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init?: RequestInit) => {
+        expect(String(init?.body)).toContain('\\"customer.name\\":null')
+        expect(String(init?.body)).toContain('Quantity')
+        expect(String(init?.body)).not.toContain('customer_id')
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Thank you.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    const id = crypto.randomUUID()
+    const response = await f.call(`/${f.aiId}/test`, 'POST', {
+      id,
+      source: 'DRAFT',
+      sessionId,
+      generation: 1,
+      text: 'Use my simulated preference.',
+    })
+    expect(response.status).toBe(200)
+    const [operation] = await db.select().from(aiOperation).where(eq(aiOperation.id, id))
+    expect(operation.output).toMatchObject({
+      variableInput: {
+        version: 1,
+        values: {
+          'customer.name': null,
+          'customer.language': 'en',
+          'customer.properties': [{ name: 'Quantity', value: 2 }],
+          'system.timeZone': 'UTC',
+        },
+      },
+    })
+    expect(
+      (
+        await db.execute(
+          sql`select count(*)::int as count from customer_property_value where definition_id=${definition.id}`,
+        )
+      ).rows,
+    ).toEqual([{ count: 0 }])
+  })
+  it('exposes a controlled instruction variable catalog and rejects unknown variable names', async () => {
+    const f = await fixture()
+    const foreign = await fixture()
+    expect((await f.call(`/${foreign.aiId}/variables`)).status).toBe(404)
+    const response = await f.call(`/${f.aiId}/variables`)
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({
+      variables: expect.arrayContaining([
+        { key: 'customer.name', label: '联系人姓名', type: 'text' },
+      ]),
+      positions: ['instructions'],
+      missing: null,
+    })
+    expect((await f.configCall({ instructions: 'Use {{customer.name}}.' })).status).toBe(200)
+    expect((await f.configCall({ instructions: 'Use {{sql.query}}.' })).status).toBe(400)
+    expect((await f.configCall({ instructions: 'Use {{url.host}}.' })).status).toBe(400)
+  })
   it('manages controlled tag rules immediately and rejects foreign definitions', async () => {
     const f = await fixture()
     const [tag] = await db
@@ -748,6 +844,143 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
       items: [{ state: 'COMPLETED' }, { state: 'FAILED' }],
     })
   })
+  it.each([true, false])(
+    'refreshes failed batch tag rules under the frozen published switch %s',
+    async (enabled) => {
+      const f = await fixture()
+      const [support] = await db
+        .insert(channel)
+        .values({
+          workspaceId: f.workspaceId,
+          provider: 'FACEBOOK_MESSENGER',
+          displayName: 'Support',
+        })
+        .returning()
+      await setMemberChannelAccess(db, {
+        workspaceId: f.workspaceId,
+        memberId: f.aiId,
+        actingUserId: f.userId,
+        channelIds: [support.id],
+      })
+      await f.configCall({ tagsEnabled: enabled })
+      const identity = {
+        workspaceId: f.workspaceId,
+        memberId: f.aiId,
+        actingUserId: f.userId,
+        providerConfigured: true,
+      }
+      await publishAiMemberConfig(db, identity)
+      const [oldTag, newTag] = await db
+        .insert(customerTagDefinition)
+        .values([
+          { workspaceId: f.workspaceId, name: 'Original classification', level: 'CUSTOMER' },
+          { workspaceId: f.workspaceId, name: 'Updated classification', level: 'CUSTOMER' },
+        ])
+        .returning()
+      const original = {
+        id: crypto.randomUUID(),
+        definitionId: oldTag.id,
+        instructions: 'Original rule.',
+        enabled: true,
+      }
+      expect((await f.call(`/${f.aiId}/tag-rules`, 'POST', original)).status).toBe(201)
+      const setId = crypto.randomUUID(),
+        id = crypto.randomUUID()
+      await f.call(`/${f.aiId}/question-sets`, 'POST', {
+        id: setId,
+        name: 'Classification check',
+        questions: ['Please follow up.'],
+      })
+      expect(
+        (
+          await f.call(`/${f.aiId}/batches`, 'POST', {
+            id,
+            questionSetId: setId,
+            source: 'PUBLISHED',
+          })
+        ).status,
+      ).toBe(201)
+      const root = `/${f.aiId}/batches/${id}`
+      const { items } = (await (await f.call(root)).json()) as { items: [{ id: string }] }
+      let modelCalls = 0
+      const provider = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+        if (String(url).endsWith('/embeddings'))
+          return Response.json({
+            data: [
+              { index: 0, embedding: Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1 : 0)) },
+            ],
+          })
+        modelCalls++
+        const prompt = String(init?.body)
+        if (modelCalls === 1) {
+          expect(prompt.includes('Original rule.')).toBe(enabled)
+          return Response.json({}, { status: 503 })
+        }
+        expect(prompt).not.toContain('Original rule.')
+        expect(prompt.includes('Current independent rule.')).toBe(enabled)
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Thank you.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  appendedTags: enabled ? [newTag.id] : [],
+                }),
+              },
+            },
+          ],
+        })
+      })
+      vi.stubGlobal('fetch', provider)
+      await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 0 })
+      expect(await (await f.call(root)).json()).toMatchObject({
+        items: [{ state: 'FAILED', charged: true }],
+      })
+      expect(
+        (await f.call(`/${f.aiId}/tag-rules`, 'POST', { ...original, enabled: false, revision: 1 }))
+          .status,
+      ).toBe(201)
+      expect(
+        (
+          await f.call(`/${f.aiId}/tag-rules`, 'POST', {
+            id: crypto.randomUUID(),
+            definitionId: newTag.id,
+            instructions: 'Current independent rule.',
+            enabled: true,
+          })
+        ).status,
+      ).toBe(201)
+      await f.configCall({ tagsEnabled: !enabled })
+      await publishAiMemberConfig(db, identity)
+      await db
+        .update(aiTestBatchItem)
+        .set({ retryAt: new Date(0) })
+        .where(eq(aiTestBatchItem.id, items[0].id))
+      await db
+        .update(aiProviderAttempt)
+        .set({ retryAt: new Date(0) })
+        .where(eq(aiProviderAttempt.operationId, items[0].id))
+      await f.call(`${root}/execute`, 'POST', { itemId: items[0].id, attempt: 1 })
+      expect(await (await f.call(root)).json()).toMatchObject({
+        items: [
+          {
+            state: 'COMPLETED',
+            charged: true,
+            output: { decision: { appendedTags: enabled ? [newTag.id] : [] } },
+          },
+        ],
+      })
+      expect(modelCalls).toBe(2)
+      expect(await (await f.call('/budget')).json()).toMatchObject({ used: 1, reserved: 0 })
+      expect(
+        await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+      ).toEqual([])
+    },
+  )
   it('regenerates invalid retrieval on a failed-question retry while retaining one logical charge', async () => {
     const f = await fixture()
     const doc = await createInlineKnowledgeDocument(db, {

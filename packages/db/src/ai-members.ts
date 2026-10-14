@@ -1,6 +1,7 @@
 import { and, desc, eq, sql } from 'drizzle-orm'
 import { assertAiHandoffReferences, readEnabledAiHandoffRules } from './ai-handoff-rules'
 import { assertAiStopReferences, EMPTY_AI_STOP_RULES, normalizeAiStopRules } from './ai-stop'
+import { instructionVariableKeys } from './ai-variables'
 import type { Database } from './database'
 import {
   type AdMapping,
@@ -207,6 +208,7 @@ export async function publishAiMemberConfig(
       throw invalidConfiguration('Response language is required')
     }
     try {
+      instructionVariableKeys(config.instructions)
       await assertAiStopReferences(tx, input.workspaceId, config.stopRules)
       await assertAiHandoffReferences(
         tx,
@@ -499,6 +501,13 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
       stopRules = normalizeAiStopRules(input.stopRules)
     } catch {
       throw new AiMemberError('INVALID_REQUEST', 'Stop rules are invalid')
+    }
+  }
+  if (input.instructions !== undefined) {
+    try {
+      instructionVariableKeys(input.instructions)
+    } catch {
+      throw new AiMemberError('INVALID_REQUEST', 'Unknown instruction variable')
     }
   }
   const instructions =

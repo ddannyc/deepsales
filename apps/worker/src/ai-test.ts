@@ -31,6 +31,9 @@ export async function executeAiTest(
   const workspaceId = operation.workspaceId
   const snapshot = aiMemberRuntimeSnapshotSchema.parse(operation.snapshot)
   const testContext = (operation.output as { testContext?: AiTestContext } | null)?.testContext
+  const variableInput = (
+    operation.output as { variableInput?: import('@deepsales/db').AiVariableInput } | null
+  )?.variableInput
   const propertyRules =
     (
       operation.output as {
@@ -178,6 +181,8 @@ export async function executeAiTest(
     history,
     simulatedCustomer: testContext?.customer,
     propertyRules,
+    variableInput,
+    now: variableInput ? new Date(variableInput.capturedAt) : operation.createdAt,
     tagRules:
       (operation.output as { tagRules?: import('@deepsales/db').AiTagCollection['rules'] } | null)
         ?.tagRules ?? [],

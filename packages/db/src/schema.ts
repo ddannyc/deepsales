@@ -967,6 +967,7 @@ export const aiResponseRun = pgTable(
     unparsedFallbackText: text('unparsed_fallback_text'),
     propertyCollection: jsonb('property_collection').$type<AiPropertyCollection>(),
     tagCollection: jsonb('tag_collection').$type<AiTagCollection>(),
+    variableInput: jsonb('variable_input').$type<import('./ai-variables').AiVariableInput>(),
     advertisingContext: jsonb('advertising_context').$type<AdvertisingContext>(),
     contextMessageIds: uuid('context_message_ids').array(),
     outputMessageId: uuid('output_message_id').references(() => message.id, {
@@ -1490,7 +1491,7 @@ export const aiOperation = pgTable(
     index('ai_operation_workspace_period_idx').on(table.workspaceId, table.period),
     check(
       'ai_operation_kind_valid',
-      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION', 'SUGGESTION', 'PERSONA', 'CUSTOMER_MEMORY')`,
+      sql`${table.kind} in ('LIVE_REPLY', 'TEST', 'KNOWLEDGE_INDEX', 'TRANSLATION', 'SUGGESTION', 'PERSONA', 'CUSTOMER_MEMORY', 'FOLLOW_UP')`,
     ),
     check(
       'ai_operation_state_valid',
@@ -1683,4 +1684,56 @@ export const knowledgeChunk = pgTable(
       table.embedding.op('vector_cosine_ops'),
     ),
   ],
+)
+
+export const aiFollowUpRule = pgTable(
+  'ai_follow_up_rule',
+  {
+    id: uuid().primaryKey(),
+    workspaceId: uuid('workspace_id')
+      .notNull()
+      .references(() => workspace.id, { onDelete: 'cascade' }),
+    memberId: uuid('member_id')
+      .notNull()
+      .references(() => member.id, { onDelete: 'cascade' }),
+    name: text().notNull(),
+    enabled: boolean().default(false).notNull(),
+    revision: integer().default(1).notNull(),
+    timer: text().$type<'LAST_AI_REPLY' | 'AI_ASSIGNMENT'>().notNull(),
+    delaySeconds: integer('delay_seconds').notNull(),
+    instructions: text().default('').notNull(),
+    groups: jsonb().$type<AiStopCondition[][]>().default([]).notNull(),
+    effectiveAt: timestamp('effective_at', { withTimezone: true }).defaultNow().notNull(),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [
+    index('ai_follow_up_rule_member_idx').on(t.memberId, t.enabled),
+    check(
+      'ai_follow_up_rule_valid',
+      sql`${t.revision} > 0 and ${t.delaySeconds} between 1 and 2592000 and ${t.timer} in ('LAST_AI_REPLY','AI_ASSIGNMENT')`,
+    ),
+  ],
+)
+
+export const aiFollowUpEvent = pgTable(
+  'ai_follow_up_event',
+  {
+    id: uuid()
+      .primaryKey()
+      .references(() => aiResponseRun.id, { onDelete: 'cascade' }),
+    ruleId: uuid('rule_id')
+      .notNull()
+      .references(() => aiFollowUpRule.id),
+    conversationId: uuid('conversation_id')
+      .notNull()
+      .references(() => conversation.id, { onDelete: 'cascade' }),
+    ruleRevision: integer('rule_revision').notNull(),
+    anchorId: uuid('anchor_id').notNull(),
+    anchorAt: timestamp('anchor_at', { withTimezone: true }).notNull(),
+    dueAt: timestamp('due_at', { withTimezone: true }).notNull(),
+    triggeredAt: timestamp('triggered_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (t) => [uniqueIndex('ai_follow_up_event_once_idx').on(t.ruleId, t.conversationId)],
 )

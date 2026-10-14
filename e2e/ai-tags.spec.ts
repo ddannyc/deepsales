@@ -46,6 +46,9 @@ test('publishes tag enablement separately from immediately effective authorized 
     await page.goto(`/ai-member/${ai.member.id}`)
     const enabled = page.getByRole('switch', { name: '启用 AI 标签追加', exact: true })
     await expect(enabled).not.toBeChecked()
+    await page.getByRole('combobox', { name: '插入变量', exact: true }).click()
+    await page.getByRole('option', { name: '联系人姓名 · 文本', exact: true }).click()
+    await expect(page.getByRole('textbox', { name: /^指令/ })).toHaveValue(/\{\{customer\.name\}\}/)
     await enabled.click()
     const saved = page.waitForResponse(
       (response) => response.url().endsWith(url) && response.request().method() === 'PATCH',
@@ -54,6 +57,7 @@ test('publishes tag enablement separately from immediately effective authorized 
     expect((await saved).status()).toBe(200)
     const config = await page.request.get(url).then((r) => r.json())
     expect(config.config.tagsEnabled).toBe(true)
+    expect(config.config.instructions).toContain('{{customer.name}}')
     expect(config.config.publishedSnapshot).toBeNull()
     await page.getByRole('button', { name: '发布', exact: true }).click()
     await expect
@@ -62,6 +66,9 @@ test('publishes tag enablement separately from immediately effective authorized 
           (await page.request.get(url).then((r) => r.json())).config.publishedSnapshot?.tagsEnabled,
       )
       .toBe(true)
+    expect(
+      (await page.request.get(url).then((r) => r.json())).config.publishedSnapshot.instructions,
+    ).toContain('{{customer.name}}')
     const region = page.getByRole('region', { name: 'AI 标签追加', exact: true })
     await region.getByRole('combobox', { name: '追加标签', exact: true }).click()
     await page.getByRole('option', { name: /Follow up/ }).click()

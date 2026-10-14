@@ -1,0 +1,1 @@
+ALTER TABLE "ai_response_run" ADD COLUMN "variable_input" jsonb;
