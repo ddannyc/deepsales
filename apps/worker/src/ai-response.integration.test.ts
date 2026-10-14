@@ -2,6 +2,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   aiMemberConfig,
+  aiOperation,
   aiProviderAttempt,
   aiResponseRun,
   aiToolAction,
@@ -85,6 +86,113 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('executes only the first published matching skill with its authorized tools and stable version', async () => {
+    const f = await createFixture(db)
+    const identity = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+    const skills = [
+      {
+        id: crypto.randomUUID(),
+        name: 'First',
+        condition: 'The customer asks for setup.',
+        instructions: 'SELECTED_FIRST [[tool:record]] {{system.timeZone}}',
+      },
+      {
+        id: crypto.randomUUID(),
+        name: 'Second',
+        condition: 'The customer needs help.',
+        instructions: 'UNSELECTED_SECOND [[tool:skip]]',
+      },
+    ]
+    await updateAiMemberConfig(db, {
+      ...identity,
+      skills,
+      replyWaitEnabled: false,
+      instructions: 'Answer safely.',
+      timeZone: 'UTC',
+    })
+    const published = await publishAiMemberConfig(db, { ...identity, providerConfigured: true })
+    await updateAiMemberConfig(db, { ...identity, skills: [...skills].reverse() })
+    const received = await receiveContextInput(db, f, 'I need help with setup.')
+    const assigned = await autoAssignConversation(db, {
+      workspaceId: f.workspaceId,
+      conversationId: received.conversationId,
+    })
+    if (!assigned.aiResponseRunId) throw new Error('Missing run')
+    let generations = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        if (String(url).endsWith('/embeddings'))
+          return Response.json({ data: [{ index: 0, embedding: vector() }] })
+        generations++
+        const body = String(init?.body)
+        const classification = body.includes('skill_conditions')
+        if (!classification) {
+          expect(body).toContain('SELECTED_FIRST')
+          expect(body).not.toContain('UNSELECTED_SECOND')
+          expect(body).toContain('UTC')
+        }
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: classification ? 'Classified.' : 'Selected first.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  ...(classification
+                    ? { matchedSkillIds: [skills[1].id, skills[0].id] }
+                    : {
+                        toolCalls: [
+                          { tool: 'record', arguments: { text: 'First skill observation.' } },
+                        ],
+                      }),
+                }),
+              },
+            },
+          ],
+        })
+      }),
+    )
+    for (let attempt = 0; attempt < 2; attempt++)
+      await handleAiResponseBatch(
+        batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+        environment(),
+      )
+    const replies = await db
+      .select()
+      .from(message)
+      .where(
+        and(eq(message.conversationId, received.conversationId), eq(message.direction, 'OUTBOUND')),
+      )
+    expect(replies.map((reply) => reply.text)).toEqual(['Selected first.'])
+    expect(generations).toBe(2)
+    const [operation] = await db
+      .select()
+      .from(aiOperation)
+      .where(eq(aiOperation.id, assigned.aiResponseRunId))
+    expect(operation).toMatchObject({
+      configVersionId: published.publishedVersionId,
+      output: {
+        skillSelection: {
+          id: skills[0].id,
+          name: 'First',
+          configVersionId: published.publishedVersionId,
+        },
+      },
+    })
+    expect(
+      (
+        await listInternalNotes(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+        })
+      ).notes,
+    ).toHaveLength(1)
+  })
   it.each(['success', 'unknown'] as const)(
     'uses authorized search results in a final grounded answer without sending an unexecuted success claim (%s)',
     async (mode) => {

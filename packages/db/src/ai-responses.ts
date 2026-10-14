@@ -11,6 +11,7 @@ import {
   readAiPropertyCollection,
   sameAiPropertyRules,
 } from './ai-property-rules'
+import { aiSkillVariableInstructions } from './ai-skills'
 import {
   assertAiStopReferences,
   EMPTY_AI_STOP_RULES,
@@ -541,7 +542,7 @@ export async function claimAiResponseRun(
       workspaceId: current.workspaceId,
       conversationId: current.conversationId,
       memberId: current.memberId,
-      instructions: snapshot?.instructions ?? '',
+      instructions: snapshot ? aiSkillVariableInstructions(snapshot) : '',
       timeZone: snapshot?.timeZone ?? 'UTC',
       context: variableContext,
       now,
@@ -881,7 +882,7 @@ export async function commitAiResponse(
         workspaceId: current.workspaceId,
         conversationId: current.id,
         memberId: run.memberId,
-        instructions: run.configSnapshot?.instructions ?? '',
+        instructions: run.configSnapshot ? aiSkillVariableInstructions(run.configSnapshot) : '',
         timeZone: run.configSnapshot?.timeZone ?? 'UTC',
         context: String(run.variableInput.values['conversation.context'] ?? ''),
         now: new Date(run.variableInput.capturedAt),

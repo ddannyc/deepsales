@@ -1,7 +1,50 @@
 import { instructionTools } from './ai-tools'
 import { instructionVariableKeys } from './ai-variables'
+import type { AiMemberRuntimeSnapshot } from './schema'
 
 export type AiSkill = { id: string; name: string; condition: string; instructions: string }
+export type AiSkillSelection = {
+  id: string | null
+  name: string | null
+  configVersionId: string | null
+}
+
+export function firstMatchingAiSkill(skills: AiSkill[], ids: string[]) {
+  if (
+    !Array.isArray(ids) ||
+    ids.length > skills.length ||
+    new Set(ids).size !== ids.length ||
+    ids.some((id) => !skills.some((skill) => skill.id === id))
+  )
+    throw new Error('Invalid matched skills')
+  return skills.find((skill) => ids.includes(skill.id)) ?? null
+}
+
+export function selectedAiSkillId(output: unknown) {
+  const selection = (output as { skillSelection?: AiSkillSelection } | null)?.skillSelection
+  return typeof selection?.id === 'string' ? selection.id : null
+}
+
+export function aiSkillVariableInstructions(
+  snapshot: Pick<AiMemberRuntimeSnapshot, 'instructions' | 'skills'>,
+) {
+  return [
+    snapshot.instructions,
+    ...(snapshot.skills ?? []).flatMap((skill) => [skill.condition, skill.instructions]),
+  ].join('\n')
+}
+
+export function aiSelectedSkillInstructions(
+  snapshot: Pick<AiMemberRuntimeSnapshot, 'instructions' | 'skills'>,
+  id?: string | null,
+) {
+  return [
+    snapshot.instructions,
+    snapshot.skills?.find((skill) => skill.id === id)?.instructions ?? '',
+  ]
+    .filter(Boolean)
+    .join('\n')
+}
 
 export function normalizeAiSkills(value: AiSkill[]): AiSkill[] {
   if (!Array.isArray(value) || value.length > 20) throw new Error('Invalid skills')
