@@ -1080,7 +1080,11 @@ function Shell({
       />
       <div className={`app-content ${inboxPage ? 'app-content-inbox' : ''}`}>
         {campaignsPage ? (
-          <Campaigns workspaceId={me.workspace.id} manager={me.workspace.role !== 'AGENT'} />
+          <Campaigns
+            key={me.workspace.id}
+            workspaceId={me.workspace.id}
+            manager={me.workspace.role !== 'AGENT'}
+          />
         ) : aiMemberId ? (
           <AiMemberPage workspace={me.workspace} memberId={aiMemberId} />
         ) : teamPage ? (

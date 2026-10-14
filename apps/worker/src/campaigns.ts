@@ -9,6 +9,7 @@ import {
   InboxError,
   listCampaignAudience,
   listCampaigns,
+  pauseUnknownCampaignTranslation,
   pendingCampaignTranslations,
   readCampaign,
   saveCampaign,
@@ -26,6 +27,9 @@ import type { Bindings } from './bindings'
 import { nextCampaignOccurrence, resolveCampaignTime } from './campaign-schedule'
 
 type WithDb = <T>(env: Bindings, work: (db: Database) => Promise<T>) => Promise<T>
+export const campaignTickSchema = z
+  .object({ v: z.literal(1), type: z.literal('campaign.tick') })
+  .strict()
 const uuid = z.string().uuid()
 const content = z
   .array(
@@ -73,6 +77,11 @@ const filterSchema = z
     query: z.string().max(200).optional(),
     memberIds: z.array(uuid).max(50).optional(),
     tagIds: z.array(uuid).max(50).optional(),
+    customerId: uuid.optional(),
+    updatedFrom: z.string().datetime().optional(),
+    updatedTo: z.string().datetime().optional(),
+    attention: z.enum(['unread', 'unanswered']).optional(),
+    mute: z.enum(['muted', 'unmuted']).optional(),
     createdFrom: z.string().datetime().optional(),
     createdTo: z.string().datetime().optional(),
     properties: z
@@ -141,8 +150,18 @@ export function campaignRoutes(withDb: WithDb) {
           )
         }
         if (!uuid.safeParse(id).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
-        if (!action && c.req.method === 'GET')
-          return c.json(await readCampaign(db, { ...identity, id }))
+        if (!action && c.req.method === 'GET') {
+          const page = z
+            .object({
+              runId: uuid.optional(),
+              before: z.string().datetime().optional(),
+              afterOrdinal: z.coerce.number().int().min(0).optional(),
+            })
+            .strict()
+            .refine((value) => value.afterOrdinal === undefined || Boolean(value.runId))
+            .parse(c.req.query())
+          return c.json(await readCampaign(db, { ...identity, id, ...page }))
+        }
         if (c.req.method === 'POST' && ['execute', 'pause', 'resume', 'cancel'].includes(action)) {
           z.object({})
             .strict()
@@ -271,8 +290,11 @@ export async function pumpCampaigns(env: Bindings, withDb: WithDb) {
         }),
       )
     } catch (error) {
-      if (error instanceof AiUsageError && ['OPERATION_PAUSED', 'RETRY_LATER'].includes(error.code))
+      if (error instanceof AiUsageError && error.code === 'OPERATION_PAUSED') {
+        await withDb(env, (db) => pauseUnknownCampaignTranslation(db, recipient.id))
         continue
+      }
+      if (error instanceof AiUsageError && error.code === 'RETRY_LATER') continue
       await withDb(env, (db) =>
         stopCampaignRecipient(
           db,

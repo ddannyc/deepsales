@@ -2,14 +2,21 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   bootstrapWorkspace,
+  campaign,
+  campaignRecipient,
+  campaignRun,
   channelIdentity,
   connectFacebookPages,
   conversation,
   createDatabase,
+  customer,
   facebookMessagingWindow,
+  getAiBudget,
+  mediaAsset,
   member,
   message,
   processFacebookInbound,
+  type readCampaign,
   setMemberChannelAccess,
 } from '@deepsales/db'
 import { eq } from 'drizzle-orm'
@@ -34,6 +41,10 @@ const env = {
   META_APP_SECRET: 'test-app-secret',
   META_GRAPH_API_VERSION: 'v26.0',
   TOKEN_ENCRYPTION_KEY: tokenKey,
+  AI_BASE_URL: 'https://ai.example.com',
+  AI_API_KEY: 'test-key',
+  LLM_PROVIDER: 'alibaba',
+  LLM_MODEL: 'qwen3.8-flash',
 } as unknown as Bindings
 
 describe.skipIf(!connectionString)('ordinary campaigns', () => {
@@ -46,7 +57,10 @@ describe.skipIf(!connectionString)('ordinary campaigns', () => {
     }),
   )
   afterAll(() => pool.end())
-  afterEach(() => vi.unstubAllGlobals())
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
 
   it('saves an explicit deduplicated audience without sending, then executes once without taking ownership', async () => {
     const f = await fixture()
@@ -194,7 +208,462 @@ describe.skipIf(!connectionString)('ordinary campaigns', () => {
       .where(eq(message.conversationId, f.conversationId))
     expect(messages.filter((m) => m.direction === 'OUTBOUND')).toHaveLength(1)
   })
+
+  it('persists a provider retry deadline so duplicate deliveries cannot bypass channel backoff', async () => {
+    const f = await fixture()
+    const id = crypto.randomUUID()
+    await f.call('', 'POST', {
+      id,
+      name: 'Backoff',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      text: 'Neutral update',
+    })
+    await f.call(`/${id}/execute`, 'POST', {})
+    const messages = await db
+      .select()
+      .from(message)
+      .where(eq(message.conversationId, f.conversationId))
+    const reply = messages.find((m) => m.direction === 'OUTBOUND')
+    if (!reply) throw new Error('Missing reply')
+    const fetcher = vi.fn(async () =>
+      Response.json(
+        { error: { message: 'Slow down', code: 4 } },
+        { status: 429, headers: { 'Retry-After': '300' } },
+      ),
+    )
+    vi.stubGlobal('fetch', fetcher)
+    const item = () => ({
+      body: { v: 1, type: 'facebook.outbound', messageId: reply.id },
+      ack: vi.fn(),
+      retry: vi.fn(),
+    })
+    await handleOutboundBatch({ messages: [item()] } as unknown as MessageBatch<unknown>, env)
+    const duplicate = item()
+    await handleOutboundBatch({ messages: [duplicate] } as unknown as MessageBatch<unknown>, env)
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(duplicate.retry).toHaveBeenCalledWith({ delaySeconds: expect.any(Number) })
+  })
+
+  it('pauses unknown translations visibly and never regenerates or sends them on duplicate scans', async () => {
+    const f = await fixture()
+    const id = crypto.randomUUID()
+    await f.call('', 'POST', {
+      id,
+      name: 'Translation pause',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      text: 'Neutral update',
+      targetLanguage: 'en',
+    })
+    const fetcher = vi.fn(async () => {
+      throw new Error('Unknown transport result')
+    })
+    vi.stubGlobal('fetch', fetcher)
+    await f.call(`/${id}/execute`, 'POST', {})
+    await handleScheduled(env)
+    expect(fetcher).toHaveBeenCalledOnce()
+    expect(await (await f.call(`/${id}`)).json()).toMatchObject({
+      campaign: { status: 'PAUSED' },
+      runs: [{ recipients: [{ state: 'UNKNOWN' }] }],
+    })
+    expect(
+      (await db.select().from(message).where(eq(message.conversationId, f.conversationId))).filter(
+        (m) => m.direction === 'OUTBOUND',
+      ),
+    ).toHaveLength(0)
+  })
+
+  it('keeps random choices stable and sends all rich blocks in order with committed media surviving cancellation', async () => {
+    const f = await fixture()
+    const assetId = crypto.randomUUID()
+    await db.insert(mediaAsset).values({
+      id: assetId,
+      workspaceId: f.workspaceId,
+      title: 'Neutral file',
+      filename: 'note.txt',
+      kind: 'FILE',
+      mimeType: 'text/plain',
+      byteSize: 4,
+      sha256: 'b'.repeat(64),
+      storageKey: `campaign/${assetId}`,
+    })
+    const id = crypto.randomUUID()
+    const blocks = [
+      { id: crypto.randomUUID(), text: 'First notice' },
+      { id: crypto.randomUUID(), assetId },
+    ]
+    await f.call('', 'POST', {
+      id,
+      name: 'Ordered rich update',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      content: blocks,
+    })
+    await f.call(`/${id}/execute`, 'POST', {})
+    const first = (
+      await db.select().from(message).where(eq(message.conversationId, f.conversationId))
+    ).find((m) => m.direction === 'OUTBOUND')
+    if (!first) throw new Error('Missing first block')
+    const fetcher = vi.fn(async (url: unknown) =>
+      String(url).endsWith('/message_attachments')
+        ? Response.json({ attachment_id: 'neutral-upload' })
+        : Response.json({ message_id: crypto.randomUUID() }),
+    )
+    vi.stubGlobal('fetch', fetcher)
+    await deliver(first.id)
+    await handleScheduled(env)
+    expect(
+      (await db.select().from(message).where(eq(message.conversationId, f.conversationId))).filter(
+        (m) => m.direction === 'OUTBOUND',
+      ),
+    ).toHaveLength(1)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(Date.now() + 2000))
+    await handleScheduled(env)
+    const outbound = (
+      await db.select().from(message).where(eq(message.conversationId, f.conversationId))
+    ).filter((m) => m.direction === 'OUTBOUND')
+    expect(outbound).toHaveLength(2)
+    const attachment = outbound.find((m) => m.messageType === 'ATTACHMENT')
+    if (!attachment) throw new Error('Missing attachment block')
+    await f.call(`/${id}/cancel`, 'POST', {})
+    await db.update(mediaAsset).set({ deletedAt: new Date() }).where(eq(mediaAsset.id, assetId))
+    await deliver(attachment.id, {
+      ...env,
+      OBJECTS: { get: async () => ({ body: new Response('note').body }) } as unknown as R2Bucket,
+    })
+    expect(
+      (await db.select().from(message).where(eq(message.id, attachment.id)))[0].deliveryState,
+    ).toBe('SENT')
+    expect(fetcher).toHaveBeenCalledTimes(3)
+    vi.useRealTimers()
+    const random = crypto.randomUUID()
+    await f.call('', 'POST', {
+      id: random,
+      name: 'Random update',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      content: blocks.slice(0, 1).concat([{ id: crypto.randomUUID(), text: 'Second choice' }]),
+      selectionMode: 'RANDOM',
+    })
+    await f.call(`/${random}/execute`, 'POST', {})
+    const before = (await (await f.call(`/${random}`)).json()) as Awaited<
+      ReturnType<typeof readCampaign>
+    >
+    await handleScheduled(env)
+    const after = (await (await f.call(`/${random}`)).json()) as Awaited<
+      ReturnType<typeof readCampaign>
+    >
+    expect(before.runs[0].recipients[0].content).toHaveLength(1)
+    expect(after.runs[0].recipients[0].content).toEqual(before.runs[0].recipients[0].content)
+  })
+
+  it('persists per-identity translations once and preserves the source without retranslating on recovery', async () => {
+    const f = await fixture()
+    const id = crypto.randomUUID()
+    const fetcher = vi.fn(async () =>
+      Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Translated notice',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+              }),
+            },
+          },
+        ],
+      }),
+    )
+    vi.stubGlobal('fetch', fetcher)
+    await f.call('', 'POST', {
+      id,
+      name: 'Translated update',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      text: 'Original notice',
+      targetLanguage: 'en',
+    })
+    expect((await f.call(`/${id}/execute`, 'POST', {})).status).toBe(200)
+    await handleScheduled(env)
+    expect(fetcher).toHaveBeenCalledOnce()
+    const result = (await (await f.call(`/${id}`)).json()) as Awaited<
+      ReturnType<typeof readCampaign>
+    >
+    expect(result.runs[0].recipients[0]).toMatchObject({
+      content: [{ text: 'Original notice' }],
+      translatedContent: [{ text: 'Translated notice' }],
+    })
+    expect(
+      (await db.select().from(message).where(eq(message.conversationId, f.conversationId))).find(
+        (m) => m.direction === 'OUTBOUND',
+      )?.text,
+    ).toBe('Translated notice')
+    expect(
+      await getAiBudget(db, { workspaceId: f.workspaceId, actingUserId: f.userId }),
+    ).toMatchObject({ used: 1 })
+  })
+
+  it('creates one scheduled occurrence and skips missed recurring days rather than backfilling', async () => {
+    const f = await fixture()
+    const first = new Date(Math.ceil((Date.now() + 120_000) / 60_000) * 60_000)
+    const id = crypto.randomUUID()
+    await f.call('', 'POST', {
+      id,
+      name: 'Daily neutral update',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      text: 'Daily notice',
+      calendar: {
+        localTime: first.toISOString().slice(0, 16),
+        timeZone: 'UTC',
+        repeat: 'DAILY',
+        maxRuns: 2,
+      },
+    })
+    expect((await f.call(`/${id}/execute`, 'POST', {})).status).toBe(200)
+    expect(await (await f.call(`/${id}`)).json()).toMatchObject({ runs: [] })
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(first.getTime() + 1000))
+    await Promise.all([handleScheduled(env), handleScheduled(env)])
+    expect(await db.select().from(campaignRun).where(eq(campaignRun.campaignId, id))).toHaveLength(
+      1,
+    )
+    const initial = (await (await f.call(`/${id}`)).json()) as Awaited<
+      ReturnType<typeof readCampaign>
+    >
+    expect(initial.runs[0].recipients).toHaveLength(1)
+    vi.setSystemTime(new Date(first.getTime() + 3 * 86_400_000 + 1000))
+    await handleScheduled(env)
+    const [plan] = await db.select().from(campaign).where(eq(campaign.id, id))
+    expect(plan.nextRunAt?.toISOString()).toBe(
+      new Date(first.getTime() + 4 * 86_400_000).toISOString(),
+    )
+    expect(await db.select().from(campaignRun).where(eq(campaignRun.campaignId, id))).toHaveLength(
+      1,
+    )
+    expect((await f.call(`/${id}/pause`, 'POST', {})).status).toBe(200)
+    vi.setSystemTime(new Date(first.getTime() + 5 * 86_400_000 + 1000))
+    await handleScheduled(env)
+    expect(await db.select().from(campaignRun).where(eq(campaignRun.campaignId, id))).toHaveLength(
+      1,
+    )
+    expect((await f.call(`/${id}/resume`, 'POST', {})).status).toBe(200)
+    expect(await db.select().from(campaignRun).where(eq(campaignRun.campaignId, id))).toHaveLength(
+      1,
+    )
+  })
+
+  it('continues committed work after the recurrence limit and schedules the next pacing tick', async () => {
+    const f = await fixture()
+    const first = new Date(Math.ceil((Date.now() + 120_000) / 60_000) * 60_000)
+    const id = crypto.randomUUID()
+    await f.call('', 'POST', {
+      id,
+      name: 'Finite recurrence',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      text: 'Neutral scheduled notice',
+      calendar: {
+        localTime: first.toISOString().slice(0, 16),
+        timeZone: 'UTC',
+        repeat: 'DAILY',
+        maxRuns: 1,
+      },
+    })
+    await f.call(`/${id}/execute`, 'POST', {})
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(first.getTime() + 1000))
+    await handleScheduled(env)
+    const messages = await db
+      .select()
+      .from(message)
+      .where(eq(message.conversationId, f.conversationId))
+    const reply = messages.find((m) => m.direction === 'OUTBOUND')
+    if (!reply) throw new Error('Missing scheduled reply')
+    vi.setSystemTime(new Date(first.getTime() + 86_400_000 + 1000))
+    await handleScheduled(env)
+    const [plan] = await db.select().from(campaign).where(eq(campaign.id, id))
+    expect(plan.status).toBe('ACTIVE')
+    expect(plan.nextRunAt).toBeNull()
+    expect(await db.select().from(campaignRun).where(eq(campaignRun.campaignId, id))).toHaveLength(
+      1,
+    )
+    vi.setSystemTime(new Date(first.getTime() + 2000))
+    const tick = vi.fn(async () => {})
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ message_id: 'neutral-scheduled-reply' })),
+    )
+    await deliver(reply.id, { ...env, MAINTENANCE_QUEUE: { send: tick } as unknown as Queue })
+    expect(tick).toHaveBeenCalledWith({ v: 1, type: 'campaign.tick' }, { delaySeconds: 1 })
+  })
+
+  it('cancels the unsent tail of a partially completed recipient without undoing the sent block', async () => {
+    const f = await fixture()
+    const id = crypto.randomUUID()
+    await f.call('', 'POST', {
+      id,
+      name: 'Partial cancellation',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      content: [
+        { id: crypto.randomUUID(), text: 'First block' },
+        { id: crypto.randomUUID(), text: 'Unsent tail' },
+      ],
+    })
+    await f.call(`/${id}/execute`, 'POST', {})
+    const first = (
+      await db.select().from(message).where(eq(message.conversationId, f.conversationId))
+    ).find((m) => m.direction === 'OUTBOUND')
+    if (!first) throw new Error('Missing first block')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ message_id: 'partial-first' })),
+    )
+    await deliver(first.id)
+    await f.call(`/${id}/cancel`, 'POST', {})
+    expect(await (await f.call(`/${id}`)).json()).toMatchObject({
+      campaign: { status: 'CANCELLED' },
+      runs: [{ recipients: [{ state: 'SKIPPED', messages: [{ state: 'SENT' }] }] }],
+    })
+    expect(
+      (await db.select().from(message).where(eq(message.conversationId, f.conversationId))).filter(
+        (m) => m.direction === 'OUTBOUND',
+      ),
+    ).toHaveLength(1)
+  })
+
+  it('paginates retained recipients and occurrences without expanding the saved authorized scope', async () => {
+    const f = await fixture()
+    const profiles = await db
+      .insert(customer)
+      .values(Array.from({ length: 21 }, () => ({ workspaceId: f.workspaceId })))
+      .returning({ id: customer.id })
+    const identities = await db
+      .insert(channelIdentity)
+      .values(
+        profiles.map((profile) => ({
+          workspaceId: f.workspaceId,
+          channelId: f.channelId,
+          customerId: profile.id,
+          externalUserId: crypto.randomUUID(),
+        })),
+      )
+      .returning({ id: channelIdentity.id })
+    const id = crypto.randomUUID()
+    const content = [{ id: crypto.randomUUID(), text: 'Bounded neutral notice' }]
+    await f.call('', 'POST', {
+      id,
+      name: 'Paged results',
+      channelId: f.channelId,
+      identityIds: [f.identityId, ...identities.map((i) => i.id)],
+      content,
+    })
+    await f.call(`/${id}/execute`, 'POST', {})
+    const [run] = await db.select().from(campaignRun).where(eq(campaignRun.campaignId, id))
+    await db.insert(campaignRun).values(
+      Array.from({ length: 4 }, (_, index) => ({
+        id: crypto.randomUUID(),
+        campaignId: id,
+        version: 1,
+        scheduledAt: new Date(Date.now() - (index + 1) * 86_400_000),
+        content,
+      })),
+    )
+    const first = (await (await f.call(`/${id}`)).json()) as {
+      runs: { id: string; recipients: { id: string }[]; nextRecipientOrdinal: number | null }[]
+      nextRunBefore: string | null
+    }
+    expect(first.runs).toHaveLength(3)
+    expect(first.runs[0].recipients).toHaveLength(20)
+    expect(first.runs[0].nextRecipientOrdinal).toBe(19)
+    expect(first.nextRunBefore).not.toBeNull()
+    const remaining = (await (
+      await f.call(`/${id}?runId=${run.id}&afterOrdinal=19`)
+    ).json()) as typeof first
+    expect(remaining.runs[0].recipients).toHaveLength(2)
+    expect(remaining.runs[0].nextRecipientOrdinal).toBeNull()
+    const older = (await (
+      await f.call(`/${id}?before=${encodeURIComponent(first.nextRunBefore ?? '')}`)
+    ).json()) as typeof first
+    expect(older.runs).toHaveLength(2)
+    expect(
+      older.runs.map((r) => r.id).some((runId) => first.runs.some((r) => r.id === runId)),
+    ).toBe(false)
+    expect(
+      await db.select().from(campaignRecipient).where(eq(campaignRecipient.runId, run.id)),
+    ).toHaveLength(22)
+  })
+
+  it('keeps a channel-wide provider deadline after one campaign exhausts its safe retries', async () => {
+    const f = await fixture()
+    const id = crypto.randomUUID()
+    await f.call('', 'POST', {
+      id,
+      name: 'Throttled update',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      text: 'First update',
+    })
+    await f.call(`/${id}/execute`, 'POST', {})
+    const reply = (
+      await db.select().from(message).where(eq(message.conversationId, f.conversationId))
+    ).find((m) => m.direction === 'OUTBOUND')
+    if (!reply) throw new Error('Missing first campaign message')
+    const started = Date.now()
+    let calls = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json(
+          { error: { code: 4, message: 'Rate limited' } },
+          { status: 429, headers: { 'Retry-After': ++calls === 3 ? '300' : '1' } },
+        ),
+      ),
+    )
+    await deliver(reply.id)
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date(started + 31_000))
+    await deliver(reply.id)
+    vi.setSystemTime(new Date(started + 152_000))
+    await deliver(reply.id)
+    expect(calls).toBe(3)
+    expect((await db.select().from(message).where(eq(message.id, reply.id)))[0].deliveryState).toBe(
+      'FAILED',
+    )
+    const nextId = crypto.randomUUID()
+    vi.setSystemTime(new Date(started + 154_000))
+    await f.call('', 'POST', {
+      id: nextId,
+      name: 'Next update',
+      channelId: f.channelId,
+      identityIds: [f.identityId],
+      text: 'Second update',
+    })
+    await f.call(`/${nextId}/execute`, 'POST', {})
+    expect(
+      (await db.select().from(message).where(eq(message.conversationId, f.conversationId))).filter(
+        (m) => m.direction === 'OUTBOUND',
+      ),
+    ).toHaveLength(1)
+  })
 })
+
+function deliver(messageId: string, target = env) {
+  return handleOutboundBatch(
+    {
+      messages: [
+        { body: { v: 1, type: 'facebook.outbound', messageId }, ack: vi.fn(), retry: vi.fn() },
+      ],
+    } as unknown as MessageBatch<unknown>,
+    target,
+  )
+}
 
 async function fixture() {
   const email = `${crypto.randomUUID()}@example.com`

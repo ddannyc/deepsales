@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, isNull, lt, sql } from 'drizzle-orm'
 import type { Database } from './database'
 import { assertInboxViewer, InboxError, type InboxFilters, listConversations } from './inbox'
 import {
+  aiOperation,
   type CampaignCalendar,
   type CampaignContent,
   campaign,
@@ -181,7 +182,10 @@ export async function listCampaigns(db: Database, input: Context) {
   }
 }
 
-export async function readCampaign(db: Database, input: Context & { id: string }) {
+export async function readCampaign(
+  db: Database,
+  input: Context & { id: string; runId?: string; before?: string; afterOrdinal?: number },
+) {
   const [plan] = await db
     .select()
     .from(campaign)
@@ -191,18 +195,32 @@ export async function readCampaign(db: Database, input: Context & { id: string }
   const runs = await db
     .select()
     .from(campaignRun)
-    .where(eq(campaignRun.campaignId, plan.id))
+    .where(
+      and(
+        eq(campaignRun.campaignId, plan.id),
+        input.runId ? eq(campaignRun.id, input.runId) : undefined,
+        input.before ? lt(campaignRun.scheduledAt, new Date(input.before)) : undefined,
+      ),
+    )
     .orderBy(desc(campaignRun.scheduledAt))
-    .limit(100)
+    .limit(4)
   const details = []
-  for (const run of runs) {
+  for (const run of runs.slice(0, 3)) {
     const recipients = await db
       .select()
       .from(campaignRecipient)
-      .where(eq(campaignRecipient.runId, run.id))
+      .where(
+        and(
+          eq(campaignRecipient.runId, run.id),
+          input.afterOrdinal === undefined
+            ? undefined
+            : gt(campaignRecipient.ordinal, input.afterOrdinal),
+        ),
+      )
       .orderBy(asc(campaignRecipient.ordinal))
+      .limit(21)
     const results = []
-    for (const recipient of recipients) {
+    for (const recipient of recipients.slice(0, 20)) {
       const messages = recipient.messageIds.length
         ? await db
             .select({
@@ -225,9 +243,17 @@ export async function readCampaign(db: Database, input: Context & { id: string }
           : recipient.state
       results.push({ ...recipient, state, messages })
     }
-    details.push({ ...run, recipients: results })
+    details.push({
+      ...run,
+      recipients: results,
+      nextRecipientOrdinal: recipients.length > 20 ? recipients[19].ordinal : null,
+    })
   }
-  return { campaign: plan, runs: details }
+  return {
+    campaign: plan,
+    runs: details,
+    nextRunBefore: runs.length > 3 ? runs[2].scheduledAt.toISOString() : null,
+  }
 }
 
 export async function changeCampaignState(
@@ -265,7 +291,7 @@ export async function changeCampaignState(
       .returning()
     if (status === 'CANCELLED')
       await tx.execute(
-        sql`update campaign_recipient r set state = 'SKIPPED', reason = 'CANCELLED' from campaign_run run where r.run_id = run.id and run.campaign_id = ${plan.id} and r.state = 'WAITING' and cardinality(r.message_ids) = 0`,
+        sql`update campaign_recipient r set state = 'SKIPPED', reason = 'CANCELLED' from campaign_run run where r.run_id = run.id and run.campaign_id = ${plan.id} and r.state = 'WAITING'`,
       )
     return { campaign: updated }
   })
@@ -296,10 +322,7 @@ export async function startCampaignRun(
       (plan.calendar?.maxRuns !== undefined && count[0].count >= plan.calendar.maxRuns) ||
       (plan.calendar?.until !== undefined && now > new Date(plan.calendar.until))
     const nextRunAt = stopped ? null : input.nextRunAt
-    await tx
-      .update(campaign)
-      .set({ nextRunAt, ...(stopped ? { status: 'COMPLETED' } : {}), updatedAt: now })
-      .where(eq(campaign.id, plan.id))
+    await tx.update(campaign).set({ nextRunAt, updatedAt: now }).where(eq(campaign.id, plan.id))
     if (stopped || input.skip) return
     const [run] = await tx
       .insert(campaignRun)
@@ -386,7 +409,10 @@ export async function campaignDeliveryContext(db: Database, messageId: string) {
     .where(sql`${messageId}::uuid = any(${campaignRecipient.messageIds})`)
     .limit(1)
   return item
-    ? { allowed: await eligible(db, item.plan, item.recipient.channelIdentityId, new Date()) }
+    ? {
+        allowed: await eligible(db, item.plan, item.recipient.channelIdentityId, new Date()),
+        intervalSeconds: item.plan.intervalSeconds,
+      }
     : null
 }
 
@@ -463,11 +489,48 @@ export async function stopCampaignRecipient(
     .where(and(eq(campaignRecipient.id, id), eq(campaignRecipient.state, 'WAITING')))
 }
 
+export async function pauseUnknownCampaignTranslation(db: Database, recipientId: string) {
+  const [scope] = await db
+    .select({ planId: campaignRun.campaignId })
+    .from(campaignRecipient)
+    .innerJoin(campaignRun, eq(campaignRun.id, campaignRecipient.runId))
+    .where(eq(campaignRecipient.id, recipientId))
+  if (!scope) return
+  return db.transaction(async (tx) => {
+    await tx
+      .select({ id: campaign.id })
+      .from(campaign)
+      .where(eq(campaign.id, scope.planId))
+      .for('update')
+    const [item] = await tx
+      .select({ recipient: campaignRecipient, planId: campaignRun.campaignId })
+      .from(campaignRecipient)
+      .innerJoin(campaignRun, eq(campaignRun.id, campaignRecipient.runId))
+      .innerJoin(aiOperation, eq(aiOperation.id, campaignRecipient.translationOperationId))
+      .where(and(eq(campaignRecipient.id, recipientId), eq(aiOperation.state, 'UNKNOWN')))
+      .for('update', { of: campaignRecipient })
+    if (item?.recipient.state !== 'WAITING') return
+    await tx
+      .update(campaignRecipient)
+      .set({ state: 'UNKNOWN', reason: 'TRANSLATION_RESULT_UNKNOWN' })
+      .where(eq(campaignRecipient.id, recipientId))
+    await tx
+      .update(campaign)
+      .set({ status: 'PAUSED' })
+      .where(and(eq(campaign.id, item.planId), eq(campaign.status, 'ACTIVE')))
+  })
+}
+
 export async function dispatchCampaignMessages(db: Database, now = new Date()) {
   const plans = await db
     .select()
     .from(campaign)
-    .where(eq(campaign.status, 'ACTIVE'))
+    .where(
+      and(
+        eq(campaign.status, 'ACTIVE'),
+        sql`(${campaign.nextRunAt} is null or exists (select 1 from campaign_recipient r join campaign_run run on run.id = r.run_id where run.campaign_id = ${campaign.id} and r.state = 'WAITING'))`,
+      ),
+    )
     .orderBy(asc(campaign.createdAt))
     .limit(100)
   const created: string[] = []
@@ -523,17 +586,19 @@ export async function dispatchCampaignMessages(db: Database, now = new Date()) {
         }
         if (plan.targetLanguage && !recipient.translatedContent) return
         const recent = await tx.execute(
-          sql`select m.delivery_state, m.delivery_completed_at, m.delivery_started_at from message m join campaign_recipient r on m.id = any(r.message_ids) where m.channel_id = ${plan.channelId} order by m.created_at desc, m.id desc limit 1`,
+          sql`select m.delivery_state, m.delivery_completed_at, m.delivery_started_at, (select max(a.retry_not_before) from facebook_delivery_attempt a where a.message_id = m.id) retry_not_before from message m join campaign_recipient r on m.id = any(r.message_ids) where m.channel_id = ${plan.channelId} order by m.created_at desc, m.id desc limit 1`,
         )
         const last = recent.rows[0] as
           | {
               delivery_state: string
               delivery_completed_at: Date | null
               delivery_started_at: Date | null
+              retry_not_before: Date | null
             }
           | undefined
         if (
           last?.delivery_state === 'PENDING' ||
+          (last?.retry_not_before && new Date(last.retry_not_before) > now) ||
           (last?.delivery_completed_at &&
             new Date(last.delivery_completed_at).getTime() + plan.intervalSeconds * 1000 >
               now.getTime())
