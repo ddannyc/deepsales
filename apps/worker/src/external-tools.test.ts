@@ -1,0 +1,145 @@
+import { describe, expect, it, vi } from 'vitest'
+import { buildExternalRequest, callExternalTool, validateExternalOrigin } from './external-tools'
+import { validateExternalObjectScope } from '../../../packages/db/src/ai-external-contracts'
+import { encryptCredential, decryptCredential } from './credential-crypto'
+
+const origin = 'https://tools.example.com'
+const definition = {
+  origin,
+  method: 'GET' as const,
+  path: '/records/{record}',
+  inputs: [{ name: 'record', type: 'string' as const, location: 'path' as const, required: true }],
+  fixed: [],
+  output: [{ name: 'status', path: ['data', 'status'], type: 'string' as const }],
+  effect: 'READ' as const,
+}
+describe('external HTTPS tool boundary', () => {
+  it('binds declared write targets to immutable configuration and cannot override them through model values', () => {
+    const write = {
+      ...definition,
+      method: 'POST' as const,
+      effect: 'WRITE' as const,
+      path: '/records',
+      inputs: [
+        { name: 'note', type: 'string' as const, location: 'body' as const, required: true },
+      ],
+      fixed: [{ name: 'recordId', location: 'body' as const, value: 'configured-record' }],
+    }
+    const policy = JSON.stringify({
+      policy: 'FIXED_CONFIG',
+      description: 'Administrator-authorized support record.',
+      targets: [{ name: 'recordId', location: 'body' }],
+    })
+    expect(() => validateExternalObjectScope(policy, write)).not.toThrow()
+    expect(() => validateExternalObjectScope(policy, { ...write, fixed: [] })).toThrow()
+    expect(() => validateExternalObjectScope('any object', write)).toThrow()
+    expect(() =>
+      buildExternalRequest(write, { note: 'hello', recordId: 'other-record' }, [origin]),
+    ).toThrow()
+    expect(
+      JSON.parse(buildExternalRequest(write, { note: 'hello' }, [origin]).body ?? '{}'),
+    ).toEqual({ note: 'hello', recordId: 'configured-record' })
+  })
+  it('binds credential ciphertext to its workspace/plugin while preserving token crypto compatibility', async () => {
+    const key = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+    const secret = await encryptCredential('private', key, 'external:workspace:plugin-a')
+    expect(await decryptCredential(secret, key, 'external:workspace:plugin-a')).toBe('private')
+    await expect(decryptCredential(secret, key, 'external:workspace:plugin-b')).rejects.toThrow()
+  })
+  it('requires an exact deployment-approved public HTTPS origin and safe encoded segments', () => {
+    expect(validateExternalOrigin(origin, [origin])).toBe(origin)
+    for (const target of [
+      'http://tools.example.com',
+      'https://tools.example.com.',
+      'https://localhost',
+      'https://127.0.0.1',
+      'https://2130706433',
+      'https://[::1]',
+      'https://user@tools.example.com',
+      'https://tools.example.com:444',
+      'https:\\tools.example.com',
+    ])
+      expect(() => validateExternalOrigin(target, [origin, target])).toThrow()
+    expect(() => validateExternalOrigin(origin, [])).toThrow()
+    expect(() => validateExternalOrigin('https://tools.example.com.evil.test', [origin])).toThrow()
+    expect(buildExternalRequest(definition, { record: 'record 123' }, [origin]).url).toBe(
+      `${origin}/records/record%20123`,
+    )
+    for (const record of ['..', '../secret', '/admin', '%2fadmin', '%252fadmin', 'a\\b'])
+      expect(() => buildExternalRequest(definition, { record }, [origin])).toThrow()
+  })
+  it('maps only declared fields and rejects redirects without forwarding secrets', async () => {
+    const request = buildExternalRequest(definition, { record: 'abc' }, [origin])
+    const fetcher = vi.fn(async () =>
+      Response.json({ data: { status: 'ready', secret: 'private' } }),
+    )
+    expect(await callExternalTool(request, definition.output, 'credential', fetcher)).toEqual({
+      status: 'ready',
+    })
+    expect(fetcher.mock.calls).toHaveLength(1)
+    const redirect = vi.fn(
+      async () =>
+        new Response(null, { status: 302, headers: { Location: 'https://other.example.com' } }),
+    )
+    await expect(
+      callExternalTool(request, definition.output, 'credential', redirect),
+    ).rejects.toMatchObject({ code: 'EXTERNAL_REDIRECT' })
+    expect(redirect).toHaveBeenCalledOnce()
+  })
+  it('bounds streamed bytes before parsing and cancels an oversized response', async () => {
+    const request = buildExternalRequest(definition, { record: 'abc' }, [origin])
+    const body = (size: number) =>
+      JSON.stringify({ data: { status: 'ready' }, padding: '' }).padEnd(size, ' ')
+    expect(
+      await callExternalTool(
+        request,
+        definition.output,
+        null,
+        async () => new Response(body(65536), { headers: { 'Content-Type': 'application/json' } }),
+      ),
+    ).toEqual({ status: 'ready' })
+    const cancelled = vi.fn()
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(65537))
+      },
+      cancel: cancelled,
+    })
+    await expect(
+      callExternalTool(
+        request,
+        definition.output,
+        null,
+        async () =>
+          new Response(stream, {
+            headers: { 'Content-Type': 'application/json', 'Content-Length': '1' },
+          }),
+      ),
+    ).rejects.toMatchObject({ code: 'EXTERNAL_RESPONSE_TOO_LARGE' })
+    expect(cancelled).toHaveBeenCalledOnce()
+  })
+  it('keeps the ten-second deadline active after headers and cancels stalled bodies', async () => {
+    vi.useFakeTimers()
+    try {
+      const cancelled = vi.fn()
+      let signal: AbortSignal | null | undefined
+      const stream = new ReadableStream<Uint8Array>({ cancel: cancelled })
+      const pending = callExternalTool(
+        buildExternalRequest(definition, { record: 'abc' }, [origin]),
+        definition.output,
+        null,
+        async (_url, init) => {
+          signal = init?.signal
+          return new Response(stream, { headers: { 'Content-Type': 'application/json' } })
+        },
+      )
+      const assertion = expect(pending).rejects.toMatchObject({ code: 'EXTERNAL_TIMEOUT' })
+      await vi.advanceTimersByTimeAsync(10_000)
+      await assertion
+      expect(signal?.aborted).toBe(true)
+      expect(cancelled).toHaveBeenCalledOnce()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})

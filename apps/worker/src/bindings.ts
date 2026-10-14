@@ -17,6 +17,7 @@ export type Bindings = {
   META_GRAPH_API_VERSION: string
   AI_BASE_URL?: string
   AI_API_KEY?: string
+  AI_TOOL_ALLOWED_ORIGINS?: string
   EMBEDDING_PROVIDER?: string
   EMBEDDING_MODEL?: string
   EMBEDDING_DIMENSIONS?: string

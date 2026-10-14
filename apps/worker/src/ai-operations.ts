@@ -49,6 +49,8 @@ import {
   saveAiTagRule,
 } from '@deepsales/db'
 import { Hono } from 'hono'
+import { externalToolRoute } from './external-tool-routes'
+import { ExternalToolError } from './external-tools'
 import { z } from 'zod'
 import {
   AI_PERSONA_SAFETY_SUFFIX,
@@ -119,6 +121,8 @@ export function aiOperationsRoutes(
           )
         if (!uuid.safeParse(resource).success) return c.json({ error: { code: 'NOT_FOUND' } }, 404)
         const memberInput = { ...identity, memberId: uuid.parse(resource) }
+        const external = await externalToolRoute(c, db, memberInput, action, segments, body)
+        if (external) return external
         if (action === 'variables' && c.req.method === 'GET') {
           await getAiMemberConfig(db, memberInput)
           return c.json({
@@ -577,6 +581,7 @@ export function aiOperationsRoutes(
         }
         return c.json({ error: { code: 'NOT_FOUND' } }, 404)
       } catch (error) {
+        if (error instanceof ExternalToolError) return c.json({ error: { code: error.code } }, 400)
         if (error instanceof AiUsageError) return c.json({ error: { code: error.code } }, 409)
         if (error instanceof z.ZodError) return c.json({ error: { code: 'INVALID_REQUEST' } }, 400)
         if (error instanceof AiMemberError)
