@@ -770,6 +770,8 @@ export async function recordAiTestResult(
 ) {
   await db.transaction(async (tx) => {
     const [record] = await tx.select().from(aiOperation).where(eq(aiOperation.id, input.id))
+    if (record)
+      await tx.execute(sql`select id from ${workspace} where id = ${record.workspaceId} for share`)
     const context = (record?.output as { testContext?: AiTestContext } | null)?.testContext
     const propertyRules =
       (record?.output as { propertyRules?: AiPropertyCollection['rules'] } | null)?.propertyRules ??
@@ -881,7 +883,7 @@ export async function recordAiTestResult(
           customer: sql`jsonb_set(${aiTestSession.customer}, '{language}', ${JSON.stringify(selection.language)}::jsonb)`,
         })
         .where(eq(aiTestSession.id, context.sessionId))
-    if (updated.length && context && collected.length) {
+    if (updated.length && context && (collected.length || appendedTags.length)) {
       const [session] = await tx
         .select()
         .from(aiTestSession)
