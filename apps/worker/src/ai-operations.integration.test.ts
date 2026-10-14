@@ -142,6 +142,8 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   })
   it('exposes a controlled instruction variable catalog and rejects unknown variable names', async () => {
     const f = await fixture()
+    const foreign = await fixture()
+    expect((await f.call(`/${foreign.aiId}/variables`)).status).toBe(404)
     const response = await f.call(`/${f.aiId}/variables`)
     expect(response.status).toBe(200)
     expect(await response.json()).toMatchObject({
