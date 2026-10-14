@@ -42,6 +42,29 @@ export class AiMemberError extends Error {
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 type QueryHandle = Database | Transaction
 
+export async function readAiViewerChannelIds(
+  db: QueryHandle,
+  input: { workspaceId: string; memberId: string; actingUserId: string },
+) {
+  const rows = await db
+    .select({ id: channel.id })
+    .from(member)
+    .innerJoin(workspaceUserAccess, eq(workspaceUserAccess.id, member.workspaceUserAccessId))
+    .innerJoin(memberChannelAccess, eq(memberChannelAccess.memberId, member.id))
+    .innerJoin(channel, eq(channel.id, memberChannelAccess.channelId))
+    .where(
+      and(
+        eq(workspaceUserAccess.workspaceId, input.workspaceId),
+        eq(workspaceUserAccess.userId, input.actingUserId),
+        eq(member.status, 'ACTIVE'),
+        eq(channel.workspaceId, input.workspaceId),
+        eq(channel.status, 'ACTIVE'),
+        sql`exists (select 1 from member_channel_access ai_grant join member ai on ai.id = ai_grant.member_id where ai.id = ${input.memberId} and ai.workspace_id = ${input.workspaceId} and ai.status = 'ACTIVE' and ai.type = 'AI' and ai_grant.channel_id = ${channel.id})`,
+      ),
+    )
+  return rows.map((row) => row.id)
+}
+
 export type AiMemberConfig = {
   stopRules: AiStopRules
   unparsedFallbackEnabled: boolean

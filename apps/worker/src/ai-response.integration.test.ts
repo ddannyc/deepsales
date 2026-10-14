@@ -85,6 +85,143 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
 
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it.each(['success', 'unknown'] as const)(
+    'uses authorized search results in a final grounded answer without sending an unexecuted success claim (%s)',
+    async (mode) => {
+      const f = await createFixture(db)
+      const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
+      await updateAiMemberConfig(db, {
+        ...config,
+        replyWaitEnabled: false,
+        instructions: '[[tool:search]]',
+      })
+      await publishAiMemberConfig(db, { ...config, providerConfigured: true })
+      const specificVector = Array.from({ length: 1536 }, (_, i) => (i === 1 ? 1 : 0))
+      const doc = await createInlineKnowledgeDocument(db, {
+        workspaceId: f.workspaceId,
+        knowledgeBaseId: f.knowledgeBaseId,
+        createdByUserId: f.ownerId,
+        name: 'Calibration',
+        text: 'To calibrate, press Start.',
+      })
+      const docClaim = await claimKnowledgeDocument(db, { documentId: doc.id })
+      if (!docClaim) throw new Error('Description not claimed')
+      await completeKnowledgeDocument(db, {
+        documentId: doc.id,
+        processingStartedAt: docClaim.processingStartedAt,
+        workspaceId: f.workspaceId,
+        knowledgeBaseId: f.knowledgeBaseId,
+        contentSha256: 'b'.repeat(64),
+        embeddingMetadata: {
+          provider: 'alibaba',
+          model: 'qwen3.7-text-embedding',
+          dimensions: 1536,
+        },
+        chunks: [{ text: 'To calibrate, press Start.', embedding: specificVector }],
+      })
+      const [chunk] = await db
+        .select()
+        .from(knowledgeChunk)
+        .where(eq(knowledgeChunk.knowledgeDocumentId, doc.id))
+      const received = await receiveContextInput(db, f, 'How do I get started?')
+      const assigned = await autoAssignConversation(db, {
+        workspaceId: f.workspaceId,
+        conversationId: received.conversationId,
+      })
+      if (!assigned.aiResponseRunId) throw new Error('Missing run')
+      let generations = 0
+      const fetcher = vi.fn(async (url: unknown, init?: RequestInit) => {
+        const body = String(init?.body)
+        if (String(url).endsWith('/embeddings')) {
+          if (mode === 'unknown' && body.includes('calibration procedure'))
+            throw new Error('Connection lost')
+          return Response.json({
+            data: [
+              {
+                index: 0,
+                embedding: body.includes('calibration procedure') ? specificVector : vector(),
+              },
+            ],
+          })
+        }
+        generations++
+        if (generations === 1) expect(body).not.toContain('To calibrate, press Start.')
+        else expect(body).toContain('To calibrate, press Start.')
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify(
+                  generations === 1
+                    ? {
+                        decision: 'ANSWER',
+                        response: 'Checking the procedure.',
+                        handoffReason: null,
+                        containsBusinessFacts: false,
+                        usedChunkIds: [],
+                        toolCalls: [
+                          { tool: 'search', arguments: { query: 'calibration procedure' } },
+                        ],
+                      }
+                    : {
+                        decision: 'ANSWER',
+                        response: 'To calibrate, press Start.',
+                        handoffReason: null,
+                        containsBusinessFacts: true,
+                        usedChunkIds: [chunk.id],
+                      },
+                ),
+              },
+            },
+          ],
+        })
+      })
+      vi.stubGlobal('fetch', fetcher)
+      await handleAiResponseBatch(
+        batch('ai', queueMessage({ v: 1, type: 'ai.response', runId: assigned.aiResponseRunId })),
+        environment(),
+      )
+      if (mode === 'unknown') {
+        const [action] = await db
+          .select()
+          .from(aiToolAction)
+          .where(eq(aiToolAction.runId, assigned.aiResponseRunId))
+        expect(action).toMatchObject({
+          tool: 'search',
+          state: 'UNKNOWN',
+          failureCode: 'TOOL_RESULT_UNKNOWN',
+        })
+        expect(generations).toBe(1)
+        return
+      }
+      const messages = await db
+        .select()
+        .from(message)
+        .where(
+          and(
+            eq(message.conversationId, received.conversationId),
+            eq(message.direction, 'OUTBOUND'),
+          ),
+        )
+      expect(messages.map((m) => m.text)).toEqual(['To calibrate, press Start.'])
+      expect(generations).toBe(2)
+      const [action] = await db
+        .select()
+        .from(aiToolAction)
+        .where(eq(aiToolAction.runId, assigned.aiResponseRunId))
+      expect(action).toMatchObject({
+        tool: 'search',
+        state: 'SUCCEEDED',
+        result: { chunkIds: [chunk.id] },
+      })
+      expect(
+        await db
+          .select()
+          .from(aiProviderAttempt)
+          .where(eq(aiProviderAttempt.operationId, assigned.aiResponseRunId)),
+      ).toHaveLength(4)
+    },
+  )
   it('cancels a tool removed from the current published definition before its action executes', async () => {
     const f = await createFixture(db)
     const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
@@ -152,13 +289,13 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
     expect(action).toMatchObject({ state: 'CANCELLED', failureCode: 'TOOL_AUTHORIZATION_CHANGED' })
     expect(action.completedAt).not.toBeNull()
   })
-  it('sends authorized retrieved private media once with a durable tool receipt', async () => {
+  it('executes three ordered actions once and commits private media without invalidating its own reply count', async () => {
     const f = await createFixture(db)
     const config = { workspaceId: f.workspaceId, memberId: f.aiMemberId, actingUserId: f.ownerId }
     await updateAiMemberConfig(db, {
       ...config,
       replyWaitEnabled: false,
-      instructions: '[[tool:send_media]]',
+      instructions: '[[tool:record]] [[tool:send_media]] {{conversation.replyCount}}',
     })
     await publishAiMemberConfig(db, { ...config, providerConfigured: true })
     const assetId = crypto.randomUUID()
@@ -218,7 +355,11 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
                       handoffReason: null,
                       containsBusinessFacts: false,
                       usedChunkIds: [chunk.id],
-                      toolCalls: [{ tool: 'send_media', arguments: { assetId } }],
+                      toolCalls: [
+                        { tool: 'record', arguments: { text: 'First internal observation.' } },
+                        { tool: 'record', arguments: { text: 'Second internal observation.' } },
+                        { tool: 'send_media', arguments: { assetId } },
+                      ],
                     }),
                   },
                 },
@@ -247,8 +388,21 @@ describe.skipIf(!connectionString)('AI response Worker consumer', () => {
       .select()
       .from(aiToolAction)
       .where(eq(aiToolAction.runId, assigned.aiResponseRunId))
-    expect(actions).toHaveLength(1)
-    expect(actions[0]).toMatchObject({ tool: 'send_media', state: 'SUCCEEDED' })
+      .orderBy(aiToolAction.ordinal)
+    expect(actions.map((a) => ({ tool: a.tool, state: a.state, ordinal: a.ordinal }))).toEqual([
+      { tool: 'record', state: 'SUCCEEDED', ordinal: 0 },
+      { tool: 'record', state: 'SUCCEEDED', ordinal: 1 },
+      { tool: 'send_media', state: 'SUCCEEDED', ordinal: 2 },
+    ])
+    expect(
+      (
+        await listInternalNotes(db, {
+          workspaceId: f.workspaceId,
+          userId: f.ownerId,
+          conversationId: received.conversationId,
+        })
+      ).notes,
+    ).toHaveLength(2)
   })
   it('executes an authorized handoff once through assignment history and retains HUMAN_ONLY', async () => {
     const f = await createFixture(db)

@@ -1,12 +1,58 @@
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { AiResponseError, type CommitAiResponseResult, commitAiResponse } from './ai-responses'
 import { type AiToolCall, instructionTools, validateAiToolCalls } from './ai-tools'
 import { type AssignmentResult, executeAssignment } from './assignments'
 import type { Database } from './database'
 import { createAiInternalNote } from './inbox-collaboration'
-import { aiMemberConfig, aiResponseRun, aiToolAction, conversation, workspace } from './schema'
+import {
+  aiMemberConfig,
+  aiResponseRun,
+  aiToolAction,
+  conversation,
+  knowledgeChunk,
+  knowledgeDocument,
+  mediaAsset,
+  workspace,
+} from './schema'
 
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
+export type AiToolSearchChunk = { id: string; text: string; mediaAssetId: string | null }
+
+export async function readAiToolSearchChunks(
+  db: Database | Transaction,
+  input: { workspaceId: string; knowledgeBaseId: string; ids: string[] },
+) {
+  const { ids } = input
+  if (!Array.isArray(ids) || ids.length > 6 || ids.some((id) => typeof id !== 'string'))
+    throw new AiResponseError('INVALID_REQUEST')
+  const chunks = ids.length
+    ? await db
+        .select({
+          id: knowledgeChunk.id,
+          text: knowledgeChunk.text,
+          mediaAssetId: knowledgeDocument.mediaAssetId,
+        })
+        .from(knowledgeChunk)
+        .innerJoin(knowledgeDocument, eq(knowledgeDocument.id, knowledgeChunk.knowledgeDocumentId))
+        .leftJoin(mediaAsset, eq(mediaAsset.id, knowledgeDocument.mediaAssetId))
+        .where(
+          and(
+            inArray(knowledgeChunk.id, ids),
+            eq(knowledgeChunk.workspaceId, input.workspaceId),
+            eq(knowledgeDocument.workspaceId, input.workspaceId),
+            eq(knowledgeDocument.knowledgeBaseId, input.knowledgeBaseId),
+            eq(knowledgeDocument.status, 'READY'),
+            sql`(${knowledgeDocument.mediaAssetId} is null or (${mediaAsset.inLibrary} and ${mediaAsset.deletedAt} is null))`,
+          ),
+        )
+    : []
+  if (chunks.length !== ids.length) throw new AiResponseError('INVALID_REQUEST')
+  return ids.map((id) => {
+    const chunk = chunks.find((chunk) => chunk.id === id)
+    if (!chunk) throw new AiResponseError('INVALID_REQUEST')
+    return chunk
+  })
+}
 type ActionInput = {
   runId: string
   ordinal: number
@@ -20,7 +66,7 @@ type ActionInput = {
 }
 
 // Workspace first, matching assignment and response commit lock ordering.
-async function lockActionRun(tx: Transaction, input: ActionInput) {
+async function lockActionRun(tx: Transaction, input: Pick<ActionInput, 'runId'>) {
   const [reference] = await tx
     .select({ workspaceId: conversation.workspaceId })
     .from(aiResponseRun)
@@ -62,7 +108,39 @@ async function cancelRevokedToolRun(tx: Transaction, runId: string) {
     .where(and(eq(aiResponseRun.id, runId), eq(aiResponseRun.state, 'GENERATING')))
 }
 
-export async function executeAiBuiltinAction(db: Database, input: ActionInput) {
+export async function cancelAiToolAuthorizationRun(db: Database, runId: string) {
+  await db.transaction(async (tx) => {
+    await lockActionRun(tx, { runId })
+    await cancelRevokedToolRun(tx, runId)
+  })
+}
+
+export async function failPendingAiToolActions(
+  db: Database,
+  input: { runId: string; unknown: boolean; failureCode: string },
+) {
+  await db
+    .update(aiToolAction)
+    .set({
+      state: input.unknown ? 'UNKNOWN' : 'FAILED',
+      failureCode: input.failureCode.slice(0, 100),
+      completedAt: new Date(),
+    })
+    .where(
+      and(eq(aiToolAction.runId, input.runId), inArray(aiToolAction.state, ['PENDING', 'RUNNING'])),
+    )
+}
+
+export async function executeAiBuiltinAction(
+  db: Database,
+  input: ActionInput,
+  search?: (input: {
+    workspaceId: string
+    knowledgeBaseId: string
+    query: string
+    actionId: string
+  }) => Promise<AiToolSearchChunk[]>,
+) {
   const claim = await db.transaction(async (tx) => {
     const run = await lockActionRun(tx, input)
     const [existing] = await tx
@@ -112,8 +190,81 @@ export async function executeAiBuiltinAction(db: Database, input: ActionInput) {
             arguments: input.call.arguments,
           })
           .returning()
-    return { action, guard: state === 'CANCELLED' ? guard : null }
+    return {
+      action,
+      guard: state === 'CANCELLED' ? guard : null,
+      knowledgeBaseId: run.configSnapshot?.knowledgeBaseId,
+    }
   })
+  if (input.call.tool === 'search' && ['RUNNING', 'SUCCEEDED'].includes(claim.action.state)) {
+    let ids = (claim.action.result?.chunkIds ?? []) as string[]
+    if (claim.action.state !== 'SUCCEEDED') {
+      if (!search || !claim.knowledgeBaseId) throw new AiResponseError('INVALID_REQUEST')
+      // Read-only retrieval and its provider calls happen after the durable claim, outside transactions.
+      const chunks = await search({
+        workspaceId: claim.action.workspaceId,
+        knowledgeBaseId: claim.knowledgeBaseId,
+        query: input.call.arguments.query,
+        actionId: claim.action.id,
+      })
+      ids = chunks.map((chunk) => chunk.id)
+      if (ids.length > 6 || new Set(ids).size !== ids.length)
+        throw new AiResponseError('INVALID_REQUEST')
+    }
+    return db.transaction(async (tx) => {
+      const run = await lockActionRun(tx, input)
+      const [action] = await tx
+        .select()
+        .from(aiToolAction)
+        .where(eq(aiToolAction.id, claim.action.id))
+        .for('update')
+      const allowed = await checkTool(tx, input, run)
+      const guard = await commitAiResponse(tx, {
+        runId: run.id,
+        text: '',
+        stopCheckOnly: true,
+        handoffEvaluation: input.handoffEvaluation,
+      })
+      if (!allowed || guard?.kind !== 'CONTINUE') {
+        if (!allowed && guard?.kind === 'CONTINUE') await cancelRevokedToolRun(tx, run.id)
+        const [cancelled] =
+          action.state === 'SUCCEEDED'
+            ? [action]
+            : await tx
+                .update(aiToolAction)
+                .set({
+                  state: 'CANCELLED',
+                  failureCode: 'RUN_AUTHORIZATION_CHANGED',
+                  completedAt: new Date(),
+                })
+                .where(eq(aiToolAction.id, action.id))
+                .returning()
+        return { action: cancelled, result: guard, withheld: true }
+      }
+      // Re-read canonical authorized content even when reusing an already successful search.
+      const ordered = await readAiToolSearchChunks(tx, {
+        workspaceId: run.workspaceId,
+        knowledgeBaseId: run.configSnapshot?.knowledgeBaseId ?? '',
+        ids,
+      })
+      await tx
+        .update(aiResponseRun)
+        .set({
+          retrievedChunkIds: [...new Set([...(run.retrievedChunkIds ?? []), ...ids])],
+          updatedAt: new Date(),
+        })
+        .where(eq(aiResponseRun.id, run.id))
+      const [completed] =
+        action.state === 'SUCCEEDED'
+          ? [action]
+          : await tx
+              .update(aiToolAction)
+              .set({ state: 'SUCCEEDED', result: { chunkIds: ids }, completedAt: new Date() })
+              .where(eq(aiToolAction.id, action.id))
+              .returning()
+      return { action: completed, result: { kind: 'CONTINUE' as const }, searchChunks: ordered }
+    })
+  }
   if (claim.action.state !== 'RUNNING') return { action: claim.action, result: claim.guard }
   // Claim is durable before execution. Database effects and their successful receipt commit together.
   return db.transaction(async (tx) => {

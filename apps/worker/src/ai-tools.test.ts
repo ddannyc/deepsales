@@ -34,6 +34,7 @@ describe('authorized built-in tool output', () => {
       knowledgeChunks: [],
     }
     expect(await provider.generateResponse(input)).toMatchObject({ toolCalls })
+    await expect(provider.generateResponse({ ...input, toolsDisabled: true })).rejects.toThrow()
     for (const calls of [
       [{ tool: 'handoff', arguments: { assigneeMemberId: crypto.randomUUID() } }],
       [{ tool: 'send_media', arguments: { url: 'https://example.com/file' } }],

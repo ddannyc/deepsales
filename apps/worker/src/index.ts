@@ -18,6 +18,7 @@ import {
   claimKnowledgeDocument,
   claimOutboundMessage,
   clearCustomerMemory,
+  cancelAiToolAuthorizationRun,
   closeConversation,
   commitAiResponse,
   completeFacebookInboundAttachment,
@@ -52,6 +53,7 @@ import {
   failFacebookInboundAttachment,
   failKnowledgeDocument,
   failOutboundMessage,
+  failPendingAiToolActions,
   finishAiOperation,
   getAiFacebookAdvertisingContext,
   getAiMemberConfig,
@@ -142,6 +144,7 @@ import {
   AIEmbeddingError,
   AIOutputError,
   AIProviderError,
+  type AiResponseInput,
   ALIBABA_EMBEDDING_PROVIDER,
   ALIBABA_LLM_PROVIDER,
   aiMemberRuntimeSnapshotSchema,
@@ -1975,6 +1978,7 @@ app.post('/api/workspaces/:workspaceId/conversations/:conversationId/suggestions
       )
       const decision = await llm.generateResponse({
         instructions: record.snapshot.instructions,
+        toolsDisabled: true,
         variableInput: context.variableInput,
         now: new Date(context.variableInput.capturedAt),
         responseLanguage: record.snapshot.responseLanguage,
@@ -3681,7 +3685,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         },
         meteredFetch,
       )
-      let retrievedChunks: Awaited<ReturnType<typeof retrieveKnowledgeChunks>> = []
+      let retrievedChunks: AiResponseInput['knowledgeChunks'] = []
       try {
         retrievedChunks = await withDatabase(env, (db) =>
           retrieveKnowledgeChunks(db, embeddingProvider, env, {
@@ -3704,7 +3708,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         }
       }
 
-      const retrievedChunkIds = retrievedChunks.map(({ id }) => id)
+      let retrievedChunkIds = retrievedChunks.map(({ id }) => id)
       const recorded = await withDatabase(env, (db) =>
         recordAiResponseRetrievedChunks(db, { runId: claimed.id, chunkIds: retrievedChunkIds }),
       )
@@ -3722,7 +3726,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         },
         meteredFetch,
       )
-      const decision = await llmProvider.generateResponse({
+      const responseInput: AiResponseInput = {
         automaticLanguageEnabled: currentSnapshot.automaticLanguageEnabled,
         establishedLanguage: currentSnapshot.automaticLanguageEnabled
           ? claimed.replyLanguage
@@ -3741,8 +3745,9 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         history: claimed.history,
         advertisingContext,
         knowledgeChunks: retrievedChunks,
-      })
-      const replyConfig = {
+      }
+      let decision = await llmProvider.generateResponse(responseInput)
+      let replyConfig = {
         ...currentSnapshot,
         responseLanguage: currentSnapshot.automaticLanguageEnabled
           ? (decision.languageSelection?.language ?? currentSnapshot.responseLanguage)
@@ -3761,7 +3766,7 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         replyConfig,
         retrievedChunks,
       )
-      const policy = applyHandoffPolicy(grounded.decision, replyConfig)
+      let policy = applyHandoffPolicy(grounded.decision, replyConfig)
       if (policy.kind === 'HANDOFF') {
         await withDatabase(env, (db) =>
           finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
@@ -3785,6 +3790,12 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
       }
 
       let toolStopped = false
+      const toolResults: { tool: string; state: string }[] = []
+      const searches: {
+        ordinal: number
+        call: Extract<NonNullable<typeof decision.toolCalls>[number], { tool: 'search' }>
+        chunks: AiResponseInput['knowledgeChunks']
+      }[] = []
       const toolCalls = 'toolCalls' in policy.decision ? (policy.decision.toolCalls ?? []) : []
       for (const [ordinal, call] of toolCalls.entries()) {
         const guard = await commitReply({ runId: claimed.id, text: '', stopCheckOnly: true })
@@ -3794,31 +3805,147 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
           break
         }
         const executed = await withDatabase(env, (db) =>
-          executeAiBuiltinAction(db, {
-            runId: claimed.id,
-            ordinal,
-            call,
-            handoffEvaluation,
-            noticeText: handoffNotice(currentSnapshot.responseLanguage),
-            reply: {
-              text: policy.decision.response,
-              languageSelection: currentSnapshot.automaticLanguageEnabled
-                ? decision.languageSelection
-                : undefined,
-              collectedProperties: decision.collectedProperties,
-              appendedTags: decision.appendedTags,
+          executeAiBuiltinAction(
+            db,
+            {
+              runId: claimed.id,
+              ordinal,
+              call,
+              handoffEvaluation,
+              noticeText: handoffNotice(currentSnapshot.responseLanguage),
+              reply: {
+                text: policy.decision.response,
+                languageSelection: currentSnapshot.automaticLanguageEnabled
+                  ? decision.languageSelection
+                  : undefined,
+                collectedProperties: decision.collectedProperties,
+                appendedTags: decision.appendedTags,
+              },
             },
-          }),
+            async (search) => {
+              const toolFetch = meteredAiFetch(
+                (work) => withDatabase(env, work),
+                {
+                  id: claimed.id,
+                  workspaceId: claimed.workspaceId,
+                  memberId: claimed.memberId,
+                  configVersionId: claimed.configVersionId,
+                  kind: claimed.followUp ? 'FOLLOW_UP' : 'LIVE_REPLY',
+                },
+                `TOOL:${ordinal}`,
+              )
+              const provider = createAlibabaEmbeddingProvider(
+                {
+                  provider: env.EMBEDDING_PROVIDER,
+                  apiKey: env.AI_API_KEY,
+                  baseUrl: env.AI_BASE_URL,
+                  model: env.EMBEDDING_MODEL,
+                  dimensions: env.EMBEDDING_DIMENSIONS,
+                },
+                toolFetch,
+              )
+              return withDatabase(env, (db) => retrieveKnowledgeChunks(db, provider, env, search))
+            },
+          ),
         )
         if ('handoff' in executed && executed.handoff)
           await publishAiHandoffResult(env, claimed, executed.handoff)
+        let actionResult = executed.result
+        if (
+          actionResult?.kind === 'HANDOFF_REQUIRED' ||
+          actionResult?.kind === 'CUSTOM_HANDOFF_CHECK_REQUIRED'
+        ) {
+          actionResult = await commitReply({ runId: claimed.id, text: '', stopCheckOnly: true })
+          if (actionResult?.kind === 'CONTINUE')
+            await withDatabase(env, (db) => cancelAiToolAuthorizationRun(db, claimed.id))
+        }
         if (
           executed.action.state !== 'SUCCEEDED' ||
+          ('withheld' in executed && executed.withheld) ||
           ['skip', 'handoff', 'send_media'].includes(call.tool)
         ) {
-          await publishAiReplyResult(env, claimed, executed.result)
+          await publishAiReplyResult(env, claimed, actionResult)
           toolStopped = true
           break
+        }
+        toolResults.push({ tool: call.tool, state: executed.action.state })
+        if (call.tool === 'search' && 'searchChunks' in executed && executed.searchChunks) {
+          searches.push({ ordinal, call, chunks: executed.searchChunks })
+          retrievedChunks = [
+            ...executed.searchChunks,
+            ...retrievedChunks.filter(
+              (chunk) => !executed.searchChunks.some((found) => found.id === chunk.id),
+            ),
+          ].slice(0, 6)
+          retrievedChunkIds = retrievedChunks.map((chunk) => chunk.id)
+        }
+      }
+      if (!toolStopped && searches.length) {
+        const finalFetch = meteredAiFetch(
+          (work) => withDatabase(env, work),
+          {
+            id: claimed.id,
+            workspaceId: claimed.workspaceId,
+            memberId: claimed.memberId,
+            configVersionId: claimed.configVersionId,
+            kind: claimed.followUp ? 'FOLLOW_UP' : 'LIVE_REPLY',
+          },
+          'TOOLS_REPLY',
+        )
+        decision = await createAlibabaLlmProvider(
+          {
+            provider: env.LLM_PROVIDER,
+            apiKey: env.AI_API_KEY,
+            baseUrl: env.AI_BASE_URL,
+            model: env.LLM_MODEL,
+          },
+          finalFetch,
+        ).generateResponse({
+          ...responseInput,
+          knowledgeChunks: retrievedChunks,
+          toolsDisabled: true,
+          toolResults,
+        })
+        for (const search of searches) {
+          const current = await withDatabase(env, (db) =>
+            executeAiBuiltinAction(db, {
+              runId: claimed.id,
+              ordinal: search.ordinal,
+              call: search.call,
+              handoffEvaluation,
+            }),
+          )
+          if (current.action.state !== 'SUCCEEDED' || ('withheld' in current && current.withheld)) {
+            await publishAiReplyResult(env, claimed, current.result)
+            toolStopped = true
+            break
+          }
+          if (
+            !('searchChunks' in current) ||
+            JSON.stringify(current.searchChunks) !== JSON.stringify(search.chunks)
+          )
+            throw new AIOutputError()
+        }
+        replyConfig = {
+          ...replyConfig,
+          responseLanguage: currentSnapshot.automaticLanguageEnabled
+            ? (decision.languageSelection?.language ?? currentSnapshot.responseLanguage)
+            : currentSnapshot.responseLanguage,
+        }
+        const finalGrounded = enforceGrounding(
+          decision,
+          retrievedChunkIds,
+          replyConfig,
+          retrievedChunks,
+        )
+        policy = applyHandoffPolicy(finalGrounded.decision, replyConfig)
+        if (!toolStopped && policy.kind === 'HANDOFF') {
+          await completeAiHandoff(env, claimed, {
+            reason: policy.decision.handoffReason ?? 'UNABLE_TO_ANSWER',
+            noticeText: handoffNotice(currentSnapshot.responseLanguage),
+            failureCode: 'TOOLS_REPLY_HANDOFF',
+          })
+          toolStopped = true
         }
       }
       if (toolStopped) {
@@ -3850,6 +3977,13 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
       if (error instanceof AiUsageError) {
+        await withDatabase(env, (db) =>
+          failPendingAiToolActions(db, {
+            runId: claimed.id,
+            unknown: error.code === 'OPERATION_PAUSED',
+            failureCode: error.code === 'OPERATION_PAUSED' ? 'TOOL_RESULT_UNKNOWN' : error.code,
+          }),
+        )
         await completeAiHandoff(env, claimed, {
           reason: 'PROVIDER_FAILURE',
           failureCode: error.code,
@@ -3872,6 +4006,13 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
       try {
+        await withDatabase(env, (db) =>
+          failPendingAiToolActions(db, {
+            runId: claimed.id,
+            unknown: false,
+            failureCode: aiFailureCode(error),
+          }),
+        )
         await withDatabase(env, (db) =>
           finishAiOperation(db, { operationId: claimed.id, state: 'FAILED' }),
         )
