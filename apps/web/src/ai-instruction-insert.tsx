@@ -13,11 +13,13 @@ export function AiInstructionInsert({
   memberId,
   disabled,
   onInsert,
+  immediate = false,
 }: {
   workspaceId: string
   memberId: string
   disabled: boolean
   onInsert: (text: string) => void
+  immediate?: boolean
 }) {
   const id = useId()
   const [variables, setVariables] = useState<{ key: string; label: string; type: string }[]>([])
@@ -102,7 +104,8 @@ export function AiInstructionInsert({
         </SelectContent>
       </Select>
       <p className="field-description">
-        工具引用随指令发布生效，仍检查当前授权和输入。测试台仅模拟写动作，不分配、不记录真实备注、不外发。
+        {immediate ? '回访规则保存后立即生效' : '工具引用随指令发布生效'}
+        ，仍检查当前授权和输入。测试台仅模拟写动作，不分配、不记录真实备注、不外发。
       </p>
       <p className="field-description">
         仅用于 AI 指令。不存在或无权限的值为 null，不臆造；属性最多 20 项、标签最多 50

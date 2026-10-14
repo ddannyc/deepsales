@@ -33,6 +33,7 @@ const e2eOwnerKeys = [
   'ai-tools',
   'ai-skills',
   'ai-follow-ups',
+  'ai-follow-up-tools',
   'ai-external-tools',
   'campaigns',
   'lifecycle',
@@ -445,6 +446,32 @@ async function startFakeAI() {
                   containsBusinessFacts: false,
                   usedChunkIds: [],
                   matchedSkillIds: classifier.skill_conditions.map(({ id }) => id).reverse(),
+                }),
+              },
+            },
+          ],
+        }),
+      )
+      return
+    }
+    if (
+      body.messages?.[0]?.content.includes('independently authorized proactive follow-up event') &&
+      body.messages[0].content.includes('[[tool:record]]')
+    ) {
+      response.end(
+        JSON.stringify({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Simulated follow-up ready.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  toolCalls: [
+                    { tool: 'record', arguments: { text: 'Private simulated follow-up note.' } },
+                  ],
                 }),
               },
             },

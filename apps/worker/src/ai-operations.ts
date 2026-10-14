@@ -536,6 +536,7 @@ export function aiOperationsRoutes(
               source: z.enum(['DRAFT', 'PUBLISHED', 'VERSION']),
               versionId: uuid.optional(),
               text: z.string().min(1).max(8_000),
+              followUpRuleId: uuid.optional(),
               sessionId: uuid.optional(),
               generation: z.number().int().positive().optional(),
               simulatedHandoffFacts: z

@@ -65,13 +65,19 @@ or tenant. Only configure APIs whose provider permissions and object semantics
 are understood. Typed parameters, bearer credentials and an allowlisted origin
 alone do not establish remote object ownership.
 
-Each stable action has one durable ledger slot and at most one external dispatch.
-The existing ordinal range 0–2 covers built-ins and external tools together for
-the entire logical turn, including retries and final generation. Successful
+Each stable action retains one durable ID and ordinal in the range 0–2. Migration
+0053 adds a conservative reserved execution-slot counter and durable retry time.
+The entire logical turn has at most three slots across built-ins, external calls
+and safe read retries; final generation cannot open a new action plan. Successful
 replays compare typed argument maps independently of JSON object key order and
 make no new provider request. An expired in-flight action becomes UNKNOWN,
-never a new dispatch. There is no generic automatic external retry or invented
-provider idempotency header. Unknown actions pause dependent generation, and
+never a new dispatch. Proven transient READ failures (transport, timeout, HTTP429
+or HTTP5xx) may retry under the same action ID, rule/event, operation and charge,
+after 30/120 seconds or a longer provider Retry-After. Each retry reserves another
+slot atomically and rechecks current definitions, inputs, ownership and grants;
+exhaustion stops dependent replies. Replaying success consumes no slot. Other
+failures terminate, and dispatched WRITE failures remain UNKNOWN. There is no
+invented provider idempotency header. Unknown actions pause dependent generation, and
 outstanding UNKNOWN actions block further external actions in that Conversation,
 including attempts from a later customer input. Human handling must investigate
 the provider's authoritative records; closing/handling a conversation does not

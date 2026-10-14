@@ -71,6 +71,148 @@ describe.skipIf(!connectionString)('AI operations routes', () => {
   )
   afterAll(() => pool.end())
   afterEach(() => vi.unstubAllGlobals())
+  it('simulates a saved follow-up rule with its own variables and tools without consuming a live event', async () => {
+    const f = await fixture()
+    const ruleId = crypto.randomUUID()
+    expect(
+      (
+        await f.call(`/${f.aiId}/follow-ups`, 'POST', {
+          id: ruleId,
+          name: 'Check in',
+          enabled: false,
+          timer: 'LAST_AI_REPLY',
+          delaySeconds: 300,
+          instructions: 'Use {{system.timeZone}} and {{customer.email}}. [[tool:record]]',
+          groups: [],
+        })
+      ).status,
+    ).toBe(201)
+    let observedPrompt = ''
+    const calls = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const prompt = JSON.parse(String(init?.body))
+        .messages.map((item: { content: string }) => item.content)
+        .join('\n') as string
+      observedPrompt = prompt
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                decision: 'ANSWER',
+                response: 'Simulated follow-up ready.',
+                handoffReason: null,
+                containsBusinessFacts: false,
+                usedChunkIds: [],
+                toolCalls: [{ tool: 'record', arguments: { text: 'Simulated follow-up note' } }],
+              }),
+            },
+          },
+        ],
+      })
+    })
+    vi.stubGlobal('fetch', calls)
+    const input = {
+      id: crypto.randomUUID(),
+      source: 'DRAFT',
+      text: 'Earlier setup question',
+      followUpRuleId: ruleId,
+    }
+    const response = await f.call(`/${f.aiId}/test`, 'POST', input)
+    expect(response.status).toBe(200)
+    expect(observedPrompt).toContain('independently authorized proactive follow-up event')
+    expect(observedPrompt).toContain('"system.timeZone":"UTC"')
+    expect(observedPrompt).toContain('"customer.email":null')
+    expect(observedPrompt).not.toMatch(/<customer_messages>\s*<message/)
+    expect(await response.json()).toMatchObject({
+      operation: { state: 'COMPLETED', output: { followUpTest: { ruleId, revision: 1 } } },
+      actions: [{ tool: 'record', simulated: true, state: 'SUCCEEDED' }],
+    })
+    expect((await f.call(`/${f.aiId}/test`, 'POST', input)).status).toBe(200)
+    expect(calls).toHaveBeenCalledOnce()
+    expect(
+      await db.select().from(aiFollowUpEvent).where(eq(aiFollowUpEvent.ruleId, ruleId)),
+    ).toEqual([])
+    expect(
+      await db.select().from(conversation).where(eq(conversation.workspaceId, f.workspaceId)),
+    ).toEqual([])
+  })
+  it.each(['rule', 'clear'] as const)(
+    'withholds sandbox follow-up actions after %s changes during generation',
+    async (change) => {
+      const f = await fixture(),
+        ruleId = crypto.randomUUID(),
+        sessionId = crypto.randomUUID()
+      const rule = {
+        id: ruleId,
+        name: 'Check in',
+        enabled: false,
+        timer: 'LAST_AI_REPLY',
+        delaySeconds: 300,
+        instructions: '[[tool:record]]',
+        groups: [],
+      }
+      expect((await f.call(`/${f.aiId}/follow-ups`, 'POST', rule)).status).toBe(201)
+      expect(
+        (
+          await f.call(`/${f.aiId}/sessions`, 'POST', {
+            id: sessionId,
+            source: 'DRAFT',
+            customer: { properties: [], tags: [], source: '', language: '', memory: '' },
+          })
+        ).status,
+      ).toBe(201)
+      vi.stubGlobal('fetch', async () => {
+        if (change === 'rule')
+          expect(
+            (
+              await f.call(`/${f.aiId}/follow-ups`, 'POST', {
+                ...rule,
+                revision: 1,
+                instructions: 'Changed requirements.',
+              })
+            ).status,
+          ).toBe(201)
+        else
+          expect(
+            (await f.call(`/${f.aiId}/sessions/${sessionId}/clear`, 'POST', { generation: 1 }))
+              .status,
+          ).toBe(200)
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  decision: 'ANSWER',
+                  response: 'Must remain withheld.',
+                  handoffReason: null,
+                  containsBusinessFacts: false,
+                  usedChunkIds: [],
+                  toolCalls: [{ tool: 'record', arguments: { text: 'Late note' } }],
+                }),
+              },
+            },
+          ],
+        })
+      })
+      const id = crypto.randomUUID()
+      const response = await f.call(`/${f.aiId}/test`, 'POST', {
+        id,
+        source: 'DRAFT',
+        text: 'Earlier context',
+        followUpRuleId: ruleId,
+        sessionId,
+        generation: 1,
+      })
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({
+        operation: { state: change === 'clear' ? 'CANCELLED' : 'FAILED' },
+        actions: [],
+      })
+      expect(
+        await db.select().from(aiFollowUpEvent).where(eq(aiFollowUpEvent.ruleId, ruleId)),
+      ).toEqual([])
+    },
+  )
   it('selects the first matching skill in the sandbox and simulates only its tools', async () => {
     const f = await fixture()
     const skills = [
