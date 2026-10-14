@@ -14,6 +14,9 @@ export const BUILTIN_AI_TOOLS = [
   },
 ] as const
 export type BuiltinAiTool = (typeof BUILTIN_AI_TOOLS)[number]['id']
+export function aiToolInstructions(instructions: string, followUpInstructions?: string | null) {
+  return [instructions, followUpInstructions].filter(Boolean).join('\n')
+}
 export type AiToolReference = BuiltinAiTool | `external:${string}`
 export type AiToolCall =
   | { tool: 'external'; arguments: { definitionId: string; values: Record<string, unknown> } }

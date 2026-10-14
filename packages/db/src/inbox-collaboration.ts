@@ -1,6 +1,7 @@
 import { and, desc, eq, getTableColumns, sql } from 'drizzle-orm'
 import { commitAiResponse } from './ai-responses'
-import { aiSelectedSkillInstructions, selectedAiSkillId } from './ai-skills'
+import { selectedAiSkillId } from './ai-skills'
+import { readAiRunToolInstructions } from './ai-tool-authorization'
 import { instructionTools } from './ai-tools'
 import type { Database } from './database'
 import { assertInboxConversationAccess, InboxError } from './inbox'
@@ -51,18 +52,20 @@ export async function createAiInternalNote(
       .innerJoin(aiMemberConfig, eq(aiMemberConfig.memberId, member.id))
       .innerJoin(aiOperation, eq(aiOperation.id, aiResponseRun.id))
       .where(eq(aiResponseRun.id, input.runId))
+    const authorized = author
+      ? await readAiRunToolInstructions(
+          tx,
+          input.runId,
+          author.frozen,
+          author.current,
+          selectedAiSkillId(author.operationOutput),
+        )
+      : null
     if (
       !author ||
-      !instructionTools(
-        author.frozen
-          ? aiSelectedSkillInstructions(author.frozen, selectedAiSkillId(author.operationOutput))
-          : '',
-      ).includes('record') ||
-      !instructionTools(
-        author.current
-          ? aiSelectedSkillInstructions(author.current, selectedAiSkillId(author.operationOutput))
-          : '',
-      ).includes('record')
+      !authorized ||
+      !instructionTools(authorized.frozen).includes('record') ||
+      !instructionTools(authorized.current).includes('record')
     )
       throw new InboxError('INVALID_REQUEST', 'Tool is unavailable')
     await tx
