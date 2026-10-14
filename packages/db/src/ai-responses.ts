@@ -663,6 +663,8 @@ export async function recoverStaleAiResponseRuns(
 
 export type CommitAiResponseResult =
   | { kind: 'CONTINUE' }
+  | { kind: 'SKIPPED'; workspaceId: string; conversationId: string }
+  | { kind: 'UNPARSED_FALLBACK_REQUIRED'; text: string }
   | { kind: 'HANDOFF_CHECK_REQUIRED' }
   | { kind: 'HANDOFF_REQUIRED'; rule: { id: string; revision: number } }
   | {
@@ -694,6 +696,7 @@ export async function commitAiResponse(
   input: {
     runId: string
     text: string
+    unparsedInput?: boolean
     stopCheckOnly?: boolean
     checkHandoffBeforeStop?: boolean
     handoffEvaluation?: AiHandoffEvaluation
@@ -705,7 +708,10 @@ export async function commitAiResponse(
   },
 ): Promise<CommitAiResponseResult> {
   let text = input.text.trim()
-  if (!input.stopCheckOnly && (!text || text.length > MAX_AI_RESPONSE_TEXT_LENGTH)) {
+  if (
+    !input.stopCheckOnly &&
+    ((!text && !input.unparsedInput) || text.length > MAX_AI_RESPONSE_TEXT_LENGTH)
+  ) {
     throw new AiResponseError('INVALID_REQUEST', 'AI response text is invalid')
   }
   const now = input.now ?? new Date()
@@ -758,6 +764,7 @@ export async function commitAiResponse(
         configSnapshot: aiResponseRun.configSnapshot,
         retrievedChunkIds: aiResponseRun.retrievedChunkIds,
         customerMemoryInput: aiResponseRun.customerMemoryInput,
+        unparsedFallbackText: aiResponseRun.unparsedFallbackText,
         propertyCollection: aiResponseRun.propertyCollection,
         tagCollection: aiResponseRun.tagCollection,
       })
@@ -945,6 +952,41 @@ export async function commitAiResponse(
           .set({ aiStopState: null, updatedAt: now })
           .where(eq(conversation.id, current.id))
       if (input.stopCheckOnly) return { kind: 'CONTINUE' as const }
+    }
+    if (!stopReason && input.unparsedInput) {
+      if (!run.configSnapshot?.unparsedFallbackEnabled) {
+        await tx
+          .update(aiResponseRun)
+          .set({
+            state: 'SKIPPED',
+            failureCode: 'UNPARSED_INPUT',
+            completedAt: now,
+            updatedAt: now,
+          })
+          .where(eq(aiResponseRun.id, run.id))
+        return {
+          kind: 'SKIPPED' as const,
+          workspaceId: current.workspaceId,
+          conversationId: current.id,
+        }
+      }
+      const phrases = run.configSnapshot.unparsedFallbackTexts ?? []
+      if (!phrases.length)
+        throw new AiResponseError('INVALID_REQUEST', 'Fallback phrases are unavailable')
+      if (!text) {
+        const selected =
+          run.unparsedFallbackText ??
+          phrases[crypto.getRandomValues(new Uint32Array(1))[0] % phrases.length]
+        if (!selected) throw new AiResponseError('INVALID_REQUEST')
+        if (!run.unparsedFallbackText)
+          await tx
+            .update(aiResponseRun)
+            .set({ unparsedFallbackText: selected, updatedAt: now })
+            .where(eq(aiResponseRun.id, run.id))
+        return { kind: 'UNPARSED_FALLBACK_REQUIRED' as const, text: selected }
+      }
+      if (!run.unparsedFallbackText)
+        throw new AiResponseError('INVALID_REQUEST', 'Fallback was not selected')
     }
     const mediaAssetId = stopReason ? stopRules.endingMediaAssetId : input.mediaAssetId
 
@@ -1158,7 +1200,9 @@ export async function commitAiResponse(
           ? 'AI_STOP_ENDING_UNAVAILABLE'
           : stopReason
             ? `AI_STOP_${stopReason}`
-            : null,
+            : input.unparsedInput
+              ? 'UNPARSED_FALLBACK'
+              : null,
         outputMessageId: created.id,
         completedAt: now,
         updatedAt: now,

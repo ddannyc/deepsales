@@ -3590,12 +3590,58 @@ export async function handleAiResponseBatch(batch: MessageBatch<unknown>, env: B
         continue
       }
       if (!inputMessages.length) {
-        await completeAiHandoff(env, claimed, {
-          reason: 'UNSUPPORTED_ATTACHMENT',
-          noticeText: handoffNotice(currentSnapshot.responseLanguage),
-          failureCode: 'UNSUPPORTED_ATTACHMENT',
-          failureMessage: 'AI cannot process attachment-only input',
-        })
+        let result = await commitReply({ runId: claimed.id, text: '', unparsedInput: true })
+        if (result?.kind === 'UNPARSED_FALLBACK_REQUIRED') {
+          const fallbackFetch = meteredAiFetch(
+            (work) => withDatabase(env, work),
+            {
+              id: claimed.id,
+              workspaceId: claimed.workspaceId,
+              memberId: claimed.memberId,
+              configVersionId: claimed.configVersionId,
+              kind: 'LIVE_REPLY',
+            },
+            'UNPARSED_FALLBACK',
+          )
+          const translated = await createAlibabaLlmProvider(
+            {
+              provider: env.LLM_PROVIDER,
+              apiKey: env.AI_API_KEY,
+              baseUrl: env.AI_BASE_URL,
+              model: env.LLM_MODEL,
+            },
+            fallbackFetch,
+          ).generateResponse({
+            purpose: 'TRANSLATION',
+            history: [],
+            instructions: '',
+            responseLanguage: currentSnapshot.automaticLanguageEnabled
+              ? (claimed.replyLanguage ?? currentSnapshot.responseLanguage)
+              : currentSnapshot.responseLanguage,
+            messages: [{ id: claimed.inputLastMessageId, text: result.text }],
+            knowledgeChunks: [],
+          })
+          if (
+            translated.decision !== 'ANSWER' ||
+            translated.handoffReason !== null ||
+            translated.containsBusinessFacts ||
+            translated.usedChunkIds.length ||
+            translated.mediaAssetId ||
+            translated.handoffRuleId ||
+            translated.languageSelection ||
+            translated.collectedProperties?.length
+          )
+            throw new AIOutputError()
+          result = await commitReply({
+            runId: claimed.id,
+            text: translated.response,
+            unparsedInput: true,
+          })
+        }
+        await withDatabase(env, (db) =>
+          finishAiOperation(db, { operationId: claimed.id, state: 'COMPLETED' }),
+        )
+        await publishAiReplyResult(env, claimed, result)
         queueMessage.ack()
         continue
       }
