@@ -33,7 +33,11 @@ type Turn = {
   state: string
   input: string
   failureCode: string | null
-  output: { kind?: string; decision?: { response?: string } } | null
+  output: {
+    kind?: string
+    decision?: { response?: string }
+    skillSelection?: { id: string | null; name: string | null; configVersionId: string | null }
+  } | null
   chunkIds: string[]
 }
 type Options = {
@@ -398,6 +402,9 @@ export function AiTestBench({
               }[turn.state] ?? turn.state}
             </StatusBadge>
             {turn.output?.decision?.response && <p>测试 AI：{turn.output.decision.response}</p>}
+            {turn.output?.skillSelection && (
+              <p>命中技能：{turn.output.skillSelection.name ?? '未命中，使用普通回复'}</p>
+            )}
             {turn.failureCode && (
               <p className="field-description">
                 失败原因：

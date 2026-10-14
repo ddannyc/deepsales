@@ -1,5 +1,7 @@
 import { readAiExternalCatalog, simulateExternalTestAction } from '@deepsales/db'
 import {
+  aiSelectedSkillInstructions,
+  recordAiSkillSelection,
   type AiHandoffCondition,
   type AiTestContext,
   AiUsageError,
@@ -158,6 +160,51 @@ export async function executeAiTest(
       return
     }
   }
+  let responseInstructions = snapshot.instructions
+  if (snapshot.skills.length) {
+    const matcher = createAlibabaLlmProvider(
+      {
+        provider: env.LLM_PROVIDER,
+        apiKey: env.AI_API_KEY,
+        baseUrl: env.AI_BASE_URL,
+        model: env.LLM_MODEL,
+      },
+      meteredAiFetch(
+        (work) => withDb(env, work),
+        {
+          id: input.id,
+          workspaceId,
+          memberId: operation.memberId ?? undefined,
+          kind: 'TEST',
+          configVersionId: operation.configVersionId,
+        },
+        `SKILL_MATCH:${stage}`,
+      ),
+    )
+    const match = await matcher.generateResponse({
+      instructions: '',
+      toolsDisabled: true,
+      responseLanguage: snapshot.responseLanguage,
+      timeZone: snapshot.timeZone,
+      variableInput,
+      skillConditions: snapshot.skills.map(({ id, condition }) => ({ id, condition })),
+      messages: [{ id: input.id, text: input.text }],
+      history,
+      knowledgeChunks: [],
+      simulatedCustomer: testContext?.customer,
+    })
+    const selected = await withDb(env, (database) =>
+      recordAiSkillSelection(database, {
+        workspaceId,
+        memberId: operation.memberId as string,
+        operationId: operation.id,
+        actingUserId,
+        matchedSkillIds: match.matchedSkillIds ?? [],
+      }),
+    )
+    if (selected.kind === 'BLOCKED') return
+    responseInstructions = aiSelectedSkillInstructions(snapshot, selected.selection.id)
+  }
   let chunks: AiResponseInput['knowledgeChunks'] = []
   try {
     chunks = await retrieveKnowledgeChunks(db, embedding, env, {
@@ -194,7 +241,7 @@ export async function executeAiTest(
     automaticLanguageEnabled: snapshot.automaticLanguageEnabled,
     timeZone: snapshot.timeZone,
     naturalToneEnabled: snapshot.naturalToneEnabled,
-    instructions: snapshot.instructions,
+    instructions: responseInstructions,
     responseLanguage: snapshot.responseLanguage,
     messages: [{ id: input.id, text: input.text }],
     history,

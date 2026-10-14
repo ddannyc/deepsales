@@ -58,6 +58,7 @@ type Diagnostics = {
     state: string
     input: string
     output: {
+      skillSelection?: { id: string | null; name: string | null; configVersionId: string | null }
       kind?: string
       decision?: { response?: string; handoffReason?: string; mediaAssetId?: string | null }
     } | null
@@ -627,6 +628,15 @@ export function AiOperations({
                   diagnostics.operation?.configVersionId ??
                   '草稿或历史记录无版本'}
               </p>
+              {diagnostics.operation?.output?.skillSelection && (
+                <p data-testid="selected-skill">
+                  命中技能：
+                  {diagnostics.operation.output.skillSelection.name ?? '未命中，使用普通回复'}
+                  {diagnostics.operation.output.skillSelection.id && (
+                    <small> ? {diagnostics.operation.output.skillSelection.id}</small>
+                  )}
+                </p>
+              )}
               {diagnostics.run?.failureCode && <p>{label(diagnostics.run.failureCode)}</p>}
               {diagnostics.run?.customerMemoryRevision != null && (
                 <p>长期摘要输入修订：{diagnostics.run.customerMemoryRevision}</p>
