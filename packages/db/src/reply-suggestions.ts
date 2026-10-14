@@ -1,12 +1,14 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import type { AiConversationContextMessage } from './ai-responses'
 import { readAiVariableInput, sameAiVariableSources } from './ai-variable-values'
-import type { AiVariableInput } from './ai-variables'
+import { type AiVariableInput, instructionVariableKeys } from './ai-variables'
+import { memoryChannelsAllowed } from './customer-memory'
 import type { Database } from './database'
 import { assertInboxConversationAccess } from './inbox'
 import { ReplyError } from './outbound'
 import {
   aiMemberConfig,
+  aiOperation,
   channelIdentity,
   conversation,
   knowledgeBase,
@@ -98,6 +100,8 @@ export async function createReplySuggestion(
       if ((await latestSuggestionInput(tx, input.conversationId))?.id !== existing.inputMessageId)
         throw new ReplyError('INVALID_REQUEST', 'Suggestion is stale')
       await assertAiAccess(tx, input.workspaceId, channelId, existing.aiMemberId)
+      if (existing.suggestedText)
+        await assertReplySuggestionVariables(tx, existing, viewer.memberId)
       return existing
     }
     const [configured] = await tx
@@ -190,6 +194,7 @@ export async function readReplySuggestionContext(db: Database, input: Identity &
         ),
       )
     if (!record) throw new ReplyError('NOT_FOUND')
+    if (record.suggestedText) await assertReplySuggestionVariables(tx, record, viewer.memberId)
     await assertAiAccess(tx, input.workspaceId, channelId, record.aiMemberId)
     const latest = await latestSuggestionInput(tx, input.conversationId)
     if (latest?.id !== record.inputMessageId || !latest.text)
@@ -260,6 +265,7 @@ export async function completeReplySuggestion(
         ),
       )
     if (!record) throw new ReplyError('NOT_FOUND')
+    if (record.suggestedText) await assertReplySuggestionVariables(tx, record, viewer.memberId)
     await assertAiAccess(tx, input.workspaceId, channelId, record.aiMemberId)
     if ((await latestSuggestionInput(tx, input.conversationId))?.id !== record.inputMessageId)
       throw new ReplyError('INVALID_REQUEST', 'Suggestion is stale')
@@ -303,6 +309,74 @@ export async function completeReplySuggestion(
       .set({ suggestedText: input.text.trim(), chunkIds: input.chunkIds })
       .where(eq(replySuggestion.id, record.id))
       .returning()
+    if (input.variableInput) {
+      const saved = await tx
+        .update(aiOperation)
+        .set({
+          output: sql`coalesce(${aiOperation.output}, '{}'::jsonb) || ${JSON.stringify({ variableInput: input.variableInput })}::jsonb`,
+        })
+        .where(
+          and(
+            eq(aiOperation.id, record.id),
+            eq(aiOperation.workspaceId, record.workspaceId),
+            eq(aiOperation.memberId, record.aiMemberId),
+            eq(aiOperation.kind, 'SUGGESTION'),
+          ),
+        )
+        .returning({ id: aiOperation.id })
+      if (!saved.length && instructionVariableKeys(record.snapshot.instructions).length)
+        throw new ReplyError('INVALID_REQUEST', 'Suggestion provenance is unavailable')
+    } else if (instructionVariableKeys(record.snapshot.instructions).length)
+      throw new ReplyError('INVALID_REQUEST', 'Suggestion provenance is required')
     return updated
   })
+}
+
+export async function assertReplySuggestionVariables(
+  tx: Transaction,
+  record: typeof replySuggestion.$inferSelect,
+  viewerMemberId: string,
+) {
+  if (!instructionVariableKeys(record.snapshot.instructions).length) return
+  const [operation] = await tx
+    .select({ output: aiOperation.output })
+    .from(aiOperation)
+    .where(
+      and(
+        eq(aiOperation.id, record.id),
+        eq(aiOperation.workspaceId, record.workspaceId),
+        eq(aiOperation.memberId, record.aiMemberId),
+        eq(aiOperation.kind, 'SUGGESTION'),
+      ),
+    )
+  const captured = (operation?.output as { variableInput?: AiVariableInput } | null)?.variableInput
+  if (!captured) throw new ReplyError('INVALID_REQUEST', 'Suggestion provenance is unavailable')
+  if (
+    !captured.source ||
+    !(await memoryChannelsAllowed(
+      tx,
+      record.workspaceId,
+      record.aiMemberId,
+      captured.source.channelIds,
+    )) ||
+    !(await memoryChannelsAllowed(
+      tx,
+      record.workspaceId,
+      viewerMemberId,
+      captured.source.channelIds,
+    ))
+  )
+    throw new ReplyError('INVALID_REQUEST', 'Suggestion variable access is stale')
+  const current = await readAiVariableInput(tx, {
+    workspaceId: record.workspaceId,
+    conversationId: record.conversationId,
+    memberId: record.aiMemberId,
+    viewerMemberId,
+    instructions: record.snapshot.instructions,
+    timeZone: record.snapshot.timeZone ?? 'UTC',
+    context: String(captured.values['conversation.context'] ?? ''),
+    now: new Date(captured.capturedAt),
+  })
+  if (!sameAiVariableSources(captured, current))
+    throw new ReplyError('INVALID_REQUEST', 'Suggestion variables are stale')
 }
