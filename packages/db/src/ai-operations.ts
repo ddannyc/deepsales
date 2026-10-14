@@ -60,7 +60,7 @@ type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0]
 
 export class AiUsageError extends Error {
   constructor(
-    readonly code: 'QUOTA_EXHAUSTED' | 'OPERATION_PAUSED' | 'RETRY_LATER',
+    readonly code: 'QUOTA_EXHAUSTED' | 'OPERATION_PAUSED' | 'RETRY_LATER' | 'INVALID_RETRY_AFTER',
     readonly retryAfterMs = 0,
   ) {
     super(code)
@@ -69,6 +69,14 @@ export class AiUsageError extends Error {
 
 export function aiUsagePeriod(now = new Date()) {
   return now.toISOString().slice(0, 7)
+}
+
+export function aiRetryDeadline(delayMs: number, now = new Date()) {
+  if (!Number.isSafeInteger(delayMs) || delayMs < 0) return null
+  const timestamp = now.getTime() + delayMs
+  if (!Number.isSafeInteger(timestamp)) return null
+  const deadline = new Date(timestamp)
+  return Number.isFinite(deadline.getTime()) ? deadline : null
 }
 
 async function budgetTotals(tx: Database | Transaction, workspaceId: string, period: string) {
@@ -315,6 +323,12 @@ export async function finishAiProviderAttempt(
         eq(aiProviderAttempt.stage, attempt.stage),
       ),
     )
+  const delay = input.retryAfterMs ?? 0
+  const invalidBackoff = input.state === 'FAILED' && !aiRetryDeadline(delay, now)
+  const retryAt =
+    input.state === 'FAILED' && !invalidBackoff
+      ? aiRetryDeadline(Math.max(count >= 2 ? 120_000 : 30_000, delay), now)
+      : null
   await db
     .update(aiProviderAttempt)
     .set({
@@ -322,14 +336,15 @@ export async function finishAiProviderAttempt(
       httpStatus: input.httpStatus,
       response: input.response,
       completedAt: now,
-      retryAt:
-        input.state === 'FAILED'
-          ? new Date(
-              now.getTime() + Math.max(count >= 2 ? 120_000 : 30_000, input.retryAfterMs ?? 0),
-            )
-          : null,
+      retryAt,
     })
     .where(and(eq(aiProviderAttempt.id, input.attemptId), eq(aiProviderAttempt.state, 'STARTED')))
+  if (invalidBackoff)
+    await finishAiOperation(db, {
+      operationId: attempt.operationId,
+      state: 'FAILED',
+      failureCode: 'INVALID_RETRY_AFTER',
+    })
   if (input.state === 'UNKNOWN')
     await finishAiOperation(db, { operationId: attempt.operationId, state: 'UNKNOWN' })
 }

@@ -1,6 +1,10 @@
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  claimAiResponseRun,
+  reserveAiOperation,
+  claimAiExternalAction,
+  recordExternalActionReceipt,
   aiExternalPlugin,
   aiExternalTool,
   aiToolAction,
@@ -168,7 +172,75 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       ],
     })
 
-  it.each(['recover', 'exhaust', 'takeover', 'unknown'] as const)(
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1, 0.5, 9e15, Number.MAX_SAFE_INTEGER])(
+    'persists a known failed receipt with terminal invalid domain backoff (%s)',
+    async (delay) => {
+      const f = await ready('LAST_AI_REPLY'),
+        pluginId = crypto.randomUUID(),
+        toolId = crypto.randomUUID()
+      await db.insert(aiExternalPlugin).values({
+        id: pluginId,
+        workspaceId: f.workspaceId,
+        memberId: f.aiMemberId,
+        channelId: f.channelId,
+        name: 'Status API',
+        origin: 'https://tools.example.com',
+        enabled: true,
+        auth: 'NONE',
+      })
+      await db.insert(aiExternalTool).values({
+        id: toolId,
+        pluginId,
+        name: 'Status',
+        description: 'Read status',
+        enabled: true,
+        method: 'GET',
+        path: '/status',
+        effect: 'READ',
+        output: [{ name: 'status', path: ['status'], type: 'string' }],
+        objectScope: '',
+      })
+      await db
+        .update(aiFollowUpRule)
+        .set({ instructions: `[[tool:external:${toolId}]]` })
+        .where(eq(aiFollowUpRule.id, f.rule.id))
+      const job = await trigger(f)
+      if (!job) throw new Error('Missing follow-up')
+      expect(await claimAiResponseRun(db, { runId: job.runId })).toMatchObject({ kind: 'CLAIMED' })
+      await reserveAiOperation(db, {
+        id: job.runId,
+        workspaceId: f.workspaceId,
+        memberId: f.aiMemberId,
+        kind: 'FOLLOW_UP',
+      })
+      const claim = await claimAiExternalAction(db, {
+        runId: job.runId,
+        ordinal: 0,
+        call: { tool: 'external', arguments: { definitionId: toolId, values: {} } },
+      })
+      expect(claim.action.state).toBe('RUNNING')
+      await expect(
+        recordExternalActionReceipt(db, {
+          actionId: claim.action.id,
+          state: 'FAILED',
+          failureCode: 'EXTERNAL_HTTP_ERROR',
+          safeReadRetryAfterMs: delay,
+        }),
+      ).resolves.toMatchObject({
+        state: 'FAILED',
+        retryAt: null,
+        failureCode: 'EXTERNAL_RETRY_AFTER_INVALID',
+      })
+      const [persisted] = await db
+        .select()
+        .from(aiToolAction)
+        .where(eq(aiToolAction.id, claim.action.id))
+      expect(persisted).toMatchObject({ state: 'FAILED', retryAt: null })
+      const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, job.runId))
+      expect(run).toMatchObject({ state: 'FAILED', failureCode: 'EXTERNAL_RETRY_AFTER_INVALID' })
+    },
+  )
+  it.each(['recover', 'exhaust', 'takeover', 'unknown', 'long_delay', 'invalid_delay'] as const)(
     'bounds safe read recovery and preserves successful receipts (%s)',
     async (mode) => {
       const f = await ready('LAST_AI_REPLY')
@@ -216,7 +288,18 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       const external = vi.fn(async () => {
         if (mode === 'unknown') throw new Error('Response lost after dispatch')
         if (external.mock.calls.length === 1 || mode === 'exhaust')
-          return Response.json({}, { status: 503 })
+          return Response.json(
+            {},
+            {
+              status: 503,
+              headers:
+                mode === 'long_delay'
+                  ? { 'Retry-After': '172800' }
+                  : mode === 'invalid_delay'
+                    ? { 'Retry-After': '9000000000000' }
+                    : {},
+            },
+          )
         if (mode === 'takeover')
           await takeOverConversation(db, {
             workspaceId: f.workspaceId,
@@ -267,6 +350,36 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       const env = { ...f.env, AI_TOOL_ALLOWED_ORIGINS: '["https://tools.example.com"]' }
       const queued = queueMessage(job)
       await handleAiResponseBatch(batch('ai', queued), env)
+      if (mode === 'invalid_delay' || mode === 'long_delay') {
+        const [action] = await db
+          .select()
+          .from(aiToolAction)
+          .where(and(eq(aiToolAction.runId, job.runId), eq(aiToolAction.ordinal, 1)))
+        expect(action.state).toBe('FAILED')
+        if (mode === 'invalid_delay') {
+          expect(action).toMatchObject({
+            retryAt: null,
+            failureCode: 'EXTERNAL_RETRY_AFTER_INVALID',
+          })
+          const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, job.runId))
+          expect(run.state).toBe('FAILED')
+          expect(queued.retry).not.toHaveBeenCalled()
+        } else {
+          expect(action.retryAt?.getTime()).toBeGreaterThan(Date.now() + 172790000)
+          expect(queued.retry.mock.calls[0][0].delaySeconds).toBeLessThanOrEqual(86400)
+          const replay = queueMessage(job)
+          await handleAiResponseBatch(batch('ai', replay), env)
+          expect(replay.retry.mock.calls[0][0].delaySeconds).toBeLessThanOrEqual(86400)
+          const [unchanged] = await db
+            .select()
+            .from(aiToolAction)
+            .where(eq(aiToolAction.id, action.id))
+          expect(unchanged).toMatchObject({ retryAt: action.retryAt, attemptCount: 1 })
+        }
+        expect(external).toHaveBeenCalledOnce()
+        expect(f.outbound).not.toHaveBeenCalled()
+        return
+      }
       if (mode === 'unknown') {
         await handleAiResponseBatch(batch('ai', queueMessage(job)), env)
         expect(queued.retry).not.toHaveBeenCalled()
@@ -471,6 +584,7 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       .select({ id: aiResponseRun.id })
       .from(aiResponseRun)
       .where(eq(aiResponseRun.conversationId, f.conversationId))
+      .orderBy(aiResponseRun.id)
     vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
       if (String(url).endsWith('/embeddings'))
         return Response.json({ data: [{ index: 0, embedding: vector() }] })
@@ -499,7 +613,8 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       await db
         .select({ id: aiResponseRun.id })
         .from(aiResponseRun)
-        .where(eq(aiResponseRun.conversationId, f.conversationId)),
+        .where(eq(aiResponseRun.conversationId, f.conversationId))
+        .orderBy(aiResponseRun.id),
     ).toEqual(before)
     const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, job.runId))
     expect(run).toMatchObject({
@@ -685,7 +800,7 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
     ).toHaveLength(0)
   })
 
-  it.each(['retry', 'unknown', 'invalid'] as const)(
+  it.each(['retry', 'unknown', 'invalid', 'invalid_retry'] as const)(
     'retains the same one-shot event after %s generation results',
     async (mode) => {
       const f = await ready('LAST_AI_REPLY')
@@ -697,6 +812,8 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
           return Response.json({ data: [{ index: 0, embedding: vector() }] })
         calls++
         if (mode === 'unknown') throw new Error('Network result unknown')
+        if (mode === 'invalid_retry')
+          return Response.json({}, { status: 429, headers: { 'Retry-After': '9000000000000' } })
         if (mode === 'invalid')
           return Response.json({ choices: [{ message: { content: '{broken' } }] })
         return calls === 1 ? Response.json({}, { status: 503 }) : answer()
@@ -721,6 +838,22 @@ describe.skipIf(!connectionString)('Proactive follow-up Worker flow', () => {
       } else {
         const [run] = await db.select().from(aiResponseRun).where(eq(aiResponseRun.id, job.runId))
         expect(run.state).toBe(mode === 'invalid' ? 'FAILED' : 'HANDOFF')
+        if (mode === 'invalid_retry') {
+          expect(queued.retry).not.toHaveBeenCalled()
+          const attempts = await db
+            .select()
+            .from(aiProviderAttempt)
+            .where(eq(aiProviderAttempt.operationId, job.runId))
+          expect(attempts.find((attempt) => attempt.httpStatus === 429)).toMatchObject({
+            state: 'FAILED',
+            retryAt: null,
+          })
+          const [operation] = await db
+            .select()
+            .from(aiOperation)
+            .where(eq(aiOperation.id, job.runId))
+          expect(operation).toMatchObject({ state: 'FAILED', failureCode: 'INVALID_RETRY_AFTER' })
+        }
         if (mode === 'unknown')
           expect(
             await db

@@ -1,11 +1,25 @@
 import {
   AiUsageError,
+  aiRetryDeadline,
   beginAiProviderAttempt,
   type Database,
   finishAiProviderAttempt,
   getAiProviderResponse,
   reserveAiOperation,
 } from '@deepsales/db'
+
+export function parseAiRetryAfter(value: string | null, now = new Date()) {
+  if (value === null) return 0
+  const text = value.trim()
+  let delayMs: number
+  if (/^\d+$/.test(text)) delayMs = Number(text) * 1000
+  else {
+    const timestamp = Date.parse(text)
+    if (!Number.isFinite(timestamp) || new Date(timestamp).toUTCString() !== text) return null
+    delayMs = Math.max(0, timestamp - now.getTime())
+  }
+  return aiRetryDeadline(delayMs, now) ? delayMs : null
+}
 
 // One logical charge includes retrieval and generation; embedding batches remain separate attempts.
 export function meteredAiFetch(
@@ -35,22 +49,17 @@ export function meteredAiFetch(
       .clone()
       .json()
       .catch(() => null)
-    const retryAfter = response.headers.get('retry-after')
-    const seconds = Number(retryAfter)
-    const retryAfterMs = retryAfter
-      ? Number.isFinite(seconds)
-        ? seconds * 1_000
-        : Math.max(0, Date.parse(retryAfter) - Date.now())
-      : 0
+    const retryAfterMs = response.ok ? 0 : parseAiRetryAfter(response.headers.get('retry-after'))
     await withDb((db) =>
       finishAiProviderAttempt(db, {
         attemptId: attempt.id,
         state: response.ok ? 'SUCCESS' : 'FAILED',
         httpStatus: response.status,
         response: response.ok ? payload : undefined,
-        retryAfterMs: Number.isFinite(retryAfterMs) ? retryAfterMs : 0,
+        retryAfterMs: retryAfterMs ?? NaN,
       }),
     )
+    if (retryAfterMs === null) throw new AiUsageError('INVALID_RETRY_AFTER')
     return response
   }
 }

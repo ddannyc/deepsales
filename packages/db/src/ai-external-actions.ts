@@ -1,4 +1,4 @@
-import { AiUsageError } from './ai-operations'
+import { aiRetryDeadline, AiUsageError } from './ai-operations'
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { AiResponseError, commitAiResponse } from './ai-responses'
 import { selectedAiSkillId } from './ai-skills'
@@ -395,8 +395,16 @@ export async function recordExternalActionReceipt(
       .for('update')
     if (!action || action.state === 'SUCCEEDED' || action.state === 'CANCELLED') return action
     let retryAt: Date | null = null
+    let failureCode = input.failureCode ?? null
+    const now = new Date()
+    const invalidBackoff =
+      input.state === 'FAILED' &&
+      input.safeReadRetryAfterMs !== undefined &&
+      !aiRetryDeadline(input.safeReadRetryAfterMs, now)
+    if (invalidBackoff) failureCode = 'EXTERNAL_RETRY_AFTER_INVALID'
     if (
       input.state === 'FAILED' &&
+      !invalidBackoff &&
       input.safeReadRetryAfterMs !== undefined &&
       action.runId &&
       !action.simulated
@@ -419,9 +427,9 @@ export async function recordExternalActionReceipt(
         guard?.kind === 'CONTINUE' &&
         (await readAiToolSlotCount(tx, action.runId)) < 3
       )
-        retryAt = new Date(
-          Date.now() +
-            Math.max(action.attemptCount >= 2 ? 120000 : 30000, input.safeReadRetryAfterMs),
+        retryAt = aiRetryDeadline(
+          Math.max(action.attemptCount >= 2 ? 120000 : 30000, input.safeReadRetryAfterMs),
+          now,
         )
     }
     const [saved] = await tx
@@ -430,7 +438,7 @@ export async function recordExternalActionReceipt(
         state: input.state,
         retryAt,
         result: input.result ?? null,
-        failureCode: input.failureCode ?? null,
+        failureCode,
         completedAt: new Date(),
       })
       .where(eq(aiToolAction.id, action.id))
@@ -440,7 +448,7 @@ export async function recordExternalActionReceipt(
         .update(aiResponseRun)
         .set({
           state: input.state === 'CANCELLED' ? 'CANCELLED' : 'FAILED',
-          failureCode: input.failureCode ?? 'EXTERNAL_RESULT_UNKNOWN',
+          failureCode: failureCode ?? 'EXTERNAL_RESULT_UNKNOWN',
           completedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -449,7 +457,7 @@ export async function recordExternalActionReceipt(
         .update(aiOperation)
         .set({
           state: input.state === 'UNKNOWN' ? 'UNKNOWN' : 'FAILED',
-          failureCode: input.failureCode ?? 'EXTERNAL_RESULT_UNKNOWN',
+          failureCode: failureCode ?? 'EXTERNAL_RESULT_UNKNOWN',
           updatedAt: new Date(),
         })
         .where(

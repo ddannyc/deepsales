@@ -256,6 +256,31 @@ describe.skipIf(!connectionString)('AI member configuration', () => {
     ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' })
   })
 
+  it.each([NaN, Infinity, -1, 0.5, 9e15, Number.MAX_SAFE_INTEGER])(
+    'retains failed provider receipts with invalid backoff (%s)',
+    async (retryAfterMs) => {
+      const f = await createFixture(db)
+      const id = randomUUID()
+      await reserveAiOperation(db, { id, workspaceId: f.workspaceId, kind: 'TEST' })
+      const attempt = await beginAiProviderAttempt(db, { operationId: id, stage: 'LLM' })
+      await expect(
+        finishAiProviderAttempt(db, {
+          attemptId: attempt.id,
+          state: 'FAILED',
+          httpStatus: 429,
+          retryAfterMs,
+        }),
+      ).resolves.toBeUndefined()
+      const [saved] = await db
+        .select()
+        .from(aiProviderAttempt)
+        .where(eq(aiProviderAttempt.id, attempt.id))
+      expect(saved).toMatchObject({ state: 'FAILED', retryAt: null })
+      const [operation] = await db.select().from(aiOperation).where(eq(aiOperation.id, id))
+      expect(operation).toMatchObject({ state: 'FAILED', failureCode: 'INVALID_RETRY_AFTER' })
+    },
+  )
+
   it('reserves a monthly hard limit concurrently and charges retries once', async () => {
     const f = await createFixture(db)
     const identity = { workspaceId: f.workspaceId, actingUserId: f.userId }

@@ -1,3 +1,4 @@
+import { parseAiRetryAfter } from './ai-usage'
 import {
   type ExternalOutput,
   type ExternalRequestDefinition,
@@ -120,17 +121,12 @@ export async function callExternalTool(
         }
         if (!response.ok) {
           void response.body?.cancel().catch(() => {})
-          const header = response.headers.get('retry-after')
-          const seconds = Number(header)
-          const retryAfterMs = header
-            ? Number.isFinite(seconds)
-              ? seconds * 1000
-              : Math.max(0, Date.parse(header) - Date.now())
-            : 0
+          const retryAfterMs = parseAiRetryAfter(response.headers.get('retry-after'))
+          if (retryAfterMs === null) throw new ExternalToolError('EXTERNAL_RETRY_AFTER_INVALID')
           throw new ExternalToolError(
             'EXTERNAL_HTTP_ERROR',
             response.status === 429 || response.status >= 500,
-            Number.isFinite(retryAfterMs) ? retryAfterMs : 0,
+            retryAfterMs,
           )
         }
         if (
