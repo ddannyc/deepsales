@@ -11,6 +11,7 @@ import {
   autoAssignConversation,
   CustomerError,
   campaignDeliveryContext,
+  cancelAiToolAuthorizationRun,
   changeCustomerIdentity,
   chunkKnowledgeText,
   claimAiResponseRun,
@@ -18,7 +19,6 @@ import {
   claimKnowledgeDocument,
   claimOutboundMessage,
   clearCustomerMemory,
-  cancelAiToolAuthorizationRun,
   closeConversation,
   commitAiResponse,
   completeFacebookInboundAttachment,
@@ -162,6 +162,7 @@ import {
   matchedHandoffRuleId,
 } from './ai'
 import { aiOperationsRoutes } from './ai-operations'
+import { aiSkillSchema } from './ai-skills'
 import { meteredAiFetch } from './ai-usage'
 import { createAuth } from './auth'
 import type { Bindings } from './bindings'
@@ -386,6 +387,7 @@ const knowledgeTextInput = z
   .strict()
 const aiMemberConfigInput = z
   .object({
+    skills: z.array(aiSkillSchema).max(20).optional(),
     stopRules: aiStopRulesSchema.optional(),
     splitRepliesEnabled: z.boolean().optional(),
     automaticLanguageEnabled: z.boolean().optional(),

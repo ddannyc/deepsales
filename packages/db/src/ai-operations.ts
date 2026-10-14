@@ -439,6 +439,7 @@ export async function resolveTestConfiguration(
       automaticLanguageEnabled: config.automaticLanguageEnabled,
       timeZone: config.timeZone,
       instructions: config.instructions,
+      skills: config.skills,
       responseLanguage: config.responseLanguage,
       knowledgeBaseId: config.knowledgeBaseId,
       handoffOnCustomerRequest: config.handoffOnCustomerRequest,

@@ -1215,6 +1215,7 @@ export const knowledgeBase = pgTable(
 )
 
 export type AiMemberRuntimeSnapshot = {
+  skills?: import('./ai-skills').AiSkill[]
   stopRules?: AiStopRules
   unparsedFallbackEnabled?: boolean
   unparsedFallbackTexts?: string[]
@@ -1301,6 +1302,7 @@ export const aiMemberConfig = pgTable('ai_member_config', {
     .primaryKey()
     .references(() => member.id, { onDelete: 'cascade' }),
   instructions: text().default('').notNull(),
+  skills: jsonb().$type<import('./ai-skills').AiSkill[]>().default([]).notNull(),
   responseLanguage: text('response_language').default('').notNull(),
   knowledgeBaseId: uuid('knowledge_base_id').references(() => knowledgeBase.id, {
     onDelete: 'set null',
