@@ -392,6 +392,18 @@ const aiMemberConfigInput = z
     handoffKeywords: z.array(z.string().max(100)).max(100).optional(),
     adLearningEnabled: z.boolean().optional(),
     naturalToneEnabled: z.boolean().optional(),
+    unparsedFallbackEnabled: z.boolean().optional(),
+    unparsedFallbackTexts: z
+      .array(
+        z
+          .string()
+          .trim()
+          .min(1)
+          .max(1000)
+          .refine((s) => Array.from(s).length <= 500),
+      )
+      .max(10)
+      .optional(),
     memoryEnabled: z.boolean().optional(),
     replyWaitEnabled: z.boolean().optional(),
     adMappings: z

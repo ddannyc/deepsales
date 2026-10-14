@@ -352,6 +352,18 @@ export const aiStopRulesSchema = z
 
 export const aiMemberRuntimeSnapshotSchema = z.object({
   stopRules: aiStopRulesSchema.default(EMPTY_AI_STOP_RULES),
+  unparsedFallbackEnabled: z.boolean().default(false),
+  unparsedFallbackTexts: z
+    .array(
+      z
+        .string()
+        .trim()
+        .min(1)
+        .max(1000)
+        .refine((s) => Array.from(s).length <= 500),
+    )
+    .max(10)
+    .default([]),
   splitRepliesEnabled: z.boolean().default(false),
   automaticLanguageEnabled: z.boolean().default(false),
   timeZone: aiTimeZoneSchema.default('UTC'),

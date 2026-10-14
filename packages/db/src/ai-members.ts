@@ -42,6 +42,8 @@ type QueryHandle = Database | Transaction
 
 export type AiMemberConfig = {
   stopRules: AiStopRules
+  unparsedFallbackEnabled: boolean
+  unparsedFallbackTexts: string[]
   splitRepliesEnabled: boolean
   automaticLanguageEnabled: boolean
   timeZone: string
@@ -70,6 +72,8 @@ export type AiMemberConfig = {
 
 export type UpdateAiMemberConfigInput = {
   stopRules?: AiStopRules
+  unparsedFallbackEnabled?: boolean
+  unparsedFallbackTexts?: string[]
   splitRepliesEnabled?: boolean
   automaticLanguageEnabled?: boolean
   timeZone?: string
@@ -126,6 +130,8 @@ export async function updateAiMemberConfig(db: Database, input: UpdateAiMemberCo
       await tx.insert(aiMemberConfig).values({
         memberId: target.id,
         stopRules: draft.stopRules ?? EMPTY_AI_STOP_RULES,
+        unparsedFallbackEnabled: draft.unparsedFallbackEnabled ?? false,
+        unparsedFallbackTexts: draft.unparsedFallbackTexts ?? [],
         splitRepliesEnabled: draft.splitRepliesEnabled ?? false,
         automaticLanguageEnabled: draft.automaticLanguageEnabled ?? false,
         timeZone: draft.timeZone ?? 'UTC',
@@ -192,6 +198,8 @@ export async function publishAiMemberConfig(
     if (!config.knowledgeBaseId) throw invalidConfiguration('Knowledge base is required')
     await assertKnowledgeBase(tx, input.workspaceId, config.knowledgeBaseId)
     if (!config.instructions.trim()) throw invalidConfiguration('Instructions are required')
+    if (config.unparsedFallbackEnabled && !config.unparsedFallbackTexts.length)
+      throw invalidConfiguration('Fallback needs at least one phrase')
     if (!config.responseLanguage.trim()) {
       throw invalidConfiguration('Response language is required')
     }
@@ -208,6 +216,8 @@ export async function publishAiMemberConfig(
 
     const snapshot: AiMemberRuntimeSnapshot = {
       stopRules: config.stopRules,
+      unparsedFallbackEnabled: config.unparsedFallbackEnabled,
+      unparsedFallbackTexts: config.unparsedFallbackTexts,
       splitRepliesEnabled: config.splitRepliesEnabled,
       automaticLanguageEnabled: config.automaticLanguageEnabled,
       timeZone: config.timeZone,
@@ -286,6 +296,8 @@ async function selectAiMemberConfig(
       memberDisplayName: member.displayName,
       memberStatus: member.status,
       configMemberId: aiMemberConfig.memberId,
+      unparsedFallbackEnabled: aiMemberConfig.unparsedFallbackEnabled,
+      unparsedFallbackTexts: aiMemberConfig.unparsedFallbackTexts,
       splitRepliesEnabled: aiMemberConfig.splitRepliesEnabled,
       automaticLanguageEnabled: aiMemberConfig.automaticLanguageEnabled,
       timeZone: aiMemberConfig.timeZone,
@@ -319,6 +331,8 @@ async function selectAiMemberConfig(
     memberDisplayName: row.memberDisplayName,
     memberStatus: row.memberStatus,
     instructions: row.instructions ?? '',
+    unparsedFallbackEnabled: row.unparsedFallbackEnabled ?? false,
+    unparsedFallbackTexts: row.unparsedFallbackTexts ?? [],
     splitRepliesEnabled: row.splitRepliesEnabled ?? false,
     automaticLanguageEnabled: row.automaticLanguageEnabled ?? false,
     timeZone: row.timeZone ?? 'UTC',
@@ -444,6 +458,8 @@ export async function restoreAiConfigVersion(
       .set({
         ...version.snapshot,
         stopRules: version.snapshot.stopRules ?? EMPTY_AI_STOP_RULES,
+        unparsedFallbackEnabled: version.snapshot.unparsedFallbackEnabled ?? false,
+        unparsedFallbackTexts: version.snapshot.unparsedFallbackTexts ?? [],
         splitRepliesEnabled: version.snapshot.splitRepliesEnabled ?? false,
         automaticLanguageEnabled: version.snapshot.automaticLanguageEnabled ?? false,
         timeZone: version.snapshot.timeZone ?? 'UTC',
@@ -461,6 +477,11 @@ export async function restoreAiConfigVersion(
 }
 
 function normalizeDraft(input: UpdateAiMemberConfigInput) {
+  if (
+    input.unparsedFallbackEnabled !== undefined &&
+    typeof input.unparsedFallbackEnabled !== 'boolean'
+  )
+    throw new AiMemberError('INVALID_REQUEST', 'Invalid fallback setting')
   if (input.memoryEnabled !== undefined && typeof input.memoryEnabled !== 'boolean')
     throw new AiMemberError('INVALID_REQUEST', 'Invalid customer memory setting')
   let stopRules: AiStopRules | undefined
@@ -484,6 +505,11 @@ function normalizeDraft(input: UpdateAiMemberConfigInput) {
   return {
     stopRules,
     instructions,
+    unparsedFallbackEnabled: input.unparsedFallbackEnabled,
+    unparsedFallbackTexts:
+      input.unparsedFallbackTexts === undefined
+        ? undefined
+        : normalizeFallbackTexts(input.unparsedFallbackTexts),
     splitRepliesEnabled: input.splitRepliesEnabled,
     automaticLanguageEnabled: input.automaticLanguageEnabled,
     timeZone: input.timeZone === undefined ? undefined : normalizeAiTimeZone(input.timeZone),
@@ -532,6 +558,8 @@ function cleanText(value: string, maxCodePoints: number, label: string) {
 function defaultConfig(memberId: string) {
   return {
     stopRules: EMPTY_AI_STOP_RULES,
+    unparsedFallbackEnabled: false,
+    unparsedFallbackTexts: [],
     splitRepliesEnabled: false,
     automaticLanguageEnabled: false,
     timeZone: 'UTC',
@@ -601,5 +629,15 @@ export function normalizeAdMappings(items: unknown): AdMapping[] {
     }
     ids.add(adId)
     return { adId, content }
+  })
+}
+
+function normalizeFallbackTexts(values: string[]) {
+  if (!Array.isArray(values) || values.length > 10)
+    throw new AiMemberError('INVALID_REQUEST', 'Too many fallback phrases')
+  return values.map((value) => {
+    const text = cleanText(value, 500, 'Fallback phrase')
+    if (!text) throw new AiMemberError('INVALID_REQUEST', 'Empty fallback phrase')
+    return text
   })
 }
